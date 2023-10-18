@@ -1,5 +1,7 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
+from typing import Union
+
 import glob
 import math
 import os
@@ -8,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
 from urllib.parse import urlparse
+from collections import deque
 
 import cv2
 import numpy as np
@@ -39,7 +42,6 @@ class LoadStreams:
         sources (str): The source input paths or URLs for the video streams.
         imgsz (int): The image size for processing, defaults to 640.
         vid_stride (int): Video frame-rate stride, defaults to 1.
-        buffer (bool): Whether to buffer input streams, defaults to False.
         running (bool): Flag to indicate if the streaming thread is running.
         mode (str): Set to 'stream' indicating real-time capture.
         imgs (list): List of image frames for each stream.
@@ -59,30 +61,43 @@ class LoadStreams:
         __len__: Return the length of the sources object.
     """
 
-    def __init__(self, sources='file.streams', imgsz=640, vid_stride=1, buffer=False):
-        """Initialize instance variables and check for consistent input stream shapes."""
+    def __init__(
+        self,
+        sources: str = 'file.streams',
+        imgsz: int = 640,
+        buffer_length: Union[str, int] = 'auto',
+        vid_fps: Union[str, int] = 'auto',
+    ) -> "LoadStreams":
+        """Initialize instance variables and check for consistent input stream shapes.
+        Args:
+            sources: File with streams.
+            buffer_length: Length of buffer. If -1 - auto mode.
+            vid_fps: New FPS for all videos. if 'auto', all videos will be aligned by min fps in streams.
+                     If `isinstance(vid_fps, int)` - all videos will be set to this value.
+                     If vid_fps == -1, fps alignment will not be applied.
+        """
         torch.backends.cudnn.benchmark = True  # faster for fixed-size inference
-        self.buffer = buffer  # buffer input streams
+        self.buffer_length = buffer_length  # max buffer length
         self.running = True  # running flag for Thread
         self.mode = 'stream'
         self.imgsz = imgsz
-        self.vid_stride = vid_stride  # video frame-rate stride
 
         sources = Path(sources).read_text().rsplit() if os.path.isfile(sources) else [sources]
         n = len(sources)
-        self.fps = [0] * n  # frames per second
-        self.frames = [0] * n
-        self.threads = [None] * n
-        self.caps = [None] * n  # video capture objects
-        self.imgs = [[] for _ in range(n)]  # images
-        self.shape = [[] for _ in range(n)]  # image shapes
         self.sources = [ops.clean_str(x) for x in sources]  # clean source names for later
+        self.imgs = []  # buffer with images
+        self.fps = [0] * n  # fps of each stream
+        self.frames = [0] * n  # number of frames in each stream
+        self.threads = [None] * n  # buffer stored streams
+        self.shape = [[] for _ in range(n)]
+        self.caps = [None] * n  # video capture objects
+        self.buffer_lengths = [0] * n  # keep buffer lengths
         for i, s in enumerate(sources):  # index, source
             # Start thread to read frames from video stream
             st = f'{i + 1}/{n}: {s}... '
             if urlparse(s).hostname in ('www.youtube.com', 'youtube.com', 'youtu.be'):  # if source is YouTube video
                 # YouTube format i.e. 'https://www.youtube.com/watch?v=Zgi9g1ksQHc' or 'https://youtu.be/LNwODJXcvt4'
-                s = get_best_youtube_url(s)
+                raise NotImplementedError(f'Kaggle, YouTube are not supported now.')
             s = eval(s) if s.isnumeric() else s  # i.e. s = '0' local webcam
             if s == 0 and (is_colab() or is_kaggle()):
                 raise NotImplementedError("'source=0' webcam not supported in Colab and Kaggle notebooks. "
@@ -92,21 +107,36 @@ class LoadStreams:
                 raise ConnectionError(f'{st}Failed to open {s}')
             w = int(self.caps[i].get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(self.caps[i].get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = self.caps[i].get(cv2.CAP_PROP_FPS)  # warning: may return 0 or nan
+            fps = self.caps[i].get(cv2.CAP_PROP_FPS)
+            # warning: may return 0 or nan
+            if not math.isfinite(fps) or fps == 0:
+                LOGGER.warning(f'{st}Warning ⚠️ Stream returned {fps} FPS, set defaut 30 FPS.')
             self.frames[i] = max(int(self.caps[i].get(cv2.CAP_PROP_FRAME_COUNT)), 0) or float(
                 'inf')  # infinite stream fallback
             self.fps[i] = max((fps if math.isfinite(fps) else 0) % 100, 0) or 30  # 30 FPS fallback
-
             success, im = self.caps[i].read()  # guarantee first frame
             if not success or im is None:
                 raise ConnectionError(f'{st}Failed to read images from {s}')
-            self.imgs[i].append(im)
+            stream_buffer_length = \
+                math.ceil(self.fps[i]) \
+                if (isinstance(buffer_length, str) and buffer_length == 'auto') \
+                    or buffer_length == -1 \
+                else buffer_length
+            self.buffer_lengths[i] = stream_buffer_length
+            buf = deque(maxlen=stream_buffer_length)
+            buf.append(im)
+            self.imgs.append(buf)
             self.shape[i] = im.shape
             self.threads[i] = Thread(target=self.update, args=([i, self.caps[i], s]), daemon=True)
             LOGGER.info(f'{st}Success ✅ ({self.frames[i]} frames of shape {w}x{h} at {self.fps[i]:.2f} FPS)')
-            self.threads[i].start()
+
+        self.new_fps = min(self.fps) if isinstance(vid_fps, str) and vid_fps == 'auto' else vid_fps  # fps alignment
         LOGGER.info('')  # newline
 
+        # run all threads
+        for i in range(n):
+            self.threads[i].start()
+        
         # Check for common shapes
         self.bs = self.__len__()
 
@@ -114,21 +144,20 @@ class LoadStreams:
         """Read stream `i` frames in daemon thread."""
         n, f = 0, self.frames[i]  # frame number, frame array
         while self.running and cap.isOpened() and n < (f - 1):
-            if len(self.imgs[i]) < 30:  # keep a <=30-image buffer
-                n += 1
-                cap.grab()  # .read() = .grab() followed by .retrieve()
-                if n % self.vid_stride == 0:
-                    success, im = cap.retrieve()
-                    if not success:
-                        im = np.zeros(self.shape[i], dtype=np.uint8)
-                        LOGGER.warning('WARNING ⚠️ Video stream unresponsive, please check your IP camera connection.')
-                        cap.open(stream)  # re-open stream if signal was lost
-                    if self.buffer:
-                        self.imgs[i].append(im)
-                    else:
-                        self.imgs[i] = [im]
+            success = cap.grab()  # .read() = .grab() followed by .retrieve()
+            if not success:
+                im = None
+                LOGGER.warning(f'WARNING ⚠️ Video stream {i} unresponsive, please check your IP camera connection.')
+                cap.open(stream)  # re-open stream if signal was lost
             else:
-                time.sleep(0.01)  # wait until the buffer is empty
+                success, im = cap.retrieve()
+                if not success:
+                    im = None
+                    LOGGER.warning(f'WARNING ⚠️ Cannot decode image from video stream {i}. Unknown error.')
+            self.imgs[i].append(im)
+            n += 1
+        else:
+            LOGGER.info(f'End of stream {i}.')
 
     def close(self):
         """Close stream loader and release resources."""
@@ -144,35 +173,32 @@ class LoadStreams:
         cv2.destroyAllWindows()
 
     def __iter__(self):
-        """Iterates through YOLO image feed and re-opens unresponsive streams."""
+        """Iterates through image feed and re-opens unresponsive streams."""
         self.count = -1
         return self
 
     def __next__(self):
         """Returns source paths, transformed and original images for processing."""
         self.count += 1
-
         images = []
-        for i, x in enumerate(self.imgs):
 
-            # Wait until a frame is available in each buffer
-            while not x:
+        # sleep to align fps
+        time.sleep(1 / self.new_fps)
+
+        for i, x in enumerate(self.imgs):
+            # If image is not available
+            if not x:
                 if not self.threads[i].is_alive() or cv2.waitKey(1) == ord('q'):  # q to quit
                     self.close()
                     raise StopIteration
-                time.sleep(1 / min(self.fps))
-                x = self.imgs[i]
-                if not x:
-                    LOGGER.warning(f'WARNING ⚠️ Waiting for stream {i}')
-
-            # Get and remove the first frame from imgs buffer
-            if self.buffer:
-                images.append(x.pop(0))
-
-            # Get the last frame, and clear the rest from the imgs buffer
+                LOGGER.warning(f'WARNING ⚠️ Waiting for stream {i}')
+                im = None
+            # Get the last element from buffer
             else:
-                images.append(x.pop(-1) if x else np.zeros(self.shape[i], dtype=np.uint8))
-                x.clear()
+                # Main process just read from buffer, not delete
+                im = x[-1]
+
+            images.append(im)
 
         return self.sources, images, None, ''
 
