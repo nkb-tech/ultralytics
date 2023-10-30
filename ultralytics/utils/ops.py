@@ -801,6 +801,23 @@ def clean_str(s):
 
 
 def process_nms_trt_results(preds: List[Tensor], names: List[str]) -> List[Tensor]:
+    """
+    Filter TensorRT-like bounding box structure via `max_det`
+
+    Args:
+        preds (List[torch.Tensor]): list of 
+            `num_dets` (shape: Bx1)
+            `bboxes` (shape: BxTOP_Kx4)
+            `labels` (shape: BxTOP_Kx1)
+            `scores` (shape: BxTOP_Kx1).
+            Order is not guaranteed but sync with names.
+        names (List[str]): list of outputs names like [`num_dets`, ...].
+
+    Returns:
+       (List[torch.Tensor]): YOLO-like list of length batch_size, where each element is a tensor of
+            shape (num_boxes, 6) containing the kept boxes, with columns
+            (x1, y1, x2, y2, confidence, class).
+    """
 
     named_dict = dict(zip(names, preds))  # dict and zip dont copy data
     outputs = []
