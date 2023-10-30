@@ -1,9 +1,13 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
 
+from typing import Tuple
+import random
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Graph, Tensor, Value
 
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv
 from .transformer import TransformerBlock
@@ -331,3 +335,114 @@ class BottleneckCSP(nn.Module):
         y1 = self.cv3(self.m(self.cv1(x)))
         y2 = self.cv2(x)
         return self.cv4(self.act(self.bn(torch.cat((y1, y2), 1))))
+    
+
+class Efficient_TRT_NMS(torch.autograd.Function):
+    """NMS block for YOLO-fused model for TensorRT."""
+
+    @staticmethod
+    def forward(
+        ctx: Graph,
+        boxes: Tensor,
+        scores: Tensor,
+        iou_threshold: float = 0.65,
+        score_threshold: float = 0.25,
+        max_output_boxes: int = 100,
+        background_class: int = -1,
+        box_coding: int = 0,
+        plugin_version: str = '1',
+        score_activation: int = 0,
+    ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        batch_size, num_boxes, num_classes = scores.shape
+        num_dets = torch.randint(0,
+                                 max_output_boxes, (batch_size, 1),
+                                 dtype=torch.int32)
+        boxes = torch.randn(batch_size, max_output_boxes, 4)
+        scores = torch.randn(batch_size, max_output_boxes)
+        labels = torch.randint(0,
+                               num_classes, (batch_size, max_output_boxes),
+                               dtype=torch.int32)
+
+        return num_dets, boxes, scores, labels
+
+    @staticmethod
+    def symbolic(
+        g,
+        boxes: Value,
+        scores: Value,
+        iou_threshold: float = 0.45,
+        score_threshold: float = 0.25,
+        max_output_boxes: int = 100,
+        background_class: int = -1,
+        box_coding: int = 0,
+        score_activation: int = 0,
+        plugin_version: str = '1',
+    ) -> Tuple[Value, Value, Value, Value]:
+        out = g.op('TRT::EfficientNMS_TRT',
+                   boxes,
+                   scores,
+                   iou_threshold_f=iou_threshold,
+                   score_threshold_f=score_threshold,
+                   max_output_boxes_i=max_output_boxes,
+                   background_class_i=background_class,
+                   box_coding_i=box_coding,
+                   plugin_version_s=plugin_version,
+                   score_activation_i=score_activation,
+                   outputs=4,
+                   )
+        nums_dets, boxes, scores, classes = out
+        return nums_dets, boxes, scores, classes
+    
+
+class NMS_ONNX(torch.autograd.Function):
+    @staticmethod
+    def forward(
+        ctx,
+        boxes: Value,
+        scores: Value,
+        detections_per_class,
+        iou_thresh,
+        score_thresh):
+        """
+        Symbolic method to export an NonMaxSupression ONNX models.
+
+        Args:
+            boxes (Tensor): An input tensor with shape [num_batches, spatial_dimension, 4].
+                have been multiplied original size here.
+            scores (Tensor): An input tensor with shape [num_batches, num_classes, spatial_dimension].
+                only one class score here.
+            detections_per_class (Tensor, optional): Integer representing the maximum number of
+                boxes to be selected per batch per class. It is a scalar.
+            iou_thresh (Tensor, optional): Float representing the threshold for deciding whether
+                boxes overlap too much with respect to IOU. It is scalar. Value range [0, 1].
+            score_thresh (Tensor, optional): Float representing the threshold for deciding when to
+                remove boxes based on score. It is a scalar.
+
+        Returns:
+            Tensor(int64): selected indices from the boxes tensor. [num_selected_indices, 3],
+                the selected index format is [batch_index, class_index, box_index].
+        """
+        batch = scores.shape[0]
+        num_det = random.randint(0, 100)
+        batches = torch.randint(0, batch, (num_det,)).sort()[0]
+        idxs = torch.arange(100, 100 + num_det)
+        zeros = torch.zeros((num_det,), dtype=torch.int64)
+        selected_indices = torch.cat([batches[None], zeros[None], idxs[None]], 0).T.contiguous()
+        selected_indices = selected_indices.to(torch.int64)
+        return selected_indices
+
+    @staticmethod
+    def symbolic(
+        g,
+        boxes,
+        scores,
+        detections_per_class,
+        iou_thresh,
+        score_thresh):
+        return g.op(
+            "NonMaxSuppression",
+            boxes,
+            scores,
+            detections_per_class,
+            iou_thresh,
+            score_thresh)

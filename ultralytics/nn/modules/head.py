@@ -9,7 +9,7 @@ from torch.nn.init import constant_, xavier_uniform_
 
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, make_anchors
 
-from .block import DFL, Proto
+from .block import DFL, Proto, Efficient_TRT_NMS
 from .conv import Conv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init_
@@ -394,3 +394,37 @@ class RTDETRDecoder(nn.Module):
         xavier_uniform_(self.query_pos_head.layers[1].weight)
         for layer in self.input_proj:
             xavier_uniform_(layer[0].weight)
+
+
+class PostDetectNMS(nn.Module):
+    """YOLOv8 NMS-fused detection model."""
+    export = True
+    shape = None
+    dynamic = False
+    iou_thres = 0.65
+    conf_thres = 0.25
+    max_det = 100
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+
+    def forward(self, x):
+        shape = x[0].shape
+        b, res, b_reg_num = shape[0], [], self.reg_max * 4
+        for i in range(self.nl):
+            res.append(torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1))
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (x.transpose(
+                0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.shape = shape
+        x = [i.view(b, self.no, -1) for i in res]
+        y = torch.cat(x, 2)
+        boxes, scores = y[:, :b_reg_num, ...], y[:, b_reg_num:, ...].sigmoid()
+        boxes = boxes.view(b, 4, self.reg_max, -1).permute(0, 1, 3, 2)
+        boxes = boxes.softmax(-1) @ torch.arange(self.reg_max).to(boxes)
+        boxes0, boxes1 = -boxes[:, :2, ...], boxes[:, 2:, ...]
+        boxes = self.anchors.repeat(b, 2, 1) + torch.cat([boxes0, boxes1], 1)
+        boxes = boxes * self.strides
+
+        return Efficient_TRT_NMS.apply(boxes.transpose(1, 2), scores.transpose(1, 2),
+                             self.iou_thres, self.conf_thres, self.max_det)

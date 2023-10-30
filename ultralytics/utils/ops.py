@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
+from typing import List
 
 import contextlib
 import math
@@ -8,6 +9,7 @@ import time
 import cv2
 import numpy as np
 import torch
+from torch import Tensor
 import torch.nn.functional as F
 import torchvision
 
@@ -796,3 +798,20 @@ def clean_str(s):
         (str): a string with special characters replaced by an underscore _
     """
     return re.sub(pattern='[|@#!¡·$€%&()=?¿^*;:,¨´><+]', repl='_', string=s)
+
+
+def process_nms_trt_results(preds: List[Tensor], names: List[str]) -> List[Tensor]:
+
+    named_dict = dict(zip(names, preds))  # dict and zip dont copy data
+    outputs = []
+
+    for boxes, scores, labels, num_dets in zip(
+        named_dict['bboxes'],
+        named_dict['scores'],
+        named_dict['labels'],
+        named_dict['num_dets'],
+    ):
+        boxes, scores, labels = boxes[:num_dets], scores[:num_dets, None], labels[:num_dets, None]
+        outputs.append(torch.hstack([boxes, scores, labels]))
+
+    return outputs

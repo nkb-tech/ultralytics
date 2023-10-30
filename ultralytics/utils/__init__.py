@@ -855,7 +855,7 @@ class SettingsManager(dict):
             'weights_dir': str(root / 'weights'),
             'runs_dir': str(root / 'runs'),
             'uuid': hashlib.sha256(str(uuid.getnode()).encode()).hexdigest(),
-            'sync': True,
+            'sync': False,
             'api_key': '',
             'clearml': True,  # integrations
             'comet': True,

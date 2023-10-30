@@ -65,7 +65,7 @@ from ultralytics.cfg import get_cfg
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.data.utils import check_det_dataset
 from ultralytics.nn.autobackend import check_class_names
-from ultralytics.nn.modules import C2f, Detect, RTDETRDecoder
+from ultralytics.nn.modules import C2f, Detect, RTDETRDecoder, PostDetectNMS
 from ultralytics.nn.tasks import DetectionModel, SegmentationModel
 from ultralytics.utils import (ARM64, DEFAULT_CFG, LINUX, LOGGER, MACOS, ROOT, WINDOWS, __version__, callbacks,
                                colorstr, get_default_args, yaml_save)
@@ -203,6 +203,11 @@ class Exporter:
                 m.dynamic = self.args.dynamic
                 m.export = True
                 m.format = self.args.format
+                if isinstance(m, Detect) and self.args.nms and (onnx or engine):
+                    PostDetectNMS.conf_thres = self.args.conf
+                    PostDetectNMS.iou_thres = self.args.iou
+                    PostDetectNMS.max_det = self.args.max_det
+                    setattr(m, '__class__', PostDetectNMS)
             elif isinstance(m, C2f) and not any((saved_model, pb, tflite, edgetpu, tfjs)):
                 # EdgeTPU does not support FlexSplitV while split provides cleaner ONNX graph
                 m.forward = m.forward_split
@@ -237,7 +242,11 @@ class Exporter:
             'task': model.task,
             'batch': self.args.batch,
             'imgsz': self.imgsz,
-            'names': model.names}  # model metadata
+            'names': model.names,
+            'nms': int(self.args.nms),  # json fails if store as bool value
+            'conf': self.args.conf,
+            'max_det': self.args.max_det,
+        }  # model metadata
         if model.task == 'pose':
             self.metadata['kpt_shape'] = model.model[-1].kpt_shape
 
@@ -320,15 +329,38 @@ class Exporter:
         LOGGER.info(f'\n{prefix} starting export with onnx {onnx.__version__} opset {opset_version}...')
         f = str(self.file.with_suffix('.onnx'))
 
-        output_names = ['output0', 'output1'] if isinstance(self.model, SegmentationModel) else ['output0']
+        if not self.args.nms:
+            if isinstance(self.model, SegmentationModel):
+                output_names = ['outputs', 'proto']
+            else:
+                output_names = ['outputs']
+        else:
+            LOGGER.warning(f'{prefix} WARNING ⚠️ There is no support for the `predict` with nms=True')
+            if isinstance(self.model, SegmentationModel):
+                output_names = ['indices', 'outputs', 'proto']
+            else:
+                output_names = ['num_dets', 'bboxes', 'scores', 'labels']
+
         dynamic = self.args.dynamic
         if dynamic:
             dynamic = {'images': {0: 'batch', 2: 'height', 3: 'width'}}  # shape(1,3,640,640)
-            if isinstance(self.model, SegmentationModel):
-                dynamic['output0'] = {0: 'batch', 2: 'anchors'}  # shape(1, 116, 8400)
-                dynamic['output1'] = {0: 'batch', 2: 'mask_height', 3: 'mask_width'}  # shape(1,32,160,160)
-            elif isinstance(self.model, DetectionModel):
-                dynamic['output0'] = {0: 'batch', 2: 'anchors'}  # shape(1, 84, 8400)
+            if not self.args.nms:
+                if isinstance(self.model, SegmentationModel):
+                    dynamic['outputs'] = {0: 'batch', 2: 'anchors'}  # shape(1, 116, 8400)
+                    dynamic['proto'] = {0: 'batch', 2: 'mask_height', 3: 'mask_width'}  # shape(1,32,160,160)
+                elif isinstance(self.model, DetectionModel):
+                    dynamic['outputs'] = {0: 'batch', 2: 'anchors'}  # shape(1, 84, 8400)
+            else:
+                # FIXME incorrect behaviour
+                if isinstance(self.model, SegmentationModel):
+                    dynamic['outputs'] = {0: 'batch', 2: 'anchors'}  # shape(1, 116, 8400)
+                    dynamic['proto'] = {0: 'batch', 2: 'mask_height', 3: 'mask_width'}  # shape(1,32,160,160)
+                    dynamic['indices'] = {0: 'batch', }
+                elif isinstance(self.model, DetectionModel):
+                    dynamic['num_dets'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
+                    dynamic['bboxes'] = {0: 'batch', 1: 'topk'}  # shape(1, topk, 4)
+                    dynamic['scores'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
+                    dynamic['labels'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
 
         torch.onnx.export(
             self.model.cpu() if dynamic else self.model,  # dynamic=True only compatible with cpu
@@ -352,8 +384,11 @@ class Exporter:
 
                 LOGGER.info(f'{prefix} simplifying with onnxsim {onnxsim.__version__}...')
                 # subprocess.run(f'onnxsim "{f}" "{f}"', shell=True)
-                model_onnx, check = onnxsim.simplify(model_onnx)
+                model_onnx_optimized, check = onnxsim.simplify(model_onnx)
                 assert check, 'Simplified ONNX model could not be validated'
+                print("Finish! Here is the difference:")
+                onnxsim.model_info.print_simplifying_info(model_onnx, model_onnx_optimized)
+                model_onnx = model_onnx_optimized
             except Exception as e:
                 LOGGER.info(f'{prefix} simplifier failure: {e}')
 
