@@ -319,7 +319,9 @@ class BasePredictor:
                                  fp16=self.args.half,
                                  fuse=True,
                                  verbose=verbose)
-
+        
+        self.output_names = sorted(self.model.output_names)
+        self.nms = self.model.nms
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half
         self.model.eval()

@@ -180,6 +180,9 @@ class AutoBackend(nn.Module):
                 device = torch.device('cuda:0')
             Binding = namedtuple('Binding', ('name', 'dtype', 'shape', 'data', 'ptr'))
             logger = trt.Logger(trt.Logger.INFO)
+            if verbose:
+                logger.min_severity = trt.Logger.Severity.VERBOSE
+            trt.init_libnvinfer_plugins(logger, namespace='')
             # Read file
             with open(w, 'rb') as f, trt.Runtime(logger) as runtime:
                 meta_len = int.from_bytes(f.read(4), byteorder='little')  # read metadata length
@@ -309,6 +312,9 @@ class AutoBackend(nn.Module):
             batch = metadata['batch']
             imgsz = metadata['imgsz']
             names = metadata['names']
+            nms = metadata['nms']
+            conf = metadata['conf']
+            max_det = metadata['max_det']
             kpt_shape = metadata.get('kpt_shape')
         elif not (pt or triton or nn_module):
             LOGGER.warning(f"WARNING ⚠️ Metadata not found for 'model={weights}'")

@@ -3,8 +3,9 @@
 # Image is CUDA-optimized for YOLOv8 single/multi-GPU training and inference
 
 # Start FROM PyTorch image https://hub.docker.com/r/pytorch/pytorch or nvcr.io/nvidia/pytorch:23.03-py3
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
-RUN pip install --no-cache nvidia-tensorrt --index-url https://pypi.ngc.nvidia.com
+# FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+# RUN pip install --no-cache nvidia-tensorrt --index-url https://pypi.ngc.nvidia.com
+FROM nvcr.io/nvidia/pytorch:23.09-py3
 
 # Downloads to user config dir
 ADD https://ultralytics.com/assets/Arial.ttf https://ultralytics.com/assets/Arial.Unicode.ttf /root/.config/Ultralytics/
@@ -23,7 +24,7 @@ WORKDIR /usr/src/ultralytics
 
 # Copy contents
 # COPY . /usr/src/ultralytics  # git permission issues inside container
-RUN git clone https://github.com/ultralytics/ultralytics -b main /usr/src/ultralytics
+RUN git clone https://github.com/nkb-tech/ultralytics -b main /usr/src/ultralytics
 ADD https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt /usr/src/ultralytics/
 
 # Install pip packages
@@ -31,6 +32,7 @@ RUN python3 -m pip install --upgrade pip wheel
 RUN pip install --no-cache -e ".[export]" albumentations comet pycocotools pytest-cov
 
 # Run exports to AutoInstall packages
+RUN pip uninstall -y opencv-python-headless opencv-python && pip install opencv-python==4.8.0.74
 RUN yolo export model=tmp/yolov8n.pt format=edgetpu imgsz=32
 RUN yolo export model=tmp/yolov8n.pt format=ncnn imgsz=32
 # Requires <= Python 3.10, bug with paddlepaddle==2.5.0 https://github.com/PaddlePaddle/X2Paddle/issues/991
