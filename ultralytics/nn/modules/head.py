@@ -1,5 +1,6 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Model head modules."""
+from typing import Tuple
 
 import math
 
@@ -9,7 +10,7 @@ from torch.nn.init import constant_, xavier_uniform_
 
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, make_anchors
 
-from .block import DFL, Proto, Efficient_TRT_NMS
+from .block import DFL, Proto, Efficient_TRT_NMS, ONNX_NMS
 from .conv import Conv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init_
@@ -396,8 +397,8 @@ class RTDETRDecoder(nn.Module):
             xavier_uniform_(layer[0].weight)
 
 
-class PostDetectNMS(nn.Module):
-    """YOLOv8 NMS-fused detection model."""
+class PostDetectTRTNMS(nn.Module):
+    """YOLOv8 NMS-fused detection model for TensorRT export."""
     export = True
     shape = None
     dynamic = False
@@ -405,10 +406,8 @@ class PostDetectNMS(nn.Module):
     conf_thres = 0.25
     max_det = 100
 
-    def __init__(self, *args, **kwargs):
-        super().__init__()
-
-    def forward(self, x):
+    def _forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        '''Decode yolov8 model output'''
         shape = x[0].shape
         b, res, b_reg_num = shape[0], [], self.reg_max * 4
         for i in range(self.nl):
@@ -426,5 +425,47 @@ class PostDetectNMS(nn.Module):
         boxes = self.anchors.repeat(b, 2, 1) + torch.cat([boxes0, boxes1], 1)
         boxes = boxes * self.strides
 
-        return Efficient_TRT_NMS.apply(boxes.transpose(1, 2), scores.transpose(1, 2),
-                             self.iou_thres, self.conf_thres, self.max_det)
+        # output shape (bs, 4, spatial_dim), (bs, num_classes, spatial_dim)
+        return boxes, scores
+
+    def forward(self, x):
+        boxes, scores = self._forward(x)
+
+        return Efficient_TRT_NMS.apply(
+            boxes.transpose(1, 2),
+            scores.transpose(1, 2),
+            self.iou_thres,
+            self.conf_thres,
+            self.max_det)
+
+
+class PostDetectONNXNMS(PostDetectTRTNMS):
+    """YOLOv8 NMS-fused detection model for ONNX export."""
+    export = True
+    shape = None
+    dynamic = False
+    iou_thres = 0.65
+    conf_thres = 0.25
+    max_det = 100
+
+    def forward(self, x):
+        boxes, scores = self._forward(x)
+        transposed_boxes = boxes.transpose(1, 2)
+
+        # Prepare parameters of NMS for exporting ONNX
+        selected_indices = ONNX_NMS.apply(
+            transposed_boxes,  # (bs, spatial_dim, 4)
+            scores,  # (bs, num_classes, spatial_dim)
+            self.max_det,
+            self.iou_thres,
+            self.conf_thres,
+        )  # (num_selected_indices, 3) 3 = [batch_index, class_index, box_index]
+
+        max_score, category_id = scores.max(1)
+
+        X, Y = selected_indices[:, 0], selected_indices[:, 2]
+        selected_boxes = transposed_boxes[X, Y, :]
+        selected_categories = category_id[X, Y, None].float()
+        selected_scores = max_score[X, Y, None]
+        X = X.unsqueeze(1).float()
+        return torch.cat([X, selected_boxes, selected_scores, selected_categories], 1)

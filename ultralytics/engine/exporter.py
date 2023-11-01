@@ -65,7 +65,7 @@ from ultralytics.cfg import get_cfg
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.data.utils import check_det_dataset
 from ultralytics.nn.autobackend import check_class_names
-from ultralytics.nn.modules import C2f, Detect, RTDETRDecoder, PostDetectNMS
+from ultralytics.nn.modules import C2f, Detect, RTDETRDecoder, PostDetectTRTNMS, PostDetectONNXNMS
 from ultralytics.nn.tasks import DetectionModel, SegmentationModel
 from ultralytics.utils import (ARM64, DEFAULT_CFG, LINUX, LOGGER, MACOS, ROOT, WINDOWS, __version__, callbacks,
                                colorstr, get_default_args, yaml_save)
@@ -204,10 +204,11 @@ class Exporter:
                 m.export = True
                 m.format = self.args.format
                 if isinstance(m, Detect) and self.args.nms and (onnx or engine):
-                    PostDetectNMS.conf_thres = self.args.conf
-                    PostDetectNMS.iou_thres = self.args.iou
-                    PostDetectNMS.max_det = self.args.max_det
-                    setattr(m, '__class__', PostDetectNMS)
+                    post_detect_class = PostDetectTRTNMS if engine else PostDetectONNXNMS
+                    post_detect_class.conf_thres = self.args.conf
+                    post_detect_class.iou_thres = self.args.iou
+                    post_detect_class.max_det = self.args.max_det
+                    setattr(m, '__class__', post_detect_class)
             elif isinstance(m, C2f) and not any((saved_model, pb, tflite, edgetpu, tfjs)):
                 # EdgeTPU does not support FlexSplitV while split provides cleaner ONNX graph
                 m.forward = m.forward_split
@@ -254,6 +255,7 @@ class Exporter:
                     f'output shape(s) {self.output_shape} ({file_size(file):.1f} MB)')
 
         # Exports
+        self.engine, self.onnx = engine, onnx
         f = [''] * len(fmts)  # exported filenames
         if jit or ncnn:  # TorchScript
             f[0], _ = self.export_torchscript()
@@ -339,7 +341,7 @@ class Exporter:
             if isinstance(self.model, SegmentationModel):
                 output_names = ['indices', 'outputs', 'proto']
             else:
-                output_names = ['num_dets', 'bboxes', 'scores', 'labels']
+                output_names = ['num_dets', 'bboxes', 'scores', 'labels'] if self.engine else ['output']
 
         dynamic = self.args.dynamic
         if dynamic:
@@ -357,10 +359,13 @@ class Exporter:
                     dynamic['proto'] = {0: 'batch', 2: 'mask_height', 3: 'mask_width'}  # shape(1,32,160,160)
                     dynamic['indices'] = {0: 'batch', }
                 elif isinstance(self.model, DetectionModel):
-                    dynamic['num_dets'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
-                    dynamic['bboxes'] = {0: 'batch', 1: 'topk'}  # shape(1, topk, 4)
-                    dynamic['scores'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
-                    dynamic['labels'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
+                    if self.engine:
+                        dynamic['num_dets'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
+                        dynamic['bboxes'] = {0: 'batch', 1: 'topk'}  # shape(1, topk, 4)
+                        dynamic['scores'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
+                        dynamic['labels'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
+                    else:
+                        dynamic['output'] = {0: 'num_boxes'}  # shape(num_boxes, 7), 7 = 1(batch_index) + 6
 
         torch.onnx.export(
             self.model.cpu() if dynamic else self.model,  # dynamic=True only compatible with cpu

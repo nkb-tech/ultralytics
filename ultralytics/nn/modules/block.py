@@ -394,17 +394,18 @@ class Efficient_TRT_NMS(torch.autograd.Function):
         return nums_dets, boxes, scores, classes
     
 
-class NMS_ONNX(torch.autograd.Function):
+class ONNX_NMS(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
         boxes: Value,
         scores: Value,
-        detections_per_class,
-        iou_thresh,
-        score_thresh):
+        max_output_boxes: int = 100,
+        iou_threshold: float = 0.45,
+        score_threshold: float = 0.25):
         """
         Symbolic method to export an NonMaxSupression ONNX models.
+        See details in https://github.com/onnx/onnx/blob/main/docs/Operators.md#nonmaxsuppression
 
         Args:
             boxes (Tensor): An input tensor with shape [num_batches, spatial_dimension, 4].
@@ -436,13 +437,32 @@ class NMS_ONNX(torch.autograd.Function):
         g,
         boxes,
         scores,
-        detections_per_class,
-        iou_thresh,
-        score_thresh):
-        return g.op(
-            "NonMaxSuppression",
+        max_output_boxes: int = 100,
+        iou_threshold: float = 0.45,
+        score_threshold: float = 0.25,
+    ):
+        from torch.onnx.symbolic_opset9 import select, squeeze
+
+        # TODO check that max_num > 0
+        max_output_boxes = g.op(
+            'Constant',
+            value_t=torch.tensor(max_output_boxes, dtype=torch.long),
+        )
+        iou_threshold = g.op(
+            'Constant',
+            value_t=torch.tensor([iou_threshold], dtype=torch.float))
+        score_threshold = g.op(
+            'Constant',
+            value_t=torch.tensor([score_threshold], dtype=torch.float))
+
+        selected_indices = g.op(
+            'NonMaxSuppression',
             boxes,
             scores,
-            detections_per_class,
-            iou_thresh,
-            score_thresh)
+            max_output_boxes,
+            iou_threshold,
+            score_threshold,
+        )  # (batch_index, class_index, box_index)
+
+        return selected_indices
+        

@@ -832,3 +832,31 @@ def process_nms_trt_results(preds: List[Tensor], names: List[str]) -> List[Tenso
         outputs.append(torch.hstack([boxes, scores, labels]))
 
     return outputs
+
+
+def process_nms_onnx_results(preds: Tensor) -> List[Tensor]:
+    """
+    Filter TensorRT-like bounding box structure via `max_det`
+
+    Args:
+        preds (torch.Tensor): Tensor of shape Nx7. Contains
+            `batch_index`     - 1
+            `bboxes`          - 4
+            `max_confidence`  - 1
+            `class`           - 1
+
+    Returns:
+       (List[torch.Tensor]): YOLO-like list of length batch_size, where each element is a tensor of
+            shape (num_boxes, 6) containing the kept boxes, with columns
+            (x1, y1, x2, y2, confidence, class).
+    """
+
+    batch_index, yolo_dets = preds[..., 0], preds[..., 1:]
+    bs = int(batch_index[-1])
+
+    outputs = []
+
+    for i in range(bs + 1):
+        outputs.append(yolo_dets[batch_index == i])
+
+    return outputs
