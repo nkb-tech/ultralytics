@@ -322,6 +322,7 @@ class BasePredictor:
         
         self.output_names = sorted(self.model.output_names)
         self.nms = self.model.nms
+        self.engine, self.onnx = self.model.engine, self.model.onnx
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half
         self.model.eval()
