@@ -1,13 +1,13 @@
 ---
 description: Learn about how Ultralytics collects and uses data to improve user experience, ensure software stability, and address privacy concerns, with options to opt-out.
-keywords: Ultralytics, Data Collection, User Privacy, Google Analytics, Snyk, Crash Reporting, Anonymized Data, Privacy Settings, Opt-Out
+keywords: Ultralytics, Data Collection, User Privacy, Google Analytics, Sentry, Crash Reporting, Anonymized Data, Privacy Settings, Opt-Out
 ---
 
 # Data Collection for Ultralytics Python Package
 
 ## Overview
 
-Ultralytics is dedicated to the continuous enhancement of the user experience and the capabilities of our Python package, including the advanced YOLO models we develop. Our approach involves the gathering of anonymized usage statistics and crash reports, helping us identify opportunities for improvement and ensuring the reliability of our software. This transparency document outlines what data we collect, its purpose, and the choice you have regarding this data collection.
+[Ultralytics](https://ultralytics.com) is dedicated to the continuous enhancement of the user experience and the capabilities of our Python package, including the advanced YOLO models we develop. Our approach involves the gathering of anonymized usage statistics and crash reports, helping us identify opportunities for improvement and ensuring the reliability of our software. This transparency document outlines what data we collect, its purpose, and the choice you have regarding this data collection.
 
 ## Anonymized Google Analytics
 
@@ -35,16 +35,22 @@ We take several measures to ensure the privacy and security of the data you entr
 - **Aggregation**: Data is analyzed only in aggregate form. This practice ensures that patterns can be observed without revealing any individual user's activity.
 - **No Image Data Collection**: Ultralytics does not collect, process, or view any training or inference images.
 
-## Snyk Crash Reporting
+## Sentry Crash Reporting
 
-[Snyk](https://snyk.io/) is a developer-first security software that helps to identify, fix, and monitor known vulnerabilities in open-source dependencies. In the context of our package, it assists us by reporting crashes, which is vital for maintaining the stability and security of our software.
+[Sentry](https://sentry.io/) is a developer-centric error tracking software that aids in identifying, diagnosing, and resolving issues in real-time, ensuring the robustness and reliability of applications. Within our package, it plays a crucial role by providing insights through crash reporting, significantly contributing to the stability and ongoing refinement of our software.
+
+!!! note
+
+    Crash reporting via Sentry is activated only if the `sentry-sdk` Python package is pre-installed on your system. This package isn't included in the `ultralytics` prerequisites and won't be installed automatically by Ultralytics.
 
 ### What We Collect
+
+If the `sentry-sdk` Python package is pre-installed on your system a crash event may send the following information:
 
 - **Crash Logs**: Detailed reports on the application's condition at the time of a crash, which are vital for our debugging efforts.
 - **Error Messages**: We record error messages generated during the operation of our package to understand and resolve potential issues quickly.
 
-To learn more about how Snyk handles data, please visit [Snyk's Privacy Policy](https://snyk.io/privacy/).
+To learn more about how Sentry handles data, please visit [Sentry's Privacy Policy](https://sentry.io/privacy/).
 
 ### How We Use This Data
 
@@ -78,8 +84,8 @@ To gain insight into the current configuration of your settings, you can view th
         # View all settings
         print(settings)
 
-        # Return a specific setting
-        value = settings['runs_dir']
+        # Return analytics and crash reporting setting
+        value = settings['sync']
         ```
 
     === "CLI"
@@ -109,14 +115,14 @@ Ultralytics allows users to easily modify their settings. Changes can be perform
     === "CLI"
         If you prefer using the command-line interface, the following commands will allow you to modify your settings:
         ```bash
-        # Update a setting
-        yolo settings sync=false
+        # Disable analytics and crash reporting
+        yolo settings sync=False
 
         # Reset settings to default values
         yolo settings reset
         ```
 
-This will prevent any data from being sent to Google Analytics or Snyk. Your settings will be respected across all sessions using the Ultralytics package.
+The `sync=False` setting will prevent any data from being sent to Google Analytics or Sentry. Your settings will be respected across all sessions using the Ultralytics package and saved to disk for future sessions.
 
 ## Commitment to Privacy
 
