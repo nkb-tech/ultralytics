@@ -319,10 +319,13 @@ class BasePredictor:
                                  fp16=self.args.half,
                                  fuse=True,
                                  verbose=verbose)
+
+        # Backward compatibility
+        self.output_names = sorted(self.model.output_names) if hasattr(self.model, 'output_names') else None
+        self.nms = self.model.nms if hasattr(self.model, 'nms') else False
+        self.engine = self.model.engine if hasattr(self.model, 'engine') else False
+        self.onnx = self.model.onnx if hasattr(self.model, 'onnx') else False
         
-        self.output_names = sorted(self.model.output_names)
-        self.nms = self.model.nms
-        self.engine, self.onnx = self.model.engine, self.model.onnx
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half
         self.model.eval()
