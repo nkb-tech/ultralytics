@@ -216,8 +216,6 @@ class Exporter:
         y = None
         for _ in range(2):
             y = model(im)  # dry runs
-        if self.args.half and (engine or onnx) and self.device.type != 'cpu':
-            im, model = im.half(), model.half()  # to FP16
 
         # Filter warnings
         warnings.filterwarnings('ignore', category=torch.jit.TracerWarning)  # suppress TracerWarning
@@ -368,8 +366,8 @@ class Exporter:
                         dynamic['output'] = {0: 'num_boxes'}  # shape(num_boxes, 7), 7 = 1(batch_index) + 6
 
         torch.onnx.export(
-            self.model.cpu() if dynamic else self.model,  # dynamic=True only compatible with cpu
-            self.im.cpu() if dynamic else self.im,
+            self.model,  # dynamic=True only compatible with cpu
+            self.im,
             f,
             verbose=False,
             opset_version=opset_version,
@@ -663,6 +661,18 @@ class Exporter:
             f'{prefix} building FP{16 if builder.platform_has_fast_fp16 and self.args.half else 32} engine as {f}')
         if builder.platform_has_fast_fp16 and self.args.half:
             config.set_flag(trt.BuilderFlag.FP16)
+
+            # explicit set inputs to fp16
+            for idx in range(network.num_inputs):
+                input_l = network.get_input(idx)
+                input_l.dtype = trt.float16
+            
+            # explicity set outputs to fp16 or uint16
+            for idx in range(network.num_outputs):
+                output_l = network.get_output(idx)
+                if output_l.dtype == trt.float32:
+                    output_l.dtype = trt.float16
+                
 
         del self.model
         torch.cuda.empty_cache()
