@@ -29,7 +29,17 @@ ADD https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt /u
 
 # Install pip packages
 RUN python3 -m pip install --upgrade pip wheel
-RUN pip install --no-cache -e ".[export]" albumentations comet pycocotools pytest-cov
+RUN pip install --no-cache -e ".[export]" albumentations comet pycocotools pytest-cov && \
+    # Due to error when installing albumentations
+    # module 'cv2.dnn' has no attribute 'DictValue'
+    # Downgrade opencv version to 4.8.0.74
+    pip uninstall \
+        --yes \
+            opencv-python-headless \
+            opencv-python && \
+    pip install \
+        --no-cache \
+            opencv-python==4.8.0.74
 
 # Run exports to AutoInstall packages
 RUN yolo export model=tmp/yolov8n.pt format=edgetpu imgsz=32
