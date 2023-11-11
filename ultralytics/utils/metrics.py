@@ -62,13 +62,13 @@ def box_iou(box1, box2, eps=1e-7):
 
     # inter(N,M) = (rb(N,M,2) - lt(N,M,2)).clamp(0).prod(2)
     (a1, a2), (b1, b2) = box1.unsqueeze(1).chunk(2, 2), box2.unsqueeze(0).chunk(2, 2)
-    inter = (torch.min(a2, b2) - torch.max(a1, b1)).clamp_(0).prod(2)
+    inter = (torch.min(a2, b2) - torch.max(a1, b1)).clamp_min_(0).prod(2)
 
     # IoU = inter / (area1 + area2 - inter)
     return inter / ((a2 - a1).prod(2) + (b2 - b1).prod(2) - inter + eps)
 
 
-def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
+def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, NGIoU=False, eps=1e-7):
     """
     Calculate Intersection over Union (IoU) of box1(1, 4) to box2(n, 4).
 
@@ -80,10 +80,11 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7
         GIoU (bool, optional): If True, calculate Generalized IoU. Defaults to False.
         DIoU (bool, optional): If True, calculate Distance IoU. Defaults to False.
         CIoU (bool, optional): If True, calculate Complete IoU. Defaults to False.
+        NGIoU (bool, optional): if True, calculate New Generalized IoU. Defaults to False.
         eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
 
     Returns:
-        (torch.Tensor): IoU, GIoU, DIoU, or CIoU values depending on the specified flags.
+        (torch.Tensor): IoU, GIoU, DIoU, or CIoU, or NGIoU values depending on the specified flags.
     """
 
     # Get the coordinates of bounding boxes
@@ -95,32 +96,95 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7
     else:  # x1, y1, x2, y2 = box1
         b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
         b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
-        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
-        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
+        w1, h1 = b1_x2 - b1_x1, (b1_y2 - b1_y1).clamp_min_(eps)
+        w2, h2 = b2_x2 - b2_x1, (b2_y2 - b2_y1).clamp_min_(eps)
 
     # Intersection area
-    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * \
-            (b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)).clamp_(0)
+    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_min_(0) * \
+            (b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)).clamp_min_(0)
 
     # Union Area
-    union = w1 * h1 + w2 * h2 - inter + eps
+    union = (w1 * h1 + w2 * h2 - inter).clamp_min_(eps)
 
     # IoU
     iou = inter / union
-    if CIoU or DIoU or GIoU:
+    if CIoU or DIoU or GIoU or NGIoU:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
         if CIoU or DIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
-            c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
+            c2 = (cw ** 2 + ch ** 2).clamp_min_(eps)  # convex diagonal squared
             rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center dist ** 2
             if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
-                v = (4 / math.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
+                v = (4 / torch.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
                 with torch.no_grad():
-                    alpha = v / (v - iou + (1 + eps))
-                return iou - (rho2 / c2 + v * alpha)  # CIoU
-            return iou - rho2 / c2  # DIoU
+                    alpha = v / (1 - iou + v).clamp_min_(eps)
+                ciou = iou - (rho2 / c2 + v * alpha) # CIoU
+                return ciou
+
+            diou = iou - rho2 / c2 # DIoU
+            return diou
+
         c_area = cw * ch + eps  # convex area
-        return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+
+        if NGIoU:
+
+            d2 = torch.sqrt(h1 ** 2 + w1 ** 2)
+            d1 = torch.sqrt(h2 ** 2 + w2 ** 2)
+
+            b1_in_b2 = torch.logical_and(b1_x1 > b2_x1, b1_x2 < b2_x2)  # b1 (pred) in b2 (truth)
+
+            # D has same center as b2 and congruent to b1
+            D_x1, D_y1, D_x2, D_y2 = w1 / 2 - w2 / 2, h1 / 2 - h2 / 2, w1 / 2 + w2 / 2, h1 / 2 + h2 / 2
+            D_w, D_h = w1, h1
+
+            # convex shape C1 enclosing b1 and D
+            C1_w = D_x2.maximum(b1_x2) - D_x1.minimum(b1_x1).clamp_min_(0)  # C2 width
+            C1_h = D_y2.maximum(b1_y2) - D_y1.minimum(b1_y1).clamp_min_(0)  # C2 height
+
+            d_p1 = torch.sqrt(C1_h ** 2 + C1_w ** 2)  # d'2
+
+            beta_1 = d_p1 / d1
+
+            inter_D_b1 = (
+                D_x2.minimum(b1_x2) - D_x1.maximum(b1_x1)
+            ).clamp_min_(0) * (
+                D_y2.minimum(b1_y2) - D_y1.maximum(b1_y1)
+            ).clamp_min_(0)
+            union_D_b1 = (D_w * D_h + w1 * h1 - inter_D_b1).clamp_min_(eps)
+            ngiou_b1_in_b2 = iou - (beta_1 * (C1_h * C1_w - union_D_b1) / (C1_h * C1_w))
+
+            b2_in_b1 = torch.logical_and(b1_x1 < b2_x1, b1_x2 > b2_x2)  # b2 (truth) in b1 (pred)
+
+            # D has same center as b1 and congruent to b2
+            D_x1, D_y1, D_x2, D_y2 = w1 / 2 - w2 / 2, h1 / 2 - h2 / 2, w1 / 2 + w2 / 2, h1 / 2 + h2 / 2
+            D_w, D_h = w2, h2
+
+            # convex shape C1 enclosing b2 and D
+            C2_w = D_x2.maximum(b2_x2) - D_x1.minimum(b2_x1).clamp_min_(0)  # convex shape C2 width
+            C2_h = D_y2.maximum(b2_y2) - D_y1.minimum(b2_y1).clamp_min_(0)  # convex shape C2 height
+
+            d_p2 = torch.sqrt(C2_h ** 2 + C2_w ** 2)  # d'2
+
+            beta_2 = d_p2 / d2
+
+            inter_D_b2 = (
+                D_x2.minimum(b2_x2) - D_x1.maximum(b2_x1)
+            ).clamp_min_(0) * (
+                D_y2.minimum(b2_y2) - D_y1.maximum(b2_y1)
+            ).clamp_min_(0)
+            union_D_b2 = (D_w * D_h + w2 * h2 - inter_D_b2).clamp_min_(eps)
+            ngiou_b2_in_b1 = iou - (beta_2 * (C2_h * C2_w - union_D_b2) / (C2_h * C2_w))
+
+            neither = torch.logical_not(torch.logical_or(b1_in_b2, b2_in_b1))
+            ngiou_neither = iou - ((c_area - union) / (c_area))
+
+            ngiou = ngiou_b1_in_b2 * b1_in_b2 + ngiou_b2_in_b1 * b2_in_b1 + ngiou_neither * neither
+
+            return ngiou  # NGIoU https://www.mdpi.com/2076-3417/12/24/12785
+
+        giou = iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+        return giou
+
     return iou  # IoU
 
 
@@ -138,7 +202,7 @@ def mask_iou(mask1, mask2, eps=1e-7):
     Returns:
         (torch.Tensor): A tensor of shape (N, M) representing masks IoU.
     """
-    intersection = torch.matmul(mask1, mask2.T).clamp_(0)
+    intersection = torch.matmul(mask1, mask2.T).clamp_min_(0)
     union = (mask1.sum(1)[:, None] + mask2.sum(1)[None]) - intersection  # (area1 + area2) - intersection
     return intersection / (union + eps)
 
