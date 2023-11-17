@@ -157,7 +157,19 @@ class TaskAlignedAssigner(nn.Module):
         # (b, max_num_obj, 1, 4), (b, 1, h*w, 4)
         pd_boxes = pd_bboxes.unsqueeze(1).expand(-1, self.n_max_boxes, -1, -1)[mask_gt]
         gt_boxes = gt_bboxes.unsqueeze(2).expand(-1, -1, na, -1)[mask_gt]
-        overlaps[mask_gt] = bbox_iou(gt_boxes, pd_boxes, xywh=False, CIoU=True).squeeze(-1).clamp_(0)
+        bbox_iou_data = bbox_iou(gt_boxes, pd_boxes, xywh=False, WIoU=True)
+
+        if isinstance(bbox_iou_data, tuple):
+            if len(bbox_iou_data) == 3:
+                iou = bbox_iou_data[2]
+            elif len(iou) in (1, 2):
+                iou = bbox_iou_data[0]
+            else:
+                raise RuntimeError(f'Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3')
+        else:
+            RuntimeError(f'bbox_iou output should be tuple, got {type(bbox_iou_data)}')
+
+        overlaps[mask_gt] = iou.squeeze(-1).clamp_(0)
 
         align_metric = bbox_scores.pow(self.alpha) * overlaps.pow(self.beta)
         return align_metric, overlaps

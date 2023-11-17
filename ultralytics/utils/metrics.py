@@ -12,6 +12,41 @@ import torch
 from ultralytics.utils import LOGGER, SimpleClass, TryExcept, plt_settings
 
 OKS_SIGMA = np.array([.26, .25, .25, .35, .35, .79, .79, .72, .72, .62, .62, 1.07, 1.07, .87, .87, .89, .89]) / 10.0
+SIOU_THRESHOLD = pow(2, 0.5) / 2
+
+
+class WIoUScale:
+    '''monotonous: {
+            None: origin v1
+            True: monotonic FM v2
+            False: non-monotonic FM v3
+        }
+        momentum: The momentum of running mean'''
+    
+    iou_mean = 1.
+    monotonous = False
+    _momentum = 1 - pow(0.05, 1 / 216)
+    _is_train = True
+
+    def __init__(self, iou):
+        self.iou = iou
+        self._update(self)
+    
+    @classmethod
+    def _update(cls, self):
+        if cls._is_train: cls.iou_mean = (1 - cls._momentum) * cls.iou_mean + \
+                                         cls._momentum * self.iou.detach().mean().item()
+    
+    @classmethod
+    def _scaled_loss(cls, self, gamma=1.9, delta=3):
+        if isinstance(self.monotonous, bool):
+            if self.monotonous:
+                return (self.iou.detach() / self.iou_mean).sqrt()
+            else:
+                beta = self.iou.detach() / self.iou_mean
+                alpha = delta * torch.pow(gamma, beta - delta)
+                return beta / alpha
+        return 1
 
 
 def bbox_ioa(box1, box2, iou=False, eps=1e-7):
@@ -68,7 +103,21 @@ def box_iou(box1, box2, eps=1e-7):
     return inter / ((a2 - a1).prod(2) + (b2 - b1).prod(2) - inter + eps)
 
 
-def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, NGIoU=False, eps=1e-7):
+def bbox_iou(
+    box1, box2, xywh=True,
+    GIoU=False,   # https://arxiv.org/pdf/1902.09630.pdf
+    DIoU=False,   # https://arxiv.org/pdf/1911.08287.pdf
+    CIoU=False,   # https://arxiv.org/pdf/1911.08287.pdf
+    NGIoU=False,  # https://www.mdpi.com/2076-3417/12/24/12785
+    WIoU=False,   # https://arxiv.org/pdf/2301.10051.pdf
+    SIoU=False,   # https://arxiv.org/pdf/2205.12740.pdf
+    EIoU=False,   # https://arxiv.org/pdf/2101.08158.pdf
+    focal=False,  # https://arxiv.org/pdf/2101.08158.pdf
+    alpha=1.,
+    gamma=0.5,
+    scale=True,
+    eps=1e-7,
+):
     """
     Calculate Intersection over Union (IoU) of box1(1, 4) to box2(n, 4).
 
@@ -80,11 +129,18 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, NGIoU=Fa
         GIoU (bool, optional): If True, calculate Generalized IoU. Defaults to False.
         DIoU (bool, optional): If True, calculate Distance IoU. Defaults to False.
         CIoU (bool, optional): If True, calculate Complete IoU. Defaults to False.
-        NGIoU (bool, optional): if True, calculate New Generalized IoU. Defaults to False.
+        NGIoU (bool, optional): If True, calculate New Generalized IoU. Defaults to False.
+        WIoU (bool, optional): If True, calculate Wise IoU. Defaults to False.
+        SIoU (bool, optional): If True, calculate SCYLLA-IoU. Defaults to False.
+        EIoU (bool, optional): If True, calculate Efficient IoU. Defaults to False.
+        focal (bool, optional): If True, calculate Focal versions of supported losses (except WIoU). Defaults to False.
+        alpha (float, optional) Degree of exponentiation.
+        gamma (float, optional) Focal degree of exponentiation.
+        scale (bool, optional) Parameter of WIoU loss.
         eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
 
     Returns:
-        (torch.Tensor): IoU, GIoU, DIoU, or CIoU, or NGIoU values depending on the specified flags.
+        (torch.Tensor): IoU, GIoU, DIoU, CIoU, NGIoU, SIoU, EIoU or WIoU values depending on the specified flags.
     """
 
     # Get the coordinates of bounding boxes
@@ -106,25 +162,71 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, NGIoU=Fa
     # Union Area
     union = (w1 * h1 + w2 * h2 - inter).clamp_min_(eps)
 
+    if scale:
+        wiou_scale = WIoUScale(1 - (inter / union))
+
+    if focal:
+        focal_scale = torch.pow(inter / union, gamma)
+
     # IoU
-    iou = inter / union
-    if CIoU or DIoU or GIoU or NGIoU:
+    iou = (inter / union).pow_(alpha) # alpha iou
+    if CIoU or DIoU or GIoU or NGIoU or WIoU or EIoU or SIoU:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
-        if CIoU or DIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
-            c2 = (cw ** 2 + ch ** 2).clamp_min_(eps)  # convex diagonal squared
-            rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center dist ** 2
+        if CIoU or DIoU or EIoU or SIoU or WIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+            c2 = (cw ** 2 + ch ** 2).pow_(alpha).clamp_min_(eps)  # convex diagonal squared
+            rho2 = (((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4).pow_(alpha)  # center dist ** 2
             if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
-                v = (4 / torch.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
+                v = (4 / torch.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow_(2)
                 with torch.no_grad():
-                    alpha = v / (1 - iou + v).clamp_min_(eps)
-                ciou = iou - (rho2 / c2 + v * alpha) # CIoU
-                return ciou
+                    alpha_ciou = v / (1 - iou + v).clamp_min_(eps)
+                ciou = iou - (rho2 / c2 + torch.pow(v * alpha_ciou, alpha))  # CIoU
+                if focal:
+                    return ciou, focal_scale
+                return ciou  # CIoU
+            elif EIoU:
+                rho_w2 = ((b2_x2 - b2_x1) - (b1_x2 - b1_x1)) ** 2
+                rho_h2 = ((b2_y2 - b2_y1) - (b1_y2 - b1_y1)) ** 2
+                cw2 = (cw ** 2).pow_(alpha).clamp_min_(eps)
+                ch2 = (ch ** 2).pow_(alpha).clamp_min_(eps)
 
-            diou = iou - rho2 / c2 # DIoU
-            return diou
+                eiou = iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)
+                if focal:
+                    return eiou, focal_scale
+                return eiou  # EIoU
+            elif SIoU:
+                s_cw = (b2_x1 + b2_x2 - b1_x1 - b1_x2).mul_(0.5).clamp_min_(eps)
+                s_ch = (b2_y1 + b2_y2 - b1_y1 - b1_y2).mul_(0.5).clamp_min_(eps)
+                sigma = (s_cw ** 2 + s_ch ** 2).pow_(0.5)
+                sin_alpha_1 = s_cw.abs() / sigma
+                sin_alpha_2 = s_ch.abs() / sigma
+                sin_alpha = torch.where(sin_alpha_1 > SIOU_THRESHOLD, sin_alpha_2, sin_alpha_1)
+                angle_cost = torch.cos(torch.arcsin(sin_alpha) * 2 - torch.pi / 2)
+                rho_x = (s_cw / cw) ** 2
+                rho_y = (s_ch / ch) ** 2
+                gamma = angle_cost - 2
+                distance_cost = 2 - torch.exp(gamma * rho_x) - torch.exp(gamma * rho_y)
+                omiga_w = torch.abs(w1 - w2) / torch.max(w1, w2)
+                omiga_h = torch.abs(h1 - h2) / torch.max(h1, h2)
+                shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
+                siou = iou - (distance_cost + shape_cost).mul_(0.5).pow_(alpha).clamp_min_(eps)
+                if focal:
+                    return siou, focal_scale
+                return siou  # SIoU
+            elif WIoU:
+                if focal:
+                    raise RuntimeError('WIoU do not support focal.')
+                elif scale:
+                    return getattr(WIoUScale, '_scaled_loss')(wiou_scale), (1 - iou) * torch.exp((rho2 / c2)), iou
+                else:
+                    return iou, torch.exp((rho2 / c2))
 
-        c_area = cw * ch + eps  # convex area
+            diou = iou - rho2 / c2
+            if focal:
+                return diou, focal_scale
+            return diou  # DIoU
+
+        c_area = (cw * ch).clamp_min_(eps)  # convex area
 
         if NGIoU:
 
@@ -180,12 +282,18 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, NGIoU=Fa
 
             ngiou = ngiou_b1_in_b2 * b1_in_b2 + ngiou_b2_in_b1 * b2_in_b1 + ngiou_neither * neither
 
+            if focal:
+                return ngiou, focal_scale
             return ngiou  # NGIoU https://www.mdpi.com/2076-3417/12/24/12785
 
-        giou = iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
-        return giou
-
-    return iou  # IoU
+        giou = iou - (c_area - union) / c_area
+        if focal:
+            return giou, focal_scale
+        return (giou, )  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+    
+    if focal:
+        return iou, focal_scale
+    return (iou, )  # IoU
 
 
 def mask_iou(mask1, mask2, eps=1e-7):

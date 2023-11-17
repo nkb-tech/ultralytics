@@ -36,10 +36,6 @@ class VarifocalLoss(nn.Module):
 class FocalLoss(nn.Module):
     """Wraps focal loss around existing loss_fcn(), i.e. criteria = FocalLoss(nn.BCEWithLogitsLoss(), gamma=1.5)."""
 
-    def __init__(self, ):
-        """Initializer for FocalLoss class with no parameters."""
-        super().__init__()
-
     @staticmethod
     def forward(pred, label, gamma=1.5, alpha=0.25):
         """Calculates and updates confusion matrix for object detection/classification tasks."""
@@ -56,6 +52,26 @@ class FocalLoss(nn.Module):
             alpha_factor = label * alpha + (1 - label) * (1 - alpha)
             loss *= alpha_factor
         return loss.mean(1).sum()
+    
+
+class QFocalLoss(nn.Module):
+    """Wraps Quality focal loss around existing loss_fcn(), i.e. criteria = FocalLoss(nn.BCEWithLogitsLoss(), gamma=1.5)"""
+
+    @staticmethod
+    def forward(pred, label, gamma=1.5, alpha=0.25):
+        loss = F.binary_cross_entropy_with_logits(pred, label, reduction='none')
+        # p_t = torch.exp(-loss)
+        # loss *= self.alpha * (1.000001 - p_t) ** self.gamma  # non-zero power for gradient stability
+
+        # TF implementation https://github.com/tensorflow/addons/blob/v0.7.1/tensorflow_addons/losses/focal_loss.py
+        pred_prob = pred.sigmoid()  # prob from logits
+        modulating_factor = torch.abs(label - pred_prob) ** gamma
+        loss *= modulating_factor
+        if alpha > 0:
+            alpha_factor = label * alpha + (1 - label) * (1 - alpha)
+            loss *= alpha_factor
+
+        return loss.mean(1).sum()
 
 
 class BboxLoss(nn.Module):
@@ -70,8 +86,19 @@ class BboxLoss(nn.Module):
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         """IoU loss."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        bbox_iou_data = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, WIoU=True)
+
+        if isinstance(bbox_iou_data, tuple):
+            if len(bbox_iou_data) == 2:
+                loss_iou = ((1.0 - bbox_iou_data[0]) * bbox_iou_data[1].detach() * weight).sum() / target_scores_sum
+            elif len(bbox_iou_data) == 3:
+                loss_iou = (bbox_iou_data[0] * bbox_iou_data[1] * weight).sum() / target_scores_sum
+            elif len(bbox_iou_data) == 1:
+                loss_iou = ((1.0 - bbox_iou_data[0]) * weight).sum() / target_scores_sum
+            else:
+                raise RuntimeError(f'Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3')
+        else:
+            RuntimeError(f'bbox_iou output should be tuple, got {type(bbox_iou_data)}')
 
         # DFL loss
         if self.use_dfl:
