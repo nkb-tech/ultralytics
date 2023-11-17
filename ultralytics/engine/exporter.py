@@ -233,7 +233,7 @@ class Exporter:
         description = f'Ultralytics {self.pretty_name} model {f"trained on {data}" if data else ""}'
         self.metadata = {
             'description': description,
-            'author': 'Ultralytics',
+            'author': 'NKBTech',
             'license': 'AGPL-3.0 https://ultralytics.com/license',
             'date': datetime.now().isoformat(),
             'version': __version__,
@@ -335,7 +335,6 @@ class Exporter:
             else:
                 output_names = ['outputs']
         else:
-            LOGGER.warning(f'{prefix} WARNING ⚠️ There is no support for the `predict` with nms=True')
             if isinstance(self.model, SegmentationModel):
                 output_names = ['indices', 'outputs', 'proto']
             else:
@@ -366,7 +365,7 @@ class Exporter:
                         dynamic['output'] = {0: 'num_boxes'}  # shape(num_boxes, 7), 7 = 1(batch_index) + 6
 
         torch.onnx.export(
-            self.model,  # dynamic=True only compatible with cpu
+            self.model,
             self.im,
             f,
             verbose=False,
@@ -378,7 +377,7 @@ class Exporter:
 
         # Checks
         model_onnx = onnx.load(f)  # load onnx model
-        # onnx.checker.check_model(model_onnx)  # check onnx model
+        onnx.checker.check_model(model_onnx)  # check onnx model
 
         # Simplify
         if self.args.simplify:
