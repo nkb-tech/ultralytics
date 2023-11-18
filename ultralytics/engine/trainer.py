@@ -657,7 +657,10 @@ class BaseTrainer:
                     g[0].append(param)
 
         if name in ('Adam', 'Adamax', 'AdamW', 'NAdam', 'RAdam'):
-            optimizer = getattr(optim, name, optim.Adam)(g[2], lr=lr, betas=(momentum, 0.999), weight_decay=0.0)
+            kwargs = {'lr': lr, 'betas': (momentum, 0.999), 'weight_decay': 0.0}
+            if name in ('Adam', 'AdamW'):
+                kwargs['amsgrad'] = True
+            optimizer = getattr(optim, name, optim.Adam)(g[2], **kwargs)
         elif name == 'RMSProp':
             optimizer = optim.RMSprop(g[2], lr=lr, momentum=momentum)
         elif name == 'SGD':
