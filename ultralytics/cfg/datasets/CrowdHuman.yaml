@@ -1,0 +1,40 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# COCO 2017 dataset http://cocodataset.org by Microsoft
+# Example usage: yolo train data=coco.yaml
+# parent
+# ├── ultralytics
+# └── datasets
+#     └── coco  ← downloads here (20.1 GB)
+
+
+# Train/val/test sets as 1) dir: path/to/imgs, 2) file: path/to/imgs.txt, or 3) list: [path/to/imgs1, path/to/imgs2, ..]
+path: datasets/CrowdHuman  # dataset root dir
+train: images/train  # train images (relative to 'path')
+val: images/val # val images (relative to 'path')
+
+# Classes
+names:
+  0: body
+  1: head
+
+
+# Download script/URL (optional)
+download: |
+  from ultralytics.utils.downloads import download
+  from pathlib import Path
+
+  # Download files from gdrive
+  urls = [
+      ['134QOvaatwKdy0iIeNqA_p-xkAhkV4F8Y', 'CrowdHuman_train01.zip'],
+      ['17evzPh7gc1JBNvnW1ENXLy5Kr4Q_Nnla', 'CrowdHuman_train02.zip'],
+      ['1tdp0UCgxrqy1B6p8LkR-Iy0aIJ8l4fJW', 'CrowdHuman_train03.zip'],
+      ['1UUTea5mYqvlUObsC1Z8CFldHJAtLtMX3', 'annotation_train.odgt'],
+      ['10WIRwu8ju8GRLuCkZ_vT6hnNxs5ptwoL', 'annotation_val.odgt']
+      ['18jFI789CoHTppQ7vmRSFEdnGaSQZ4YzO', 'CrowdHuman_val.zip'],
+      ['1tQG3E_RrRI4wIGskorLTmDiWHH2okVvk', 'CrowdHuman_test.zip'],
+  ]
+
+  yolo_like_urls = [f'https://drive.google.com/file/d/{gdrive_id[0]}/view?usp=drive_link' for gdrive_id in urls]
+  dir = Path(yaml['path'])  # dataset root dir
+  # Download data
+  download(yolo_like_urls, dir=dir, threads=7)
