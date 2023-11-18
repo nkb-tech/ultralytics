@@ -28,7 +28,12 @@ RUN git clone https://github.com/nkb-tech/ultralytics -b main /usr/src/ultralyti
 ADD https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt /usr/src/ultralytics/
 
 # Install pip packages
-RUN python3 -m pip install --upgrade pip wheel
+RUN python3 -m pip install --upgrade pip wheel setuptools
+RUN git clone https://github.com/open-mmlab/mmcv.git /usr/src/mmcv && \
+    cd /usr/src/mmcv && \
+    git checkout 2.x && git rev-parse --short HEAD && \
+    pip install --no-cache-dir -e .[all] -v
+
 RUN pip install --no-cache -e ".[export]" albumentations comet pycocotools pytest-cov && \
     # Due to error when installing albumentations
     # module 'cv2.dnn' has no attribute 'DictValue'

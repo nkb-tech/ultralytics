@@ -185,7 +185,7 @@ class Exporter:
             raise SystemError('Edge TPU export only supported on Linux. See https://coral.ai/docs/edgetpu/compiler/')
 
         # Input
-        im = torch.zeros(self.args.batch, 3, *self.imgsz).to(self.device)
+        im = torch.zeros(self.args.batch, 3, *self.imgsz, device=self.device)
         file = Path(
             getattr(model, 'pt_path', None) or getattr(model, 'yaml_file', None) or model.yaml.get('yaml_file', ''))
         if file.suffix in {'.yaml', '.yml'}:
@@ -214,6 +214,7 @@ class Exporter:
                 m.forward = m.forward_split
 
         y = None
+
         for _ in range(2):
             y = model(im)  # dry runs
 
