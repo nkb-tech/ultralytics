@@ -425,11 +425,10 @@ class ONNX_NMS(torch.autograd.Function):
         """
         batch = scores.shape[0]
         num_det = random.randint(0, 100)
-        batches = torch.randint(0, batch, (num_det,)).sort()[0]
-        idxs = torch.arange(100, 100 + num_det)
-        zeros = torch.zeros((num_det,), dtype=torch.int64)
+        batches = torch.randint(0, batch, (num_det,), dtype=torch.int64, device=boxes.device).sort()[0]
+        idxs = torch.arange(100, 100 + num_det, dtype=torch.int64, device=boxes.device)
+        zeros = torch.zeros((num_det,), dtype=torch.int64, device=boxes.device)
         selected_indices = torch.cat([batches[None], zeros[None], idxs[None]], 0).T.contiguous()
-        selected_indices = selected_indices.to(torch.int64)
         return selected_indices
 
     @staticmethod

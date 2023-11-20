@@ -81,13 +81,13 @@ class DCNv3Function(Function):
     def symbolic(g, input, offset, mask, kernel_h, kernel_w, stride_h,
                  stride_w, pad_h, pad_w, dilation_h, dilation_w, group,
                  group_channels, offset_scale, im2col_step, remove_center):
-        """Symbolic function for mmdeploy::DCNv3.
+        """Symbolic function for TRT::DCNv3_TRT.
 
         Returns:
             DCNv3 op for onnx.
         """
         return g.op(
-            'mmdeploy::TRTDCNv3',
+            'TRT::DCNv3_TRT',
             input,
             offset,
             mask,
@@ -103,7 +103,7 @@ class DCNv3Function(Function):
             group_channels_i=int(group_channels),
             offset_scale_f=float(offset_scale),
             im2col_step_i=int(im2col_step),
-            remove_center=int(remove_center),
+            remove_center_i=int(remove_center),
         )
 
 

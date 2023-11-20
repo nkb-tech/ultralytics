@@ -40,11 +40,17 @@ class Detect(nn.Module):
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
-    def forward(self, x):
-        """Concatenates and returns predicted bounding boxes and class probabilities."""
+    def pre_forward(self, x):
         shape = x[0].shape  # BCHW
         for i in range(self.nl):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+
+        return x, shape
+
+    def forward(self, x):
+        """Concatenates and returns predicted bounding boxes and class probabilities."""
+        x, shape = self.pre_forward(x)
+
         if self.training:
             return x
         elif self.dynamic or self.shape != shape:
@@ -408,10 +414,8 @@ class PostDetectTRTNMS(nn.Module):
 
     def _forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         '''Decode yolov8 model output'''
-        shape = x[0].shape
-        b, res, b_reg_num = shape[0], [], self.reg_max * 4
-        for i in range(self.nl):
-            res.append(torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1))
+        res, shape = self.pre_forward(x)
+        b, b_reg_num = shape[0], self.reg_max * 4
         if self.dynamic or self.shape != shape:
             self.anchors, self.strides = (x.transpose(
                 0, 1) for x in make_anchors(x, self.stride, 0.5))
@@ -420,7 +424,7 @@ class PostDetectTRTNMS(nn.Module):
         y = torch.cat(x, 2)
         boxes, scores = y[:, :b_reg_num, ...], y[:, b_reg_num:, ...].sigmoid()
         boxes = boxes.view(b, 4, self.reg_max, -1).permute(0, 1, 3, 2)
-        boxes = boxes.softmax(-1) @ torch.arange(self.reg_max).to(boxes)
+        boxes = boxes.softmax(-1) @ torch.arange(self.reg_max, device=boxes.device, dtype=boxes.dtype)
         boxes0, boxes1 = -boxes[:, :2, ...], boxes[:, 2:, ...]
         boxes = self.anchors.repeat(b, 2, 1) + torch.cat([boxes0, boxes1], 1)
         boxes = boxes * self.strides

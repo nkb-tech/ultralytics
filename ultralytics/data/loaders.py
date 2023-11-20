@@ -388,6 +388,8 @@ class LoadImages:
         """Create a new video capture object."""
         self.frame = 0
         self.cap = cv2.VideoCapture(path)
+        if not self.cap.isOpened():
+            raise ConnectionError(f'Failed to open video stream at {path}')
         self.frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) / self.vid_stride)
 
     def __len__(self):
