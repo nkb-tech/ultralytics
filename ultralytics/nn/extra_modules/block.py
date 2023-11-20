@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ...nn.modules import Conv, Bottleneck, C3, C2f
+from ...nn.modules import Conv, Bottleneck, C3, C2f, C2
 from ...nn.modules.conv import autopad, HSigmoid
 from .ops_dcnv3.modules import DCNv3, DCNv3_DyHead
 
@@ -14,7 +14,7 @@ try:
 except ImportError:
     pass
 
-__all__ = ['DyReLU', 'DyDCNv2', 'DyHeadBlock', 'DyHeadBlockWithDCNV3', 'Bottleneck_DCNV3', 'C3_DCNv3', 'C2f_DCNv3']
+__all__ = ['DyReLU', 'DyDCNv2', 'DyHeadBlock', 'DyHeadBlockWithDCNV3', 'Bottleneck_DCNV3', 'C3_DCNv3', 'C2f_DCNv3', 'C2_DCNv3', 'DCNV3_YOLO']
 
 
 class DyReLU(nn.Module):
@@ -173,9 +173,9 @@ class DyHeadBlock(nn.Module):
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                torch.nn.init.normal_(m, 0, 0.01)
+                torch.nn.init.normal_(m.weight, 0, 0.01)
         if self.zero_init_offset:
-            torch.nn.init.constant_(self.spatial_conv_offset, 0)
+            torch.nn.init.constant_(self.spatial_conv_offset.bias, 0)
 
     def forward(self, x):
         """Forward function."""
@@ -243,9 +243,9 @@ class DyHeadBlockWithDCNV3(nn.Module):
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                torch.nn.init.normal_(m, 0, 0.01)
+                torch.nn.init.normal_(m.weight, 0, 0.01)
         if self.zero_init_offset:
-            torch.nn.init.constant_(self.spatial_conv_offset, 0)
+            torch.nn.init.constant_(self.spatial_conv_offset.bias, 0)
 
     def forward(self, x):
         """Forward function."""
@@ -331,3 +331,8 @@ class C2f_DCNv3(C2f):
     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
         super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(Bottleneck_DCNV3(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
+
+class C2_DCNv3(C2):
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.Sequential(*(Bottleneck_DCNV3(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n)))

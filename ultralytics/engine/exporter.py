@@ -66,6 +66,7 @@ from ultralytics.data.dataset import YOLODataset
 from ultralytics.data.utils import check_det_dataset
 from ultralytics.nn.autobackend import check_class_names
 from ultralytics.nn.modules import C2f, Detect, RTDETRDecoder, PostDetectTRTNMS, PostDetectONNXNMS
+from ultralytics.nn.extra_modules import C2f_DCNv3, Detect_DyHead, Detect_DyHeadWithDCNV3
 from ultralytics.nn.tasks import DetectionModel, SegmentationModel
 from ultralytics.utils import (ARM64, DEFAULT_CFG, LINUX, LOGGER, MACOS, ROOT, WINDOWS, __version__, callbacks,
                                colorstr, get_default_args, yaml_save)
@@ -199,17 +200,19 @@ class Exporter:
         model.float()
         model = model.fuse()
         for m in model.modules():
-            if isinstance(m, (Detect, RTDETRDecoder)):  # Segment and Pose use Detect base class
+            if isinstance(m, (Detect, RTDETRDecoder, Detect_DyHead, Detect_DyHeadWithDCNV3)):  # Segment and Pose use Detect base class
                 m.dynamic = self.args.dynamic
                 m.export = True
                 m.format = self.args.format
-                if isinstance(m, Detect) and self.args.nms and (onnx or engine):
+                # TODO support RTDETRDecoder with nms=True
+                if not isinstance(m, RTDETRDecoder) and self.args.nms and (onnx or engine):
                     post_detect_class = PostDetectTRTNMS if engine else PostDetectONNXNMS
                     post_detect_class.conf_thres = self.args.conf
                     post_detect_class.iou_thres = self.args.iou
                     post_detect_class.max_det = self.args.max_det
+                    post_detect_class.pre_forward = m.pre_forward
                     setattr(m, '__class__', post_detect_class)
-            elif isinstance(m, C2f) and not any((saved_model, pb, tflite, edgetpu, tfjs)):
+            elif isinstance(m, (C2f, C2f_DCNv3)) and not any((saved_model, pb, tflite, edgetpu, tfjs)):
                 # EdgeTPU does not support FlexSplitV while split provides cleaner ONNX graph
                 m.forward = m.forward_split
 
@@ -618,6 +621,11 @@ class Exporter:
             if LINUX:
                 check_requirements('nvidia-tensorrt', cmds='-U --index-url https://pypi.ngc.nvidia.com')
             import tensorrt as trt  # noqa
+
+        import ctypes
+        plugin_path = '/usr/src/ultralytics/ultralytics/nn/extra_modules/ops_dcnv3/tensorrt/modulatedDeformConvV3Plugin/build/dcnv3_plugin.so'
+        if os.path.exists(plugin_path):
+            ctypes.CDLL(plugin_path)
 
         check_version(trt.__version__, '7.0.0', hard=True)  # require tensorrt>=7.0.0
         self.args.simplify = True

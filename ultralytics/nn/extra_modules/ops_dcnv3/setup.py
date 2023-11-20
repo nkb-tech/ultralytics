@@ -9,9 +9,7 @@ import glob
 
 import torch
 
-from torch.utils.cpp_extension import CUDA_HOME
-from torch.utils.cpp_extension import CppExtension
-from torch.utils.cpp_extension import CUDAExtension
+from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
 
 from setuptools import find_packages
 from setuptools import setup
@@ -37,10 +35,10 @@ def get_extensions():
         sources += source_cuda
         define_macros += [("WITH_CUDA", None)]
         extra_compile_args["nvcc"] = [
-            # "-DCUDA_HAS_FP16=1",
-            # "-D__CUDA_NO_HALF_OPERATORS__",
-            # "-D__CUDA_NO_HALF_CONVERSIONS__",
-            # "-D__CUDA_NO_HALF2_OPERATORS__",
+            "-DCUDA_HAS_FP16=1",
+            "-D__CUDA_NO_HALF_OPERATORS__",
+            "-D__CUDA_NO_HALF_CONVERSIONS__",
+            "-D__CUDA_NO_HALF2_OPERATORS__",
         ]
     else:
         raise NotImplementedError('Cuda is not availabel')
