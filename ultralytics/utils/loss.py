@@ -220,7 +220,8 @@ class v8DetectionLoss:
         h = model.args  # hyperparameters
 
         m = model.model[-1]  # Detect() module
-        self.bce = nn.BCEWithLogitsLoss(reduction='none')
+        self.bce = VarifocalLoss()
+        # self.bce = nn.BCEWithLogitsLoss(reduction='none')  # basic yolo loss
         # self.bce = EMASlideLoss(nn.BCEWithLogitsLoss(reduction='none'))  # Exponential Moving Average Slide Loss
         # self.bce = SlideLoss(nn.BCEWithLogitsLoss(reduction='none')) # Slide Loss
         self.hyp = h
@@ -299,7 +300,7 @@ class v8DetectionLoss:
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        if isinstance(self.bce, nn.BCEWithLogitsLoss):
+        if isinstance(self.bce, nn.BCEWithLogitsLoss, VarifocalLoss, FocalLoss):
             loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
         elif isinstance(self.bce, (EMASlideLoss, SlideLoss)):
             auto_iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True).mean()

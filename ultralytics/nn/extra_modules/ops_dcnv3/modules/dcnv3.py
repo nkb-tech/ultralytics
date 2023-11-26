@@ -14,7 +14,7 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn.init import xavier_uniform_, constant_
 from ..functions import DCNv3Function, dcnv3_core_pytorch
-from ....modules.conv import Conv
+from ultralytics.nn.modules import Conv
 
 class to_channels_first(nn.Module):
 

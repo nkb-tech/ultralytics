@@ -3,15 +3,14 @@ import torch
 import torch.nn as nn
 
 from ultralytics.utils.tal import dist2bbox, make_anchors
+from ultralytics.nn.modules import Conv, DFL
+from ultralytics.nn.extra_modules import AFPN_P345, AFPN_P345_Custom, AFPN_P2345, AFPN_P2345_Custom
+from .block import DyHeadBlockWithDCNV3
 
-from ...nn.modules import Conv, DFL
-from .afpn import AFPN_P345, AFPN_P345_Custom, AFPN_P2345, AFPN_P2345_Custom
-from .block import DyHeadBlock, DyHeadBlockWithDCNV3
-
-__all__ = ['Detect_DyHead', 'Detect_DyHeadWithDCNV3', 'Detect_AFPN_P345', 'Detect_AFPN_P345_Custom', 'Detect_AFPN_P2345', 'Detect_AFPN_P2345_Custom']
+__all__ = ['Detect_DyHeadWithDCNV3', 'Detect_AFPN_P345', 'Detect_AFPN_P345_Custom', 'Detect_AFPN_P2345', 'Detect_AFPN_P2345_Custom']
 
 
-class Detect_DyHead(nn.Module):
+class Detect_DyHeadWithDCNV3(nn.Module):
     """YOLOv8 Detect head with DyHead for detection models."""
     dynamic = False  # force grid reconstruction
     export = False  # export mode
@@ -28,7 +27,7 @@ class Detect_DyHead(nn.Module):
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], self.nc)  # channels
         self.conv = nn.ModuleList(nn.Sequential(Conv(x, hidc, 1)) for x in ch)
-        self.dyhead = nn.Sequential(*[DyHeadBlock(hidc) for i in range(block_num)])
+        self.dyhead = nn.Sequential(*[DyHeadBlockWithDCNV3(hidc) for i in range(block_num)])
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch)
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch)
@@ -82,12 +81,6 @@ class Detect_DyHead(nn.Module):
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
             b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
-
-
-class Detect_DyHeadWithDCNV3(Detect_DyHead):
-    def __init__(self, nc=80, hidc=256, block_num=2, ch=()):
-        super().__init__(nc, hidc, block_num, ch)
-        self.dyhead = nn.Sequential(*[DyHeadBlockWithDCNV3(hidc) for i in range(block_num)])
 
 
 class Detect_AFPN_P345(nn.Module):

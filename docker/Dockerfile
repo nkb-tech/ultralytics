@@ -28,23 +28,29 @@ RUN git clone https://github.com/nkb-tech/ultralytics -b main /usr/src/ultralyti
 ADD https://github.com/ultralytics/assets/releases/download/v0.0.0/yolov8n.pt /usr/src/ultralytics/
 
 # Install pip packages
-RUN python3 -m pip install --upgrade pip wheel setuptools
 # Due to error when installing albumentations
 # module 'cv2.dnn' has no attribute 'DictValue'
 # Downgrade opencv version to 4.8.0.74
-RUN pip uninstall \
+RUN python3 -m pip install \
+    --upgrade \
+        pip \
+        wheel \
+        setuptools && \
+    python3 -m pip install \
+        --no-cache \
+        --editable \
+            ".[export]" \
+            albumentations \
+            comet \
+            pycocotools \
+            pytest-cov && \
+    python3 -m pip uninstall \
         --yes \
             opencv-python-headless \
             opencv-python && \
     pip install \
         --no-cache \
-            opencv-python==4.8.0.74 && \
-    # dcnv3
-    git clone https://github.com/open-mmlab/mmcv.git /usr/src/mmcv && \
-    cd /usr/src/mmcv && \
-    pip install --no-cache-dir -e .[all] -v
-
-RUN pip install --no-cache -e ".[export]" albumentations comet pycocotools pytest-cov && \
+            opencv-python==4.8.0.74
 
 # Run exports to AutoInstall packages
 RUN yolo export model=tmp/yolov8n.pt format=edgetpu imgsz=32

@@ -8,6 +8,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from .activation import HSigmoid
+
 __all__ = ('Conv', 'Conv2', 'LightConv', 'DWConv', 'DWConvTranspose2d', 'ConvTranspose', 'Focus', 'GhostConv',
            'ChannelAttention', 'SpatialAttention', 'CBAM', 'Concat', 'RepConv', 'trunc_normal_')
 
@@ -93,8 +95,7 @@ def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups=1, b
 
 class Conv(nn.Module):
     """Standard convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)."""
-    default_act = nn.SiLU()  # default activation
-
+    default_act = nn.SiLU(inplace=True)  # default activation
     def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
         """Initialize Conv layer with given arguments including activation."""
         super().__init__()
@@ -624,15 +625,6 @@ class IFM(nn.Module):
 
     def forward(self, x):
         return self.conv(x)
-
-
-class HSigmoid(nn.Module):
-    def __init__(self, inplace=True):
-        super(HSigmoid, self).__init__()
-        self.relu = nn.ReLU6(inplace=inplace)
-
-    def forward(self, x):
-        return self.relu(x + 3) / 6
 
 
 class InjectionMultiSumAutoPool(nn.Module):
