@@ -20,7 +20,7 @@ __all__ = [
 
 class PartialConv3(nn.Module):
 
-    def __init__(self, dim, n_div, forward):
+    def __init__(self, dim, n_div, forward='split_cat'):
         super().__init__()
         self.dim_conv3 = dim // n_div
         self.dim_untouched = dim - self.dim_conv3

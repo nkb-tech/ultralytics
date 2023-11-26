@@ -1,20 +1,45 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.onnx import register_custom_op_symbolic
+from torch.onnx import symbolic_helper
 
-from ...nn.modules import Conv, Bottleneck, C3, C2f, C2
-from ...nn.modules.conv import autopad, HSigmoid
-from .ops_dcnv3.modules import DCNv3, DCNv3_DyHead
-
+from ultralytics.nn.extra_modules.attention import MPCA, EfficientAttention
+from ultralytics.nn.modules import Conv, Bottleneck, C3, C2f, C2, DropPath
+from ultralytics.nn.modules.conv import autopad, onnx_AdaptiveAvgPool2d
 from ultralytics.utils.torch_utils import make_divisible
 
-try:
-    from mmcv.cnn import build_activation_layer, build_norm_layer
-    from mmcv.ops.modulated_deform_conv import ModulatedDeformConv2d
-except ImportError:
-    pass
+from ..backbone import PartialConv3
+from .ops_dcnv3.modules import DCNv3, DCNv3_DyHead
+from ..modules.activation import HSigmoid
 
-__all__ = ['DyReLU', 'DyDCNv2', 'DyHeadBlock', 'DyHeadBlockWithDCNV3', 'Bottleneck_DCNV3', 'C3_DCNv3', 'C2f_DCNv3', 'C2_DCNv3', 'DCNV3_YOLO']
+__all__ = ['DyReLU', 'DyHeadBlockWithDCNV3', 'Bottleneck_DCNV3', 'C3_DCNv3', 'C2f_DCNv3', 
+           'C2_DCNv3', 'DCNV3_YOLO', 'DCNv2', 'Bottleneck_DCNV2', 'C3_DCNv2', 'C2f_DCNv2',
+           'DCNv2_Offset_Attention', 'DCNv2_Dynamic', 'Bottleneck_DCNV2_Dynamic', 'C3_DCNv2_Dynamic',
+           'C2f_DCNv2_Dynamic', 'C2f_CloAtt', 'C3_CloAtt', 'C2f_Faster', 'C3_Faster']
+
+
+@symbolic_helper.parse_args('v', 'v', 'v', 'v', 'v', 'i', 'i', 'i', 'i', 'i', 'i', 'i', 'i', 'i')
+def symbolic_dcnv2_forward(g, x, weight, offset, mask, bias, stride_x, stride_y, padding_x, padding_y, dilation_x, dilation_y, group, deformable_group, use_mask):
+    """symbolic_dcnv2_forward"""
+    # weights as last input to align with TRT plugin
+    return g.op(
+        "TRT::ModulatedDeformConv2d",
+        x,  # input
+        offset,  # offset
+        mask,  # mask
+        weight,  # weight
+        bias,  # bias
+        stride_i=[stride_x, stride_y],
+        padding_i=[padding_x, padding_y],
+        dilation_i=[dilation_x, dilation_y],
+        group_i=group,
+        deformable_group_i=deformable_group,
+    )
+
+# Register custom symbolic function
+register_custom_op_symbolic("torchvision::deform_conv2d", symbolic_dcnv2_forward, 11)
 
 
 class DyReLU(nn.Module):
@@ -25,7 +50,7 @@ class DyReLU(nn.Module):
         self.oup = inp
         self.lambda_a = lambda_a * 2
         self.K2 = K2
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.avg_pool = nn.functional.adaptive_avg_pool2d
 
         self.use_bias = use_bias
         if K2:
@@ -58,6 +83,8 @@ class DyReLU(nn.Module):
             self.spa = None
 
     def forward(self, x):
+        if torch.onnx.is_in_onnx_export():
+            self.avg_pool = onnx_AdaptiveAvgPool2d
         if isinstance(x, list):
             x_in = x[0]
             x_out = x[1]
@@ -65,7 +92,7 @@ class DyReLU(nn.Module):
             x_in = x
             x_out = x
         b, c, h, w = x_in.size()
-        y = self.avg_pool(x_in).view(b, c)
+        y = self.avg_pool(x_in, 1).view(b, c)
         y = self.fc(y).view(b, self.oup * self.exp, 1, 1)
         if self.exp == 4:
             a1, b1, a2, b2 = torch.split(y, self.oup, dim=1)
@@ -102,110 +129,188 @@ class DyReLU(nn.Module):
         return out
 
 
-class DyDCNv2(nn.Module):
-    """ModulatedDeformConv2d with normalization layer used in DyHead.
-    This module cannot be configured with `conv_cfg=dict(type='DCNv2')`
-    because DyHead calculates offset and mask from middle-level feature.
-    Args:
-        in_channels (int): Number of input channels.
-        out_channels (int): Number of output channels.
-        stride (int | tuple[int], optional): Stride of the convolution.
-            Default: 1.
-        norm_cfg (dict, optional): Config dict for normalization layer.
-            Default: dict(type='GN', num_groups=16, requires_grad=True).
-    """
+class DCNv2(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=None, groups=1, dilation=1, act=True, deformable_groups=1):
+        super(DCNv2, self).__init__()
 
-    def __init__(self,
-                 in_channels,
-                 out_channels,
-                 stride=1,
-                 norm_cfg=dict(type='GN', num_groups=16, requires_grad=True)):
-        super().__init__()
-        self.with_norm = norm_cfg is not None
-        bias = not self.with_norm
-        self.conv = ModulatedDeformConv2d(
-            in_channels, out_channels, 3, stride=stride, padding=1, bias=bias)
-        if self.with_norm:
-            self.norm = build_norm_layer(norm_cfg, out_channels)[1]
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = (kernel_size, kernel_size)
+        self.stride = (stride, stride)
+        padding = autopad(kernel_size, padding, dilation)
+        self.padding = (padding, padding)
+        self.dilation = (dilation, dilation)
+        self.groups = groups
+        self.deformable_groups = deformable_groups
 
-    def forward(self, x, offset, mask):
-        """Forward function."""
-        x = self.conv(x.contiguous(), offset, mask)
-        if self.with_norm:
-            x = self.norm(x)
-        return x
+        self.weight = nn.Parameter(
+            torch.empty(out_channels, in_channels, *self.kernel_size)
+        )
+        self.bias = nn.Parameter(torch.empty(out_channels))
 
-
-class DyHeadBlock(nn.Module):
-    """DyHead Block with three types of attention.
-    HSigmoid arguments in default act_cfg follow official code, not paper.
-    https://github.com/microsoft/DynamicHead/blob/master/dyhead/dyrelu.py
-    """
-
-    def __init__(self,
-                 in_channels,
-                 norm_type='GN',
-                 zero_init_offset=True,
-                 act_cfg=dict(type='HSigmoid', bias=3.0, divisor=6.0)):
-        super().__init__()
-        self.zero_init_offset = zero_init_offset
-
-        # (offset_x, offset_y, mask) * kernel_size_y * kernel_size_x
-        self.offset_and_mask_dim = 3 * 3 * 3
-        self.offset_dim = 2 * 3 * 3
-
-        if norm_type == 'GN':
-            norm_dict = dict(type='GN', num_groups=16, requires_grad=True)
-        elif norm_type == 'BN':
-            norm_dict = dict(type='BN', requires_grad=True)
-        
-        self.spatial_conv_high = DyDCNv2(in_channels, in_channels, norm_cfg=norm_dict)
-        self.spatial_conv_mid = DyDCNv2(in_channels, in_channels)
-        self.spatial_conv_low = DyDCNv2(in_channels, in_channels, stride=2)
-        self.spatial_conv_offset = nn.Conv2d(
-            in_channels, self.offset_and_mask_dim, 3, padding=1)
-        self.scale_attn_module = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1), nn.Conv2d(in_channels, 1, 1),
-            nn.PReLU(1), build_activation_layer(act_cfg))
-        self.task_attn_module = DyReLU(in_channels)
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                torch.nn.init.normal_(m.weight, 0, 0.01)
-        if self.zero_init_offset:
-            torch.nn.init.constant_(self.spatial_conv_offset.bias, 0)
+        out_channels_offset_mask = (self.deformable_groups * 3 *
+                                    self.kernel_size[0] * self.kernel_size[1])
+        self.conv_offset_mask = nn.Conv2d(
+            self.in_channels,
+            out_channels_offset_mask,
+            kernel_size=self.kernel_size,
+            stride=self.stride,
+            padding=self.padding,
+            bias=True,
+        )
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = Conv.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+        self.reset_parameters()
 
     def forward(self, x):
-        """Forward function."""
-        outs = []
-        for level in range(len(x)):
-            # calculate offset and mask of DCNv2 from middle-level feature
-            offset_and_mask = self.spatial_conv_offset(x[level])
-            offset = offset_and_mask[:, :self.offset_dim, :, :]
-            mask = offset_and_mask[:, self.offset_dim:, :, :].sigmoid()
+        offset_mask = self.conv_offset_mask(x)
+        o1, o2, mask = torch.chunk(offset_mask, 3, dim=1)
+        offset = torch.cat((o1, o2), dim=1)
+        mask = torch.sigmoid(mask)
+        x = torch.ops.torchvision.deform_conv2d(
+            x,
+            self.weight,
+            offset,
+            mask,
+            self.bias,
+            self.stride[0], self.stride[1],
+            self.padding[0], self.padding[1],
+            self.dilation[0], self.dilation[1],
+            self.groups,
+            self.deformable_groups,
+            True
+        )
+        x = self.bn(x)
+        x = self.act(x)
+        return x
 
-            mid_feat = self.spatial_conv_mid(x[level], offset, mask)
-            sum_feat = mid_feat * self.scale_attn_module(mid_feat)
-            summed_levels = 1
-            if level > 0:
-                low_feat = self.spatial_conv_low(x[level - 1], offset, mask)
-                sum_feat += low_feat * self.scale_attn_module(low_feat)
-                summed_levels += 1
-            if level < len(x) - 1:
-                # this upsample order is weird, but faster than natural order
-                # https://github.com/microsoft/DynamicHead/issues/25
-                high_feat = F.interpolate(
-                    self.spatial_conv_high(x[level + 1], offset, mask),
-                    size=x[level].shape[-2:],
-                    mode='bilinear',
-                    align_corners=True)
-                sum_feat += high_feat * self.scale_attn_module(high_feat)
-                summed_levels += 1
-            outs.append(self.task_attn_module(sum_feat / summed_levels))
+    def reset_parameters(self):
+        n = self.in_channels
+        for k in self.kernel_size:
+            n *= k
+        std = 1. / math.sqrt(n)
+        self.weight.data.uniform_(-std, std)
+        self.bias.data.zero_()
+        self.conv_offset_mask.weight.data.zero_()
+        self.conv_offset_mask.bias.data.zero_()
 
-        return outs
+
+class Bottleneck_DCNV2(Bottleneck):
+    """Standard bottleneck with DCNV2."""
+
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):  # ch_in, ch_out, shortcut, groups, kernels, expand
+        super().__init__(c1, c2, shortcut, g, k, e)
+        c_ = int(c2 * e)  # hidden channels
+        self.cv2 = DCNv2(c_, c2, k[1], 1)
+
+
+class C3_DCNv2(C3):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)  # hidden channels
+        self.m = nn.Sequential(*(Bottleneck_DCNV2(c_, c_, shortcut, g, k=(1, 3), e=1.0) for _ in range(n)))
+
+
+class C2f_DCNv2(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(Bottleneck_DCNV2(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
+
+
+class DCNv2_Offset_Attention(nn.Module):
+    def __init__(self, in_channels, kernel_size, stride, deformable_groups=1) -> None:
+        super().__init__()
+        
+        padding = autopad(kernel_size, None, 1)
+        self.out_channel = (deformable_groups * 3 * kernel_size * kernel_size)
+        self.conv_offset_mask = nn.Conv2d(in_channels, self.out_channel, kernel_size, stride, padding, bias=True)
+        self.attention = MPCA(self.out_channel)
+        
+    def forward(self, x):
+        conv_offset_mask = self.conv_offset_mask(x)
+        conv_offset_mask = self.attention(conv_offset_mask)
+        return conv_offset_mask
+
+
+class DCNv2_Dynamic(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1,
+                 padding=None, groups=1, dilation=1, act=True, deformable_groups=1):
+        super(DCNv2_Dynamic, self).__init__()
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = (kernel_size, kernel_size)
+        self.stride = (stride, stride)
+        padding = autopad(kernel_size, padding, dilation)
+        self.padding = (padding, padding)
+        self.dilation = (dilation, dilation)
+        self.groups = groups
+        self.deformable_groups = deformable_groups
+
+        self.weight = nn.Parameter(
+            torch.empty(out_channels, in_channels, *self.kernel_size)
+        )
+        self.bias = nn.Parameter(torch.empty(out_channels))
+
+        self.conv_offset_mask = DCNv2_Offset_Attention(in_channels, kernel_size, stride, deformable_groups)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.act = Conv.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+        self.reset_parameters()
+
+    def forward(self, x):
+        offset_mask = self.conv_offset_mask(x)
+        o1, o2, mask = torch.chunk(offset_mask, 3, dim=1)
+        offset = torch.cat((o1, o2), dim=1)
+        mask = torch.sigmoid(mask)
+        x = torch.ops.torchvision.deform_conv2d(
+            x,
+            self.weight,
+            offset,
+            mask,
+            self.bias,
+            self.stride[0], self.stride[1],
+            self.padding[0], self.padding[1],
+            self.dilation[0], self.dilation[1],
+            self.groups,
+            self.deformable_groups,
+            True
+        )
+        x = self.bn(x)
+        x = self.act(x)
+        return x
+
+    def reset_parameters(self):
+        n = self.in_channels
+        for k in self.kernel_size:
+            n *= k
+        std = 1. / math.sqrt(n)
+        self.weight.data.uniform_(-std, std)
+        self.bias.data.zero_()
+        self.conv_offset_mask.conv_offset_mask.weight.data.zero_()
+        self.conv_offset_mask.conv_offset_mask.bias.data.zero_()
+
+
+class Bottleneck_DCNV2_Dynamic(Bottleneck):
+    """Standard bottleneck with DCNV2."""
+
+    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 3), e=0.5):  # ch_in, ch_out, shortcut, groups, kernels, expand
+        super().__init__(c1, c2, shortcut, g, k, e)
+        c_ = int(c2 * e)  # hidden channels
+        self.cv2 = DCNv2_Dynamic(c_, c2, k[1], 1)
+
+
+class C3_DCNv2_Dynamic(C3):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)  # hidden channels
+        self.m = nn.Sequential(*(Bottleneck_DCNV2_Dynamic(c_, c_, shortcut, g, k=(1, 3), e=1.0) for _ in range(n)))
+
+
+class C2f_DCNv2_Dynamic(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(Bottleneck_DCNV2_Dynamic(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
     
 
 class DyHeadBlockWithDCNV3(nn.Module):
@@ -234,9 +339,10 @@ class DyHeadBlockWithDCNV3(nn.Module):
         self.spatial_conv_low = DCNv3_DyHead(in_channels, stride=2)
         self.spatial_conv_offset = nn.Conv2d(
             in_channels, self.offset_and_mask_dim, 3, padding=1, groups=4)
+        self.pool = nn.functional.adaptive_avg_pool2d
         self.scale_attn_module = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1), nn.Conv2d(in_channels, 1, 1),
-            nn.PReLU(1), build_activation_layer(act_cfg))
+            nn.Conv2d(in_channels, 1, 1),
+            nn.PReLU(1), HSigmoid())
         self.task_attn_module = DyReLU(in_channels)
         self._init_weights()
 
@@ -249,6 +355,8 @@ class DyHeadBlockWithDCNV3(nn.Module):
 
     def forward(self, x):
         """Forward function."""
+        if torch.onnx.is_in_onnx_export():
+            self.pool = onnx_AdaptiveAvgPool2d
         outs = []
         for level in range(len(x)):
             # calculate offset and mask of DCNv2 from middle-level feature
@@ -258,12 +366,14 @@ class DyHeadBlockWithDCNV3(nn.Module):
             mask = offset_and_mask[:, self.offset_dim:, :, :].sigmoid()
 
             mid_feat = self.spatial_conv_mid(x[level], offset, mask)
+            mid_feat = self.pool(mid_feat, 1)
             sum_feat = mid_feat * self.scale_attn_module(mid_feat)
             summed_levels = 1
             if level > 0:
                 low_feat_ = self.dw_conv_low(x[level - 1])
                 offset, mask = self.get_offset_mask(low_feat_)
                 low_feat = self.spatial_conv_low(x[level - 1], offset, mask)
+                low_feat = self.pool(low_feat, 1)
                 sum_feat += low_feat * self.scale_attn_module(low_feat)
                 summed_levels += 1
             if level < len(x) - 1:
@@ -276,6 +386,7 @@ class DyHeadBlockWithDCNV3(nn.Module):
                     size=x[level].shape[-2:],
                     mode='bilinear',
                     align_corners=True)
+                high_feat = self.pool(high_feat, 1)
                 sum_feat += high_feat * self.scale_attn_module(high_feat)
                 summed_levels += 1
             outs.append(self.task_attn_module(sum_feat / summed_levels))
@@ -313,6 +424,7 @@ class DCNV3_YOLO(nn.Module):
         x = self.act(self.bn(x))
         return x
 
+
 class Bottleneck_DCNV3(Bottleneck):
     """Standard bottleneck with DCNV3."""
 
@@ -332,7 +444,103 @@ class C2f_DCNv3(C2f):
         super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(Bottleneck_DCNV3(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
 
+class C2f_DCNv2(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(Bottleneck_DCNV2(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
+
 class C2_DCNv3(C2):
     def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
         super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.Sequential(*(Bottleneck_DCNV3(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n)))
+
+
+class Bottleneck_CloAtt(Bottleneck):
+    """Standard bottleneck With CloAttention."""
+
+    def __init__(self, c1, c2, shortcut=True, g=1, k=..., e=0.5):
+        super().__init__(c1, c2, shortcut, g, k, e)
+        self.attention = EfficientAttention(c2)
+    
+    def forward(self, x):
+        """'forward()' applies the YOLOv5 FPN to input data."""
+        return x + self.attention(self.cv2(self.cv1(x))) if self.add else self.attention(self.cv2(self.cv1(x)))
+
+class C2f_CloAtt(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(Bottleneck_CloAtt(self.c, self.c, shortcut, g, k=(3, 3), e=1.0) for _ in range(n))
+
+class C3_CloAtt(C3):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)  # hidden channels
+        self.m = nn.Sequential(*(Bottleneck_CloAtt(c_, c_, shortcut, g, k=((1, 1), (3, 3)), e=1.0) for _ in range(n)))
+
+
+class Faster_Block(nn.Module):
+    def __init__(self,
+                 inc,
+                 dim,
+                 n_div=4,
+                 mlp_ratio=2,
+                 drop_path=0.1,
+                 layer_scale_init_value=0.0,
+                 pconv_fw_type='split_cat'
+                 ):
+        super().__init__()
+        self.dim = dim
+        self.mlp_ratio = mlp_ratio
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.n_div = n_div
+
+        mlp_hidden_dim = int(dim * mlp_ratio)
+
+        mlp_layer = [
+            Conv(dim, mlp_hidden_dim, 1),
+            nn.Conv2d(mlp_hidden_dim, dim, 1, bias=False)
+        ]
+
+        self.mlp = nn.Sequential(*mlp_layer)
+
+        self.spatial_mixing = PartialConv3(
+            dim,
+            n_div,
+            pconv_fw_type
+        )
+        
+        self.adjust_channel = None
+        if inc != dim:
+            self.adjust_channel = Conv(inc, dim, 1)
+
+        if layer_scale_init_value > 0:
+            self.layer_scale = nn.Parameter(layer_scale_init_value * torch.ones((dim)), requires_grad=True)
+            self.forward = self.forward_layer_scale
+        else:
+            self.forward = self.forward
+
+    def forward(self, x):
+        if self.adjust_channel is not None:
+            x = self.adjust_channel(x)
+        shortcut = x
+        x = self.spatial_mixing(x)
+        x = shortcut + self.drop_path(self.mlp(x))
+        return x
+
+    def forward_layer_scale(self, x):
+        shortcut = x
+        x = self.spatial_mixing(x)
+        x = shortcut + self.drop_path(
+            self.layer_scale.unsqueeze(-1).unsqueeze(-1) * self.mlp(x))
+        return x
+    
+class C3_Faster(C3):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)  # hidden channels
+        self.m = nn.Sequential(*(Faster_Block(c_, c_) for _ in range(n)))
+
+class C2f_Faster(C2f):
+    def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(Faster_Block(self.c, self.c) for _ in range(n))

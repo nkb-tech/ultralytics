@@ -25,6 +25,7 @@ from .conv import (CBAM, ChannelAttention, Concat, Conv, Conv2, ConvTranspose, D
 from .head import (Classify, Detect, Pose, RTDETRDecoder, Segment, PostDetectTRTNMS, PostDetectONNXNMS)
 from .transformer import (AIFI, MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer, LayerNorm2d,
                           MLPBlock, MSDeformAttn, TransformerBlock, TransformerEncoderLayer, TransformerLayer)
+from .activation import MemoryEfficientSwish, HSigmoid
 
 __all__ = ('Conv', 'Conv2', 'LightConv', 'RepConv', 'DWConv', 'DWConvTranspose2d', 'ConvTranspose', 'Focus',
            'GhostConv', 'ChannelAttention', 'SpatialAttention', 'CBAM', 'Concat', 'TransformerLayer', 'PostDetectTRTNMS',
@@ -33,4 +34,4 @@ __all__ = ('Conv', 'Conv2', 'LightConv', 'RepConv', 'DWConv', 'DWConvTranspose2d
            'Segment', 'Pose', 'Classify', 'TransformerEncoderLayer', 'RepC3', 'RTDETRDecoder', 'AIFI', 'Efficient_TRT_NMS',
            'DeformableTransformerDecoder', 'DeformableTransformerDecoderLayer', 'MSDeformAttn', 'MLP', 'ONNX_NMS',
            'PostDetectONNXNMS', 'ResBlockCBAM', 'SimFusion4In', 'SimFusion3In', 'IFM', 'InjectionMultiSumAutoPool',
-           'PyramidPoolAgg', 'AdvPoolFusion', 'TopBasicLayer', 'DropPath', 'trunc_normal_')
+           'PyramidPoolAgg', 'AdvPoolFusion', 'TopBasicLayer', 'DropPath', 'trunc_normal_', 'MemoryEfficientSwish', 'HSigmoid')

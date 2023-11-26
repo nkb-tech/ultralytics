@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ...nn.modules import Conv, C2f
+from ultralytics.nn.modules import Conv
 
 __all__ = ['AFPN_P345', 'AFPN_P345_Custom', 'AFPN_P2345', 'AFPN_P2345_Custom']
 
