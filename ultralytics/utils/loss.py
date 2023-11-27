@@ -220,7 +220,7 @@ class v8DetectionLoss:
         h = model.args  # hyperparameters
 
         m = model.model[-1]  # Detect() module
-        self.bce = FocalLoss()
+        self.bce = VarifocalLoss()
         # self.bce = nn.BCEWithLogitsLoss(reduction='none')  # basic yolo loss
         # self.bce = EMASlideLoss(nn.BCEWithLogitsLoss(reduction='none'))  # Exponential Moving Average Slide Loss
         # self.bce = SlideLoss(nn.BCEWithLogitsLoss(reduction='none')) # Slide Loss
@@ -238,7 +238,7 @@ class v8DetectionLoss:
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
         self.grid_cell_offset = 0.5
-        self.fpn_strides = list(self.stride.detach().cpu().numpy())
+        self.fpn_strides = self.stride.detach().cpu().numpy().tolist()
         self.grid_cell_size = 5.0
 
     def preprocess(self, targets, batch_size, scale_tensor):
@@ -291,16 +291,18 @@ class v8DetectionLoss:
         # Pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
 
-        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+        target_labels, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             pred_scores.detach().sigmoid(), (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor, gt_labels, gt_bboxes, mask_gt)
 
         target_scores_sum = max(target_scores.sum(), 1)
 
         # Cls loss
-        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        if isinstance(self.bce, (nn.BCEWithLogitsLoss, VarifocalLoss, FocalLoss)):
+        if isinstance(self.bce, VarifocalLoss):
+            target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
+            one_hot_label = F.one_hot(target_labels, self.nc + 1)[..., :-1]
+            loss[1] = self.bce(pred_scores, target_scores, one_hot_label).sum() / target_scores_sum  # VFL way
+        elif isinstance(self.bce, (nn.BCEWithLogitsLoss, FocalLoss)):
             loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
         elif isinstance(self.bce, (EMASlideLoss, SlideLoss)):
             auto_iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True).mean()
