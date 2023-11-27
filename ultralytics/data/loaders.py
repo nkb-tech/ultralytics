@@ -108,20 +108,13 @@ class LoadStreams:
         self.frames = [0] * n  # number of frames in each stream
         self.threads = [None] * n  # buffer stored streams
         self.shape = [[] for _ in range(n)]
-        self.imgs = []  # buffer with images
-        self.fps = [0] * n  # fps of each stream
-        self.frames = [0] * n  # number of frames in each stream
-        self.threads = [None] * n  # buffer stored streams
-        self.shape = [[] for _ in range(n)]
         self.caps = [None] * n  # video capture objects
-        self.buffer_lengths = [0] * n  # keep buffer lengths
         self.buffer_lengths = [0] * n  # keep buffer lengths
         for i, s in enumerate(sources):  # index, source
             # Start thread to read frames from video stream
             st = f'{i + 1}/{n}: {s}... '
             if urlparse(s).hostname in ('www.youtube.com', 'youtube.com', 'youtu.be'):  # if source is YouTube video
                 # YouTube format i.e. 'https://www.youtube.com/watch?v=Zgi9g1ksQHc' or 'https://youtu.be/LNwODJXcvt4'
-                raise NotImplementedError(f'Kaggle, YouTube are not supported now.')
                 raise NotImplementedError(f'Kaggle, YouTube are not supported now.')
             s = eval(s) if s.isnumeric() else s  # i.e. s = '0' local webcam
             if s == 0 and (is_colab() or is_kaggle()):
@@ -132,10 +125,6 @@ class LoadStreams:
                 raise ConnectionError(f'{st}Failed to open {s}')
             w = int(self.caps[i].get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(self.caps[i].get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = self.caps[i].get(cv2.CAP_PROP_FPS)
-            # warning: may return 0 or nan
-            if not math.isfinite(fps) or fps == 0:
-                LOGGER.warning(f'{st}Warning ⚠️ Stream returned {fps} FPS, set defaut 30 FPS.')
             fps = self.caps[i].get(cv2.CAP_PROP_FPS)
             # warning: may return 0 or nan
             if not math.isfinite(fps) or fps == 0:
@@ -155,28 +144,12 @@ class LoadStreams:
             buf = deque(maxlen=stream_buffer_length)
             buf.append(im)
             self.imgs.append(buf)
-            stream_buffer_length = \
-                math.ceil(self.fps[i]) \
-                if (isinstance(buffer_length, str) and buffer_length == 'auto') \
-                    or buffer_length == -1 \
-                else buffer_length
-            self.buffer_lengths[i] = stream_buffer_length
-            buf = deque(maxlen=stream_buffer_length)
-            buf.append(im)
-            self.imgs.append(buf)
             self.shape[i] = im.shape
             self.threads[i] = Thread(target=self.update, args=([i, self.caps[i], s]), daemon=True)
             LOGGER.info(f'{st}Success ✅ ({self.frames[i]} frames of shape {w}x{h} at {self.fps[i]:.2f} FPS)')
 
         self.new_fps = min(self.fps) if isinstance(vid_fps, str) and vid_fps == 'auto' else vid_fps  # fps alignment
-
-        self.new_fps = min(self.fps) if isinstance(vid_fps, str) and vid_fps == 'auto' else vid_fps  # fps alignment
         LOGGER.info('')  # newline
-
-        # run all threads
-        for i in range(n):
-            self.threads[i].start()
-        
 
         # run all threads
         for i in range(n):
@@ -194,20 +167,7 @@ class LoadStreams:
                 im = None
                 LOGGER.warning(f'WARNING ⚠️ Video stream {i} unresponsive, please check your IP camera connection.')
                 cap.open(stream)  # re-open stream if signal was lost
-            success = cap.grab()  # .read() = .grab() followed by .retrieve()
-            if not success:
-                im = None
-                LOGGER.warning(f'WARNING ⚠️ Video stream {i} unresponsive, please check your IP camera connection.')
-                cap.open(stream)  # re-open stream if signal was lost
             else:
-                success, im = cap.retrieve()
-                if not success:
-                    im = None
-                    LOGGER.warning(f'WARNING ⚠️ Cannot decode image from video stream {i}. Unknown error.')
-            self.imgs[i].append(im)
-            n += 1
-        else:
-            LOGGER.info(f'End of stream {i}.')
                 success, im = cap.retrieve()
                 if not success:
                     im = None
@@ -243,13 +203,7 @@ class LoadStreams:
         # sleep to align fps
         time.sleep(1 / self.new_fps)
 
-
-        # sleep to align fps
-        time.sleep(1 / self.new_fps)
-
         for i, x in enumerate(self.imgs):
-            # If image is not available
-            if not x:
             # If image is not available
             if not x:
                 if not self.threads[i].is_alive() or cv2.waitKey(1) == ord('q'):  # q to quit
@@ -258,14 +212,7 @@ class LoadStreams:
                 LOGGER.warning(f'WARNING ⚠️ Waiting for stream {i}')
                 im = None
             # Get the last element from buffer
-                LOGGER.warning(f'WARNING ⚠️ Waiting for stream {i}')
-                im = None
-            # Get the last element from buffer
             else:
-                # Main process just read from buffer, not delete
-                im = x[-1]
-
-            images.append(im)
                 # Main process just read from buffer, not delete
                 im = x[-1]
 

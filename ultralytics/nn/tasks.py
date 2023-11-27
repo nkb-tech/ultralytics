@@ -11,7 +11,7 @@ from ultralytics.nn.modules import (SimFusion4In, SimFusion3In, IFM, InjectionMu
                                     AdvPoolFusion, TopBasicLayer, AIFI, C1, C2, C3, C3TR, SPP, SPPF, Bottleneck,
                                     BottleneckCSP, C2f, C3Ghost, C3x, Classify, Concat, Conv, Conv2, ConvTranspose,
                                     Detect, DWConv, DWConvTranspose2d, Focus, GhostBottleneck, GhostConv, HGBlock,
-                                    HGStem, Pose, RepC3, RepConv, RTDETRDecoder, Segment, ResBlockCBAM)
+                                    HGStem, Pose, RepC3, RepConv, RTDETRDecoder, Segment, ResBlockCBAM, DetectEfficient)
 from ultralytics.nn.backbone.convnextv2 import (convnextv2_atto, convnextv2_pico, convnextv2_base, convnextv2_femto,
                                                 convnextv2_huge, convnextv2_large, convnextv2_nano, convnextv2_tiny)
 from ultralytics.nn.extra_modules import (Detect_AFPN_P345, Detect_AFPN_P345_Custom, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom,
@@ -195,7 +195,7 @@ class BaseModel(nn.Module):
         """
         self = super()._apply(fn)
         m = self.model[-1]  # Detect()
-        if isinstance(m, (Detect, Segment, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom)):
+        if isinstance(m, (Detect, Segment, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, DetectEfficient)):
             m.stride = fn(m.stride)
             m.anchors = fn(m.anchors)
             m.strides = fn(m.strides)
@@ -626,7 +626,8 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     # Module updates
     for m in ensemble.modules():
         t = type(m)
-        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Segment, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom):
+        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Segment, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345,
+                 Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, DetectEfficient):
             m.inplace = inplace  # torch 1.7.0 compatibility
         elif t is nn.Upsample and not hasattr(m, 'recompute_scale_factor'):
             m.recompute_scale_factor = None  # torch 1.11.0 compatibility
@@ -662,7 +663,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     # Module updates
     for m in model.modules():
         t = type(m)
-        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Segment):
+        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Segment, DetectEfficient):
             m.inplace = inplace
         elif t is nn.Upsample and not hasattr(m, 'recompute_scale_factor'):
             m.recompute_scale_factor = None  # torch 1.11.0 compatibility
@@ -770,7 +771,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f], *args]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in (Detect, Segment, Pose, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom):
+        elif m in (Detect, Segment, Pose, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom,
+                   Detect_AFPN_P345, Detect_AFPN_P345_Custom, DetectEfficient):
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
@@ -881,7 +883,8 @@ def guess_model_task(model):
                 return cfg2task(eval(x))
 
         for m in model.modules():
-            if isinstance(m, Detect):
+            if isinstance(m, (Detect, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, DetectEfficient,
+                          Detect_AFPN_P345, Detect_AFPN_P345_Custom, Detect_DyHeadWithDCNV3)):
                 return 'detect'
             elif isinstance(m, Segment):
                 return 'segment'

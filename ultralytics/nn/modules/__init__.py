@@ -22,7 +22,7 @@ from .block import (C1, C2, C3, C3TR, DFL, SPP, SPPF, Bottleneck, BottleneckCSP,
 from .conv import (CBAM, ChannelAttention, Concat, Conv, Conv2, ConvTranspose, DWConv, DWConvTranspose2d, Focus,
                    GhostConv, LightConv, RepConv, SpatialAttention, ResBlockCBAM, SimFusion4In, SimFusion3In, 
                    IFM, InjectionMultiSumAutoPool, PyramidPoolAgg, AdvPoolFusion, TopBasicLayer, DropPath, trunc_normal_)
-from .head import (Classify, Detect, Pose, RTDETRDecoder, Segment, PostDetectTRTNMS, PostDetectONNXNMS)
+from .head import (Classify, Detect, Pose, RTDETRDecoder, Segment, PostDetectTRTNMS, PostDetectONNXNMS, DetectEfficient)
 from .transformer import (AIFI, MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer, LayerNorm2d,
                           MLPBlock, MSDeformAttn, TransformerBlock, TransformerEncoderLayer, TransformerLayer)
 from .activation import MemoryEfficientSwish, HSigmoid
@@ -34,4 +34,5 @@ __all__ = ('Conv', 'Conv2', 'LightConv', 'RepConv', 'DWConv', 'DWConvTranspose2d
            'Segment', 'Pose', 'Classify', 'TransformerEncoderLayer', 'RepC3', 'RTDETRDecoder', 'AIFI', 'Efficient_TRT_NMS',
            'DeformableTransformerDecoder', 'DeformableTransformerDecoderLayer', 'MSDeformAttn', 'MLP', 'ONNX_NMS',
            'PostDetectONNXNMS', 'ResBlockCBAM', 'SimFusion4In', 'SimFusion3In', 'IFM', 'InjectionMultiSumAutoPool',
-           'PyramidPoolAgg', 'AdvPoolFusion', 'TopBasicLayer', 'DropPath', 'trunc_normal_', 'MemoryEfficientSwish', 'HSigmoid')
+           'PyramidPoolAgg', 'AdvPoolFusion', 'TopBasicLayer', 'DropPath', 'trunc_normal_', 'MemoryEfficientSwish', 'HSigmoid',
+           'DetectEfficient', )

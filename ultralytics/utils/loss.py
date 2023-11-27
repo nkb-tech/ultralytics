@@ -93,7 +93,7 @@ class VarifocalLoss(nn.Module):
         weight = alpha * pred_score.sigmoid().pow(gamma) * (1 - label) + gt_score * label
         with torch.cuda.amp.autocast(enabled=False):
             loss = (F.binary_cross_entropy_with_logits(pred_score.float(), gt_score.float(), reduction='none') *
-                    weight).mean(1).sum()
+                    weight)
         return loss
 
 
@@ -115,7 +115,7 @@ class FocalLoss(nn.Module):
         if alpha > 0:
             alpha_factor = label * alpha + (1 - label) * (1 - alpha)
             loss *= alpha_factor
-        return loss.mean(1).sum()
+        return loss
     
 
 class QFocalLoss(nn.Module):
@@ -135,7 +135,7 @@ class QFocalLoss(nn.Module):
             alpha_factor = label * alpha + (1 - label) * (1 - alpha)
             loss *= alpha_factor
 
-        return loss.mean(1).sum()
+        return loss
 
 
 class BboxLoss(nn.Module):
@@ -220,7 +220,7 @@ class v8DetectionLoss:
         h = model.args  # hyperparameters
 
         m = model.model[-1]  # Detect() module
-        self.bce = VarifocalLoss()
+        self.bce = FocalLoss()
         # self.bce = nn.BCEWithLogitsLoss(reduction='none')  # basic yolo loss
         # self.bce = EMASlideLoss(nn.BCEWithLogitsLoss(reduction='none'))  # Exponential Moving Average Slide Loss
         # self.bce = SlideLoss(nn.BCEWithLogitsLoss(reduction='none')) # Slide Loss
@@ -300,7 +300,7 @@ class v8DetectionLoss:
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        if isinstance(self.bce, nn.BCEWithLogitsLoss, VarifocalLoss, FocalLoss):
+        if isinstance(self.bce, (nn.BCEWithLogitsLoss, VarifocalLoss, FocalLoss)):
             loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
         elif isinstance(self.bce, (EMASlideLoss, SlideLoss)):
             auto_iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True).mean()

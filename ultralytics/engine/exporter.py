@@ -65,7 +65,7 @@ from ultralytics.cfg import get_cfg
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.data.utils import check_det_dataset
 from ultralytics.nn.autobackend import check_class_names
-from ultralytics.nn.modules import C2f, Detect, RTDETRDecoder, PostDetectTRTNMS, PostDetectONNXNMS
+from ultralytics.nn.modules import C2f, Detect, RTDETRDecoder, PostDetectTRTNMS, PostDetectONNXNMS, DetectEfficient
 from ultralytics.nn.extra_modules import C2f_DCNv3, Detect_DyHeadWithDCNV3, C2f_CloAtt, C2f_Faster
 from ultralytics.nn.tasks import DetectionModel, SegmentationModel
 from ultralytics.utils import (ARM64, DEFAULT_CFG, LINUX, LOGGER, MACOS, ROOT, WINDOWS, __version__, callbacks,
@@ -200,7 +200,7 @@ class Exporter:
         model.float()
         model = model.fuse()
         for m in model.modules():
-            if isinstance(m, (Detect, RTDETRDecoder, Detect_DyHeadWithDCNV3)):  # Segment and Pose use Detect base class
+            if isinstance(m, (Detect, RTDETRDecoder, Detect_DyHeadWithDCNV3, DetectEfficient)):  # Segment and Pose use Detect base class
                 m.dynamic = self.args.dynamic
                 m.export = True
                 m.format = self.args.format
