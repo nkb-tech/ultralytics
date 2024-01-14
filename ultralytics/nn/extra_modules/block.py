@@ -6,7 +6,7 @@ from torch.onnx import register_custom_op_symbolic
 from torch.onnx import symbolic_helper
 
 from ultralytics.nn.extra_modules.attention import MPCA, EfficientAttention
-from ultralytics.nn.modules import Conv, Bottleneck, C3, C2f, C2, DropPath
+from ultralytics.nn.modules import Conv, Bottleneck, C3, C2f, C2, DropPath, GhostConv
 from ultralytics.nn.modules.conv import autopad, onnx_AdaptiveAvgPool2d
 from ultralytics.utils.torch_utils import make_divisible
 
@@ -17,7 +17,7 @@ from ..modules.activation import HSigmoid
 __all__ = ['DyReLU', 'DyHeadBlockWithDCNV3', 'Bottleneck_DCNV3', 'C3_DCNv3', 'C2f_DCNv3', 
            'C2_DCNv3', 'DCNV3_YOLO', 'DCNv2', 'Bottleneck_DCNV2', 'C3_DCNv2', 'C2f_DCNv2',
            'DCNv2_Offset_Attention', 'DCNv2_Dynamic', 'Bottleneck_DCNV2_Dynamic', 'C3_DCNv2_Dynamic',
-           'C2f_DCNv2_Dynamic', 'C2f_CloAtt', 'C3_CloAtt', 'C2f_Faster', 'C3_Faster']
+           'C2f_DCNv2_Dynamic', 'C2f_CloAtt', 'C3_CloAtt', 'C2f_Faster', 'C3_Faster', 'GhostHGBlock']
 
 
 @symbolic_helper.parse_args('v', 'v', 'v', 'v', 'v', 'i', 'i', 'i', 'i', 'i', 'i', 'i', 'i', 'i')
@@ -544,3 +544,93 @@ class C2f_Faster(C2f):
     def __init__(self, c1, c2, n=1, shortcut=False, g=1, e=0.5):
         super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(Faster_Block(self.c, self.c) for _ in range(n))
+
+
+class Fusion(nn.Module):
+    def __init__(self, inc_list, fusion='bifpn') -> None:
+        super().__init__()
+        
+        assert fusion in ['weight', 'adaptive', 'concat', 'bifpn']
+        self.fusion = fusion
+        
+        if self.fusion == 'bifpn':
+            self.fusion_weight = nn.Parameter(torch.ones(len(inc_list)), requires_grad=True)
+            self.relu = nn.ReLU()
+        else:
+            self.fusion_conv = nn.ModuleList([Conv(inc, inc, 1) for inc in inc_list])
+            if self.fusion == 'adaptive':
+                self.fusion_adaptive = Conv(sum(inc_list), len(inc_list), 1)
+    
+    def forward(self, x):
+        if self.fusion in ['weight', 'adaptive']:
+            for i in range(len(x)):
+                x[i] = self.fusion_conv[i](x[i])
+        if self.fusion == 'weight':
+            return torch.sum(torch.stack(x, dim=0), dim=0)
+        elif self.fusion == 'adaptive':
+            fusion = torch.softmax(self.fusion_adaptive(torch.cat(x, dim=1)), dim=1)
+            x_weight = torch.split(fusion, [1] * len(x), dim=1)
+            return torch.sum(torch.stack([x_weight[i] * x[i] for i in range(len(x))], dim=0), dim=0)
+        elif self.fusion == 'concat':
+            return torch.cat(x, dim=1)
+        elif self.fusion == 'bifpn':
+            fusion_weight = self.relu(self.fusion_weight)
+            fusion_weight = fusion_weight / fusion_weight.sum(dim=0)
+            return torch.sum(torch.stack([fusion_weight[i] * x[i] for i in range(len(x))], dim=0), dim=0)
+
+
+class CAM(nn.Module):
+    def __init__(self, inc, fusion='weight'):
+        super().__init__()
+        
+        assert fusion in ['weight', 'adaptive', 'concat']
+        self.fusion = fusion
+        
+        self.conv1 = Conv(inc, inc, 3, 1, None, 1, 1)
+        self.conv2 = Conv(inc, inc, 3, 1, None, 1, 3)
+        self.conv3 = Conv(inc, inc, 3, 1, None, 1, 5)
+        
+        self.fusion_1 = Conv(inc, inc, 1)
+        self.fusion_2 = Conv(inc, inc, 1)
+        self.fusion_3 = Conv(inc, inc, 1)
+
+        if self.fusion == 'adaptive':
+            self.fusion_4 = Conv(inc * 3, 3, 1)
+    
+    def forward(self, x):
+        x1 = self.conv1(x)
+        x2 = self.conv2(x)
+        x3 = self.conv3(x)
+        
+        if self.fusion == 'weight':
+            return self.fusion_1(x1) + self.fusion_2(x2) + self.fusion_3(x3)
+        elif self.fusion == 'adaptive':
+            fusion = torch.softmax(self.fusion_4(torch.cat([self.fusion_1(x1), self.fusion_2(x2), self.fusion_3(x3)], dim=1)), dim=1)
+            x1_weight, x2_weight, x3_weight = torch.split(fusion, [1, 1, 1], dim=1)
+            return x1 * x1_weight + x2 * x2_weight + x3 * x3_weight
+        else:
+            return torch.cat([self.fusion_1(x1), self.fusion_2(x2), self.fusion_3(x3)], dim=1)
+
+
+class GhostHGBlock(nn.Module):
+    """
+    HGBlock of PPHGNetV2 with 2 convolutions and LightConv.
+
+    https://github.com/PaddlePaddle/PaddleDetection/blob/develop/ppdet/modeling/backbones/hgnet_v2.py
+    """
+
+    def __init__(self, c1, cm, c2, k=3, n=6, lightconv=False, shortcut=False, act=nn.ReLU()):
+        """Initializes a CSP Bottleneck with 1 convolution using specified input and output channels."""
+        super().__init__()
+        block = GhostConv if lightconv else Conv
+        self.m = nn.ModuleList(block(c1 if i == 0 else cm, cm, k=k, act=act) for i in range(n))
+        self.sc = Conv(c1 + n * cm, c2 // 2, 1, 1, act=act)  # squeeze conv
+        self.ec = Conv(c2 // 2, c2, 1, 1, act=act)  # excitation conv
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        """Forward pass of a PPHGNetV2 backbone layer."""
+        y = [x]
+        y.extend(m(y[-1]) for m in self.m)
+        y = self.ec(self.sc(torch.cat(y, 1)))
+        return y + x if self.add else y

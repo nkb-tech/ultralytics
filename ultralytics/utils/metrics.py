@@ -183,7 +183,7 @@ def bbox_iou(
 
     iou = inter / union
 
-    if scale:
+    if scale and WIoU:
         wiou_scale = WIoUScale(1 - iou)
 
     if focal:
@@ -316,11 +316,11 @@ def bbox_iou(
         giou = iou - (c_area - union) / c_area
         if focal:
             return giou, focal_scale
-        return (giou, )  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+        return giou  # GIoU https://arxiv.org/pdf/1902.09630.pdf
 
     if focal:
         return iou, focal_scale
-    return (iou, )  # IoU
+    return iou  # IoU
 
 
 def wasserstein_loss(box1, box2, xywh=False, eps=1e-7, constant=12.8):

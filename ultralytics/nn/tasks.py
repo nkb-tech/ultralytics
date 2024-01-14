@@ -16,7 +16,7 @@ from ultralytics.nn.backbone.convnextv2 import (convnextv2_atto, convnextv2_pico
                                                 convnextv2_huge, convnextv2_large, convnextv2_nano, convnextv2_tiny)
 from ultralytics.nn.extra_modules import (Detect_AFPN_P345, Detect_AFPN_P345_Custom, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom,
                                           C3_DCNv3, C2f_DCNv3, Detect_DyHeadWithDCNV3, DCNV3_YOLO, C2_DCNv3, C2f_DCNv2_Dynamic,
-                                          MHSA, C3_CloAtt, C2f_CloAtt, C2f_Faster, C3_Faster)
+                                          MHSA, C3_CloAtt, C2f_CloAtt, C2f_Faster, C3_Faster, CAM, Fusion, GhostHGBlock)
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8PoseLoss, v8SegmentationLoss
@@ -82,8 +82,8 @@ class BaseModel(nn.Module):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
+            x = m(x)  # run
             if hasattr(m, 'backbone'):
-                x = m(x)
                 for _ in range(5 - len(x)):
                     x.insert(0, None)
                 for i_idx, i in enumerate(x):
@@ -93,7 +93,6 @@ class BaseModel(nn.Module):
                         y.append(None)
                 x = x[-1]
             else:
-                x = m(x)  # run
                 y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
@@ -119,7 +118,11 @@ class BaseModel(nn.Module):
             None
         """
         c = m == self.model[-1] and isinstance(x, list)  # is final layer list, copy input as inplace fix
-        flops = thop.profile(m, inputs=[x.copy() if c else x], verbose=False)[0] / 1E9 * 2 if thop else 0  # FLOPs
+        if isinstance(x, list):
+            bs = x[0].size(0)
+        else:
+            bs = x.size(0)
+        flops = thop.profile(m, inputs=[x.copy() if c else x], verbose=False)[0] / 1E9 * 2 / bs if thop else 0  # FLOPs
         t = time_sync()
         for _ in range(10):
             m(x.copy() if c else x)
@@ -195,7 +198,9 @@ class BaseModel(nn.Module):
         """
         self = super()._apply(fn)
         m = self.model[-1]  # Detect()
-        if isinstance(m, (Detect, Segment, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, DetectEfficient)):
+        if isinstance(m, (Detect, Segment, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345,
+                          Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom,
+                          DetectEfficient)):
             m.stride = fn(m.stride)
             m.anchors = fn(m.anchors)
             m.strides = fn(m.strides)
@@ -256,8 +261,10 @@ class DetectionModel(BaseModel):
         m = self.model[-1]  # Detect()
         device = 'cuda'
         self.model.to(device)
-        if isinstance(m, (Detect, Segment, Pose, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom)):
-            s = 640  # 2x min stride
+        if isinstance(m, (Detect, Segment, Pose, Detect_DyHeadWithDCNV3,
+                          Detect_AFPN_P2345, Detect_AFPN_P2345_Custom,
+                          Detect_AFPN_P345, Detect_AFPN_P345_Custom)):
+            s = 256  # 2x min stride
             m.inplace = self.inplace
             forward = lambda x: self.forward(x)[0] if isinstance(m, (Segment, Pose)) else self.forward(x)
             m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(2, ch, s, s, device=device))])  # forward
@@ -495,8 +502,21 @@ class RTDETRDetectionModel(DetectionModel):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            x = m(x)  # run
-            y.append(x if m.i in self.save else None)  # save output
+            x = m(x) # run
+            if hasattr(m, 'backbone'):
+                for _ in range(5 - len(x)):
+                    x.insert(0, None)
+                for i_idx, i in enumerate(x):
+                    if i_idx in self.save:
+                        y.append(i)
+                    else:
+                        y.append(None)
+                # for i in x:
+                #     if i is not None:
+                #         print(i.size())
+                x = x[-1]
+            else:
+                y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
         head = self.model[-1]
@@ -626,8 +646,9 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     # Module updates
     for m in ensemble.modules():
         t = type(m)
-        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Segment, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345,
-                 Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, DetectEfficient):
+        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect,
+                 Segment, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom,
+                 Detect_AFPN_P345, Detect_AFPN_P345_Custom, DetectEfficient):
             m.inplace = inplace  # torch 1.7.0 compatibility
         elif t is nn.Upsample and not hasattr(m, 'recompute_scale_factor'):
             m.recompute_scale_factor = None  # torch 1.11.0 compatibility
@@ -672,7 +693,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     return model, ckpt
 
 
-def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
+def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, input_channels(3)
     """Parse a YOLO model.yaml dictionary into a PyTorch model."""
     import ast
 
@@ -718,25 +739,28 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                         args[j] = a
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
-        if m in (Classify, ResBlockCBAM, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, DWConv, Focus, C2_DCNv3,
-                 BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3, DCNV3_YOLO, C3_DCNv3, C2f_DCNv3,
-                 C2f_DCNv2_Dynamic, C2f_CloAtt, C3_CloAtt, C2f_Faster, C3_Faster):
+        if m in (Classify, ResBlockCBAM, Conv, ConvTranspose, GhostConv, Bottleneck,
+                 GhostBottleneck, SPP, SPPF, DWConv, Focus, C2_DCNv3, BottleneckCSP,
+                 C1, C2, C2f, C3, C3TR, C3Ghost, nn.ConvTranspose2d, DWConvTranspose2d,
+                 C3x, RepC3, DCNV3_YOLO, C3_DCNv3, C2f_DCNv3, C2f_DCNv2_Dynamic,
+                 C2f_CloAtt, C3_CloAtt, C2f_Faster, C3_Faster):
             if args[0] == 'head_channel':
                 args[0] = d[args[0]]
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
             args = [c1, c2, *args[1:]]
-            if m in (BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, C3x, RepC3, C3_DCNv3, C2f_DCNv3, C2_DCNv3, C2f_DCNv2_Dynamic, C3_CloAtt, C2f_CloAtt,
-                     C2f_Faster, C3_Faster,):
+            if m in (BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, C3x, RepC3, C3_DCNv3,
+                     C2f_DCNv3, C2_DCNv3, C2f_DCNv2_Dynamic, C3_CloAtt, C2f_CloAtt,
+                     C2f_Faster, C3_Faster):
                 args.insert(2, n)  # number of repeats
                 n = 1
         elif m is AIFI:
             args = [ch[f], *args]
-        elif m in (HGStem, HGBlock):
+        elif m in (HGStem, HGBlock, GhostHGBlock):
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]
-            if m is HGBlock:
+            if m in (HGBlock, GhostHGBlock):
                 args.insert(4, n)  # number of repeats
                 n = 1
         elif m in (convnextv2_tiny, convnextv2_pico, convnextv2_atto, convnextv2_femto, 
@@ -771,11 +795,19 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f], *args]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in (Detect, Segment, Pose, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom,
-                   Detect_AFPN_P345, Detect_AFPN_P345_Custom, DetectEfficient):
+        elif m is CAM:
+            c1, c2 = ch[f], (ch[f] * 3 if args[0] == 'concat' else ch[f])
+            args = [c1, args[0]]
+        elif m in (Detect, Segment, Pose, Detect_DyHeadWithDCNV3, Detect_AFPN_P2345,
+                   Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom,
+                   DetectEfficient):
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
+        elif m is Fusion:
+            args[0] = d[args[0]]
+            c1, c2 = [ch[x] for x in f], (sum([ch[x] for x in f]) if args[0] == 'concat' else ch[f[0]])
+            args = [c1, args[0]]
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
         else:

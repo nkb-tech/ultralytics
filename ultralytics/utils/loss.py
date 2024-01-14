@@ -94,7 +94,7 @@ class VarifocalLoss(nn.Module):
         with torch.cuda.amp.autocast(enabled=False):
             loss = (F.binary_cross_entropy_with_logits(pred_score.float(), gt_score.float(), reduction='none') *
                     weight)
-        return loss
+        return loss.mean(1).sum()
 
 
 class FocalLoss(nn.Module):
@@ -115,7 +115,7 @@ class FocalLoss(nn.Module):
         if alpha > 0:
             alpha_factor = label * alpha + (1 - label) * (1 - alpha)
             loss *= alpha_factor
-        return loss
+        return loss.mean(1).sum()
     
 
 class QFocalLoss(nn.Module):
@@ -135,7 +135,7 @@ class QFocalLoss(nn.Module):
             alpha_factor = label * alpha + (1 - label) * (1 - alpha)
             loss *= alpha_factor
 
-        return loss
+        return loss.mean(1).sum()
 
 
 class BboxLoss(nn.Module):
@@ -301,12 +301,12 @@ class v8DetectionLoss:
         if isinstance(self.bce, VarifocalLoss):
             target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
             one_hot_label = F.one_hot(target_labels, self.nc + 1)[..., :-1]
-            loss[1] = self.bce(pred_scores, target_scores, one_hot_label).sum() / target_scores_sum  # VFL way
+            loss[1] = self.bce(pred_scores, target_scores, one_hot_label)  # VFL way
         elif isinstance(self.bce, (nn.BCEWithLogitsLoss, FocalLoss)):
-            loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+            loss[1] = self.bce(pred_scores, target_scores.to(dtype))  # BCE
         elif isinstance(self.bce, (EMASlideLoss, SlideLoss)):
             auto_iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True).mean()
-            loss[1] = self.bce(pred_scores, target_scores.to(dtype), auto_iou).sum() / target_scores_sum  # BCE
+            loss[1] = self.bce(pred_scores, target_scores.to(dtype), auto_iou)  # BCE
         else:
             raise RuntimeError('Define bce loss')
 
