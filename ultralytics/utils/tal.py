@@ -130,9 +130,11 @@ class TaskAlignedAssigner(nn.Module):
             elif len(iou) in (1, 2):
                 iou = bbox_iou_data[0]
             else:
-                raise RuntimeError(f'Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3')
+                raise RuntimeError(
+                    f"Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3"
+                )
         else:
-            RuntimeError(f'Bbox_iou output should be tuple, got {type(bbox_iou_data)}')
+            RuntimeError(f"Bbox_iou output should be tuple, got {type(bbox_iou_data)}")
 
         return iou.squeeze(-1).clamp_(0)
 

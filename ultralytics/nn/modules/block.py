@@ -355,7 +355,7 @@ class BottleneckCSP(nn.Module):
         y1 = self.cv3(self.m(self.cv1(x)))
         y2 = self.cv2(x)
         return self.cv4(self.act(self.bn(torch.cat((y1, y2), 1))))
-    
+
 
 class Efficient_TRT_NMS(torch.autograd.Function):
     """NMS block for YOLO-fused model for TensorRT."""
@@ -370,18 +370,14 @@ class Efficient_TRT_NMS(torch.autograd.Function):
         max_output_boxes: int = 100,
         background_class: int = -1,
         box_coding: int = 0,
-        plugin_version: str = '1',
+        plugin_version: str = "1",
         score_activation: int = 0,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         batch_size, num_boxes, num_classes = scores.shape
-        num_dets = torch.randint(0,
-                                 max_output_boxes, (batch_size, 1),
-                                 dtype=torch.int32)
+        num_dets = torch.randint(0, max_output_boxes, (batch_size, 1), dtype=torch.int32)
         boxes = torch.randn(batch_size, max_output_boxes, 4)
         scores = torch.randn(batch_size, max_output_boxes)
-        labels = torch.randint(0,
-                               num_classes, (batch_size, max_output_boxes),
-                               dtype=torch.int32)
+        labels = torch.randint(0, num_classes, (batch_size, max_output_boxes), dtype=torch.int32)
 
         return num_dets, boxes, scores, labels
 
@@ -396,23 +392,24 @@ class Efficient_TRT_NMS(torch.autograd.Function):
         background_class: int = -1,
         box_coding: int = 0,
         score_activation: int = 0,
-        plugin_version: str = '1',
+        plugin_version: str = "1",
     ) -> Tuple[Value, Value, Value, Value]:
-        out = g.op('TRT::EfficientNMS_TRT',
-                   boxes,
-                   scores,
-                   iou_threshold_f=iou_threshold,
-                   score_threshold_f=score_threshold,
-                   max_output_boxes_i=max_output_boxes,
-                   background_class_i=background_class,
-                   box_coding_i=box_coding,
-                   plugin_version_s=plugin_version,
-                   score_activation_i=score_activation,
-                   outputs=4,
-                   )
+        out = g.op(
+            "TRT::EfficientNMS_TRT",
+            boxes,
+            scores,
+            iou_threshold_f=iou_threshold,
+            score_threshold_f=score_threshold,
+            max_output_boxes_i=max_output_boxes,
+            background_class_i=background_class,
+            box_coding_i=box_coding,
+            plugin_version_s=plugin_version,
+            score_activation_i=score_activation,
+            outputs=4,
+        )
         nums_dets, boxes, scores, classes = out
         return nums_dets, boxes, scores, classes
-    
+
 
 class ONNX_NMS(torch.autograd.Function):
     @staticmethod
@@ -422,7 +419,8 @@ class ONNX_NMS(torch.autograd.Function):
         scores: Value,
         max_output_boxes: int = 100,
         iou_threshold: float = 0.45,
-        score_threshold: float = 0.25):
+        score_threshold: float = 0.25,
+    ):
         """
         Symbolic method to export an NonMaxSupression ONNX models.
         See details in https://github.com/onnx/onnx/blob/main/docs/Operators.md#nonmaxsuppression
@@ -464,18 +462,14 @@ class ONNX_NMS(torch.autograd.Function):
 
         # TODO check that max_num > 0
         max_output_boxes = g.op(
-            'Constant',
+            "Constant",
             value_t=torch.tensor(max_output_boxes, dtype=torch.long),
         )
-        iou_threshold = g.op(
-            'Constant',
-            value_t=torch.tensor([iou_threshold], dtype=torch.float))
-        score_threshold = g.op(
-            'Constant',
-            value_t=torch.tensor([score_threshold], dtype=torch.float))
+        iou_threshold = g.op("Constant", value_t=torch.tensor([iou_threshold], dtype=torch.float))
+        score_threshold = g.op("Constant", value_t=torch.tensor([score_threshold], dtype=torch.float))
 
         selected_indices = g.op(
-            'NonMaxSuppression',
+            "NonMaxSuppression",
             boxes,
             scores,
             max_output_boxes,

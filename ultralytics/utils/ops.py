@@ -145,7 +145,7 @@ def make_divisible(x, divisor):
 def soft_nms(bboxes, scores, iou_thresh=0.5, sigma=0.5, score_threshold=0.25):
     order = torch.arange(0, scores.size(0), device=bboxes.device)
     keep = []
-    
+
     while order.numel() > 1:
         if order.numel() == 1:
             keep.append(order[0])
@@ -153,24 +153,24 @@ def soft_nms(bboxes, scores, iou_thresh=0.5, sigma=0.5, score_threshold=0.25):
         else:
             i = order[0]
             keep.append(i)
-        
+
         iou = bbox_iou(bboxes[i], bboxes[order[1:]], xywh=False, EIoU=True).squeeze()
-        
+
         idx = (iou > iou_thresh).nonzero().squeeze()
-        if idx.numel() > 0: 
-            iou = iou[idx] 
-            newScores = torch.exp(-torch.pow(iou,2)/sigma)
-            scores[order[idx+1]] *= newScores
-        
-        newOrder = (scores[order[1:]] > score_threshold).nonzero().squeeze() 
-        if newOrder.numel() == 0: 
+        if idx.numel() > 0:
+            iou = iou[idx]
+            newScores = torch.exp(-torch.pow(iou, 2) / sigma)
+            scores[order[idx + 1]] *= newScores
+
+        newOrder = (scores[order[1:]] > score_threshold).nonzero().squeeze()
+        if newOrder.numel() == 0:
             break
         else:
-            maxScoreIndex = torch.argmax(scores[order[newOrder+1]]) 
-            if maxScoreIndex != 0: 
-                newOrder[[0,maxScoreIndex],] = newOrder[[maxScoreIndex,0],]
-            order = order[newOrder+1]
-    
+            maxScoreIndex = torch.argmax(scores[order[newOrder + 1]])
+            if maxScoreIndex != 0:
+                newOrder[[0, maxScoreIndex],] = newOrder[[maxScoreIndex, 0],]
+            order = order[newOrder + 1]
+
     return torch.tensor(keep, dtype=torch.long, device=bboxes.device)
 
 
@@ -207,7 +207,7 @@ def non_max_suppression(
     max_time_img=0.05,
     max_nms=30000,
     max_wh=7680,
-    nms_type='nms',
+    nms_type="nms",
     rotated=False,
 ):
     """
@@ -241,9 +241,9 @@ def non_max_suppression(
     """
 
     # Checks
-    assert nms_type in ('nms', 'soft-nms'), f'Invalid NMS Type {nms_type}, valid values are ("nms", "soft-nms")'
-    assert 0 <= conf_thres <= 1, f'Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0'
-    assert 0 <= iou_thres <= 1, f'Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0'
+    assert nms_type in ("nms", "soft-nms"), f'Invalid NMS Type {nms_type}, valid values are ("nms", "soft-nms")'
+    assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
+    assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
     if isinstance(prediction, (list, tuple)):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
         prediction = prediction[0]  # select only inference output
 
@@ -253,7 +253,7 @@ def non_max_suppression(
     mi = 4 + nc  # mask start index
     xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
 
-    nms_func = torchvision.ops.nms if nms_type == 'nms' else soft_nms
+    nms_func = torchvision.ops.nms if nms_type == "nms" else soft_nms
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
@@ -880,7 +880,7 @@ def clean_str(s):
     Returns:
         (str): a string with special characters replaced by an underscore _
     """
-    return re.sub(pattern='[|@#!¡·$€%&()=?¿^*;:,¨´><+]', repl='_', string=s)
+    return re.sub(pattern="[|@#!¡·$€%&()=?¿^*;:,¨´><+]", repl="_", string=s)
 
 
 def process_nms_trt_results(preds: List[Tensor], names: List[str]) -> List[Tensor]:
@@ -888,7 +888,7 @@ def process_nms_trt_results(preds: List[Tensor], names: List[str]) -> List[Tenso
     Filter TensorRT-like bounding box structure via `max_det`
 
     Args:
-        preds (List[torch.Tensor]): list of 
+        preds (List[torch.Tensor]): list of
             `num_dets` (shape: Bx1)
             `bboxes` (shape: BxTOP_Kx4)
             `labels` (shape: BxTOP_Kx1)
@@ -906,10 +906,10 @@ def process_nms_trt_results(preds: List[Tensor], names: List[str]) -> List[Tenso
     outputs = []
 
     for boxes, scores, labels, num_dets in zip(
-        named_dict['bboxes'],
-        named_dict['scores'],
-        named_dict['labels'],
-        named_dict['num_dets'],
+        named_dict["bboxes"],
+        named_dict["scores"],
+        named_dict["labels"],
+        named_dict["num_dets"],
     ):
         boxes, scores, labels = boxes[:num_dets], scores[:num_dets, None], labels[:num_dets, None]
         outputs.append(torch.hstack([boxes, scores, labels]))

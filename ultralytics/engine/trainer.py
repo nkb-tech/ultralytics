@@ -728,14 +728,14 @@ class BaseTrainer:
                 else:  # weight (with decay)
                     g[0].append(param)
 
-        if name in ('Adam', 'Adamax', 'AdamW', 'NAdam', 'RAdam'):
-            kwargs = {'lr': lr, 'betas': (momentum, 0.999), 'weight_decay': 0.0}
-            if name in ('Adam', 'AdamW'):
-                kwargs['amsgrad'] = True
-            if name in ('NAdam', 'RAdam'):
-                kwargs['decoupled_weight_decay'] = True
+        if name in ("Adam", "Adamax", "AdamW", "NAdam", "RAdam"):
+            kwargs = {"lr": lr, "betas": (momentum, 0.999), "weight_decay": 0.0}
+            if name in ("Adam", "AdamW"):
+                kwargs["amsgrad"] = True
+            if name in ("NAdam", "RAdam"):
+                kwargs["decoupled_weight_decay"] = True
             optimizer = getattr(optim, name, optim.Adam)(g[2], **kwargs)
-        elif name == 'RMSProp':
+        elif name == "RMSProp":
             optimizer = optim.RMSprop(g[2], lr=lr, momentum=momentum)
         elif name == "SGD":
             optimizer = optim.SGD(g[2], lr=lr, momentum=momentum, nesterov=True)

@@ -210,7 +210,7 @@ class AutoBackend(nn.Module):
             logger = trt.Logger(trt.Logger.INFO)
             if verbose:
                 logger.min_severity = trt.Logger.Severity.VERBOSE
-            trt.init_libnvinfer_plugins(logger, namespace='')
+            trt.init_libnvinfer_plugins(logger, namespace="")
             # Read file
             with open(w, "rb") as f, trt.Runtime(logger) as runtime:
                 meta_len = int.from_bytes(f.read(4), byteorder="little")  # read metadata length
@@ -343,15 +343,15 @@ class AutoBackend(nn.Module):
                     metadata[k] = int(v)
                 elif k in ("imgsz", "names", "kpt_shape") and isinstance(v, str):
                     metadata[k] = eval(v)
-            stride = metadata['stride']
-            task = metadata['task']
-            batch = metadata['batch']
-            imgsz = metadata['imgsz']
-            names = metadata['names']
-            nms = metadata['nms']
-            conf = metadata['conf']
-            max_det = metadata['max_det']
-            kpt_shape = metadata.get('kpt_shape')
+            stride = metadata["stride"]
+            task = metadata["task"]
+            batch = metadata["batch"]
+            imgsz = metadata["imgsz"]
+            names = metadata["names"]
+            nms = metadata["nms"]
+            conf = metadata["conf"]
+            max_det = metadata["max_det"]
+            kpt_shape = metadata.get("kpt_shape")
         elif not (pt or triton or nn_module):
             LOGGER.warning(f"WARNING ⚠️ Metadata not found for 'model={weights}'")
 

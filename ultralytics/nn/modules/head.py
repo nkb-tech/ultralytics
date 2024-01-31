@@ -72,8 +72,8 @@ class Detect(nn.Module):
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
 
         if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
-            box = x_cat[:, :self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         dbox = self.decode_bboxes(box)
@@ -106,6 +106,7 @@ class Detect(nn.Module):
 
 class DetectEfficient(Detect):
     """YOLOv8 Detect Efficient head for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -114,7 +115,7 @@ class DetectEfficient(Detect):
 
     def __init__(self, nc=80, ch=()):  # detection layer
         super().__init__(nc=nc, ch=ch)
-        self.stem = nn.ModuleList(nn.Sequential(Conv(x, x, 3), Conv(x, x, 3)) for x in ch) # two 3x3 Conv
+        self.stem = nn.ModuleList(nn.Sequential(Conv(x, x, 3), Conv(x, x, 3)) for x in ch)  # two 3x3 Conv
         self.cv2 = nn.ModuleList(nn.Conv2d(x, 4 * self.reg_max, 1) for x in ch)
         self.cv3 = nn.ModuleList(nn.Conv2d(x, self.nc, 1) for x in ch)
 
@@ -124,7 +125,7 @@ class DetectEfficient(Detect):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
 
         return x
-    
+
     def bias_init(self):
         """Initialize Detect() biases, WARNING: requires stride availability."""
         m = self  # self.model[-1]  # Detect() module
@@ -132,7 +133,7 @@ class DetectEfficient(Detect):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a.bias.data[:] = 1.0  # box
-            b.bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+            b.bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
 
 
 class Segment(Detect):
@@ -488,6 +489,7 @@ class RTDETRDecoder(nn.Module):
 
 class PostDetectTRTNMS(nn.Module):
     """YOLOv8 NMS-fused detection model for TensorRT export."""
+
     export = True
     shape = None
     dynamic = False
@@ -496,12 +498,11 @@ class PostDetectTRTNMS(nn.Module):
     max_det = 100
 
     def _forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        '''Decode yolov8 model output'''
+        """Decode yolov8 model output."""
         res, shape = self.pre_forward(x)
         b, b_reg_num = shape[0], self.reg_max * 4
         if self.dynamic or self.shape != shape:
-            self.anchors, self.strides = (x.transpose(
-                0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
         x = [i.view(b, self.no, -1) for i in res]
         y = torch.cat(x, 2)
@@ -519,15 +520,13 @@ class PostDetectTRTNMS(nn.Module):
         boxes, scores = self._forward(x)
 
         return Efficient_TRT_NMS.apply(
-            boxes.transpose(1, 2),
-            scores.transpose(1, 2),
-            self.iou_thres,
-            self.conf_thres,
-            self.max_det)
+            boxes.transpose(1, 2), scores.transpose(1, 2), self.iou_thres, self.conf_thres, self.max_det
+        )
 
 
 class PostDetectONNXNMS(PostDetectTRTNMS):
     """YOLOv8 NMS-fused detection model for ONNX export."""
+
     export = True
     shape = None
     dynamic = False

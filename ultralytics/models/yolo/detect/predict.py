@@ -23,19 +23,21 @@ class DetectionPredictor(BasePredictor):
     def postprocess(self, preds, img, orig_imgs):
         """Post-processes predictions and returns a list of Results objects."""
         if not self.nms:
-            preds = ops.non_max_suppression(preds,
-                                            self.args.conf,
-                                            self.args.iou,
-                                            agnostic=self.args.agnostic_nms,
-                                            max_det=self.args.max_det,
-                                            classes=self.args.classes)
+            preds = ops.non_max_suppression(
+                preds,
+                self.args.conf,
+                self.args.iou,
+                agnostic=self.args.agnostic_nms,
+                max_det=self.args.max_det,
+                classes=self.args.classes,
+            )
         elif self.engine:
             preds = ops.process_nms_trt_results(preds, self.output_names)
         elif self.onnx:
             preds = ops.process_nms_onnx_results(preds)
         else:
-            raise NotImplementedError('NMS end2end model is supported only in `engine` and `onnx` mode')
-        
+            raise NotImplementedError("NMS end2end model is supported only in `engine` and `onnx` mode")
+
         if not isinstance(orig_imgs, list):  # input images are a torch.Tensor, not a list
             orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)
 

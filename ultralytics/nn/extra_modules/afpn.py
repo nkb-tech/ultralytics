@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from ultralytics.nn.modules import Conv
 
-__all__ = ['AFPN_P345', 'AFPN_P345_Custom', 'AFPN_P2345', 'AFPN_P2345_Custom']
+__all__ = ["AFPN_P345", "AFPN_P345_Custom", "AFPN_P2345", "AFPN_P2345_Custom"]
 
 
 class BasicBlock(nn.Module):
@@ -30,8 +30,7 @@ class Upsample(nn.Module):
         super(Upsample, self).__init__()
 
         self.upsample = nn.Sequential(
-            Conv(in_channels, out_channels, 1),
-            nn.Upsample(scale_factor=scale_factor, mode='bilinear')
+            Conv(in_channels, out_channels, 1), nn.Upsample(scale_factor=scale_factor, mode="bilinear")
         )
 
     def forward(self, x):
@@ -94,8 +93,7 @@ class ASFF_2(nn.Module):
         levels_weight = self.weight_levels(levels_weight_v)
         levels_weight = F.softmax(levels_weight, dim=1)
 
-        fused_out_reduced = input1 * levels_weight[:, 0:1, :, :] + \
-                            input2 * levels_weight[:, 1:2, :, :]
+        fused_out_reduced = input1 * levels_weight[:, 0:1, :, :] + input2 * levels_weight[:, 1:2, :, :]
 
         out = self.conv(fused_out_reduced)
         return out
@@ -125,9 +123,11 @@ class ASFF_3(nn.Module):
         levels_weight = self.weight_levels(levels_weight_v)
         levels_weight = F.softmax(levels_weight, dim=1)
 
-        fused_out_reduced = input1 * levels_weight[:, 0:1, :, :] + \
-                            input2 * levels_weight[:, 1:2, :, :] + \
-                            input3 * levels_weight[:, 2:, :, :]
+        fused_out_reduced = (
+            input1 * levels_weight[:, 0:1, :, :]
+            + input2 * levels_weight[:, 1:2, :, :]
+            + input3 * levels_weight[:, 2:, :, :]
+        )
 
         out = self.conv(fused_out_reduced)
         return out
@@ -159,10 +159,12 @@ class ASFF_4(nn.Module):
         levels_weight = self.weight_levels(levels_weight_v)
         levels_weight = F.softmax(levels_weight, dim=1)
 
-        fused_out_reduced = input0 * levels_weight[:, 0:1, :, :] + \
-                            input1 * levels_weight[:, 1:2, :, :] + \
-                            input2 * levels_weight[:, 2:3, :, :] + \
-                            input3 * levels_weight[:, 3:, :, :]
+        fused_out_reduced = (
+            input0 * levels_weight[:, 0:1, :, :]
+            + input1 * levels_weight[:, 1:2, :, :]
+            + input2 * levels_weight[:, 2:3, :, :]
+            + input3 * levels_weight[:, 3:, :, :]
+        )
 
         out = self.conv(fused_out_reduced)
 
@@ -182,7 +184,7 @@ class BlockBody_P345(nn.Module):
         self.blocks_scaletwo1 = nn.Sequential(
             Conv(channels[2], channels[2], 1),
         )
-        
+
         self.downsample_scalezero1_2 = Downsample_x2(channels[0], channels[1])
         self.upsample_scaleone1_2 = Upsample(channels[1], channels[0], scale_factor=2)
 
@@ -264,13 +266,13 @@ class BlockBody_P345(nn.Module):
 
 
 class BlockBody_P345_Custom(BlockBody_P345):
-    def __init__(self, channels=[64, 128, 256, 512], block_type='C2f'):
+    def __init__(self, channels=[64, 128, 256, 512], block_type="C2f"):
         super().__init__(channels)
         block = eval(block_type)
-        
+
         self.blocks_scalezero2 = block(channels[0], channels[0])
         self.blocks_scaleone2 = block(channels[1], channels[1])
-        
+
         self.blocks_scalezero3 = block(channels[0], channels[0])
         self.blocks_scaleone3 = block(channels[1], channels[1])
         self.blocks_scaletwo3 = block(channels[2], channels[2])
@@ -322,15 +324,18 @@ class AFPN_P345(nn.Module):
 
 class AFPN_P345_Custom(AFPN_P345):
     def __init__(
-        self, in_channels=[256, 512, 1024],
+        self,
+        in_channels=[256, 512, 1024],
         out_channels=256,
-        block_type='C2f',
+        block_type="C2f",
         factor=4,
     ):
         super().__init__(in_channels, out_channels, factor)
-        
+
         self.body = nn.Sequential(
-            BlockBody_P345_Custom([in_channels[0] // factor, in_channels[1] // factor, in_channels[2] // factor], block_type)
+            BlockBody_P345_Custom(
+                [in_channels[0] // factor, in_channels[1] // factor, in_channels[2] // factor], block_type
+            )
         )
 
 
@@ -465,10 +470,18 @@ class BlockBody_P2345(nn.Module):
         x1 = self.blocks_scaleone3(scaleone)
         x2 = self.blocks_scaletwo3(scaletwo)
 
-        scalezero = self.asff_scalezero3(x0, self.upsample_scaleone3_2(x1), self.upsample_scaletwo3_4(x2), self.upsample_scalethree3_8(x3))
-        scaleone = self.asff_scaleone3(self.downsample_scalezero3_2(x0), x1, self.upsample_scaletwo3_2(x2), self.upsample_scalethree3_4(x3))
-        scaletwo = self.asff_scaletwo3(self.downsample_scalezero3_4(x0), self.downsample_scaleone3_2(x1), x2, self.upsample_scalethree3_2(x3))
-        scalethree = self.asff_scalethree3(self.downsample_scalezero3_8(x0), self.downsample_scaleone3_4(x1), self.downsample_scaletwo3_2(x2), x3)
+        scalezero = self.asff_scalezero3(
+            x0, self.upsample_scaleone3_2(x1), self.upsample_scaletwo3_4(x2), self.upsample_scalethree3_8(x3)
+        )
+        scaleone = self.asff_scaleone3(
+            self.downsample_scalezero3_2(x0), x1, self.upsample_scaletwo3_2(x2), self.upsample_scalethree3_4(x3)
+        )
+        scaletwo = self.asff_scaletwo3(
+            self.downsample_scalezero3_4(x0), self.downsample_scaleone3_2(x1), x2, self.upsample_scalethree3_2(x3)
+        )
+        scalethree = self.asff_scalethree3(
+            self.downsample_scalezero3_8(x0), self.downsample_scaleone3_4(x1), self.downsample_scaletwo3_2(x2), x3
+        )
 
         scalezero = self.blocks_scalezero4(scalezero)
         scaleone = self.blocks_scaleone4(scaleone)
@@ -479,17 +492,17 @@ class BlockBody_P2345(nn.Module):
 
 
 class BlockBody_P2345_Custom(BlockBody_P2345):
-    def __init__(self, channels=[64, 128, 256, 512], block_type='C2f'):
+    def __init__(self, channels=[64, 128, 256, 512], block_type="C2f"):
         super().__init__(channels)
         block = eval(block_type)
-        
+
         self.blocks_scalezero2 = block(channels[0], channels[0])
         self.blocks_scaleone2 = block(channels[1], channels[1])
-        
+
         self.blocks_scalezero3 = block(channels[0], channels[0])
         self.blocks_scaleone3 = block(channels[1], channels[1])
         self.blocks_scaletwo3 = block(channels[2], channels[2])
-        
+
         self.blocks_scalezero4 = block(channels[0], channels[0])
         self.blocks_scaleone4 = block(channels[1], channels[1])
         self.blocks_scaletwo4 = block(channels[2], channels[2])
@@ -497,10 +510,7 @@ class BlockBody_P2345_Custom(BlockBody_P2345):
 
 
 class AFPN_P2345(nn.Module):
-    def __init__(self,
-                 in_channels=[256, 512, 1024, 2048],
-                 out_channels=256,
-                 factor=4):
+    def __init__(self, in_channels=[256, 512, 1024, 2048], out_channels=256, factor=4):
         super(AFPN_P2345, self).__init__()
 
         self.conv0 = Conv(in_channels[0], in_channels[0] // factor, 1)
@@ -509,7 +519,9 @@ class AFPN_P2345(nn.Module):
         self.conv3 = Conv(in_channels[3], in_channels[3] // factor, 1)
 
         self.body = nn.Sequential(
-            BlockBody_P2345([in_channels[0] // factor, in_channels[1] // factor, in_channels[2] // factor, in_channels[3] // factor])
+            BlockBody_P2345(
+                [in_channels[0] // factor, in_channels[1] // factor, in_channels[2] // factor, in_channels[3] // factor]
+            )
         )
 
         self.conv00 = Conv(in_channels[0] // factor, out_channels, 1)
@@ -544,9 +556,17 @@ class AFPN_P2345(nn.Module):
 
 
 class AFPN_P2345_Custom(AFPN_P2345):
-    def __init__(self, in_channels=[256, 512, 1024], out_channels=256, block_type='C2f', factor=4):
+    def __init__(self, in_channels=[256, 512, 1024], out_channels=256, block_type="C2f", factor=4):
         super().__init__(in_channels, out_channels, factor)
-        
+
         self.body = nn.Sequential(
-            BlockBody_P2345_Custom([in_channels[0] // factor, in_channels[1] // factor, in_channels[2] // factor, in_channels[3] // factor], block_type)
+            BlockBody_P2345_Custom(
+                [
+                    in_channels[0] // factor,
+                    in_channels[1] // factor,
+                    in_channels[2] // factor,
+                    in_channels[3] // factor,
+                ],
+                block_type,
+            )
         )

@@ -217,7 +217,9 @@ class Exporter:
         model.float()
         model = model.fuse()
         for m in model.modules():
-            if isinstance(m, (Detect, RTDETRDecoder, Detect_DyHeadWithDCNV3, DetectEfficient)):  # Segment and Pose use Detect base class
+            if isinstance(
+                m, (Detect, RTDETRDecoder, Detect_DyHeadWithDCNV3, DetectEfficient)
+            ):  # Segment and Pose use Detect base class
                 m.dynamic = self.args.dynamic
                 m.export = True
                 m.format = self.args.format
@@ -228,8 +230,10 @@ class Exporter:
                     post_detect_class.iou_thres = self.args.iou
                     post_detect_class.max_det = self.args.max_det
                     post_detect_class.pre_forward = m.pre_forward
-                    setattr(m, '__class__', post_detect_class)
-            elif isinstance(m, (C2f, C2f_DCNv3, C2f_CloAtt, C2f_Faster)) and not any((saved_model, pb, tflite, edgetpu, tfjs)):
+                    setattr(m, "__class__", post_detect_class)
+            elif isinstance(m, (C2f, C2f_DCNv3, C2f_CloAtt, C2f_Faster)) and not any(
+                (saved_model, pb, tflite, edgetpu, tfjs)
+            ):
                 # EdgeTPU does not support FlexSplitV while split provides cleaner ONNX graph
                 m.forward = m.forward_split
 
@@ -237,7 +241,7 @@ class Exporter:
 
         for _ in range(2):
             y = model(im)  # dry runs
-        
+
         if self.args.half and onnx and self.device.type != "cpu":
             im, model = im.half(), model.half()  # to FP16
 
@@ -259,22 +263,22 @@ class Exporter:
         data = model.args["data"] if hasattr(model, "args") and isinstance(model.args, dict) else ""
         description = f'Ultralytics {self.pretty_name} model {f"trained on {data}" if data else ""}'
         self.metadata = {
-            'description': description,
-            'author': 'NKBTech',
-            'license': 'AGPL-3.0 https://ultralytics.com/license',
-            'date': datetime.now().isoformat(),
-            'version': __version__,
-            'stride': int(max(model.stride)),
-            'task': model.task,
-            'batch': self.args.batch,
-            'imgsz': self.imgsz,
-            'names': model.names,
-            'nms': int(self.args.nms),  # json fails if store as bool value
-            'conf': self.args.conf,
-            'max_det': self.args.max_det,
+            "description": description,
+            "author": "NKBTech",
+            "license": "AGPL-3.0 https://ultralytics.com/license",
+            "date": datetime.now().isoformat(),
+            "version": __version__,
+            "stride": int(max(model.stride)),
+            "task": model.task,
+            "batch": self.args.batch,
+            "imgsz": self.imgsz,
+            "names": model.names,
+            "nms": int(self.args.nms),  # json fails if store as bool value
+            "conf": self.args.conf,
+            "max_det": self.args.max_det,
         }  # model metadata
-        if model.task == 'pose':
-            self.metadata['kpt_shape'] = model.model[-1].kpt_shape
+        if model.task == "pose":
+            self.metadata["kpt_shape"] = model.model[-1].kpt_shape
 
         LOGGER.info(
             f"\n{colorstr('PyTorch:')} starting from '{file}' with input shape {tuple(im.shape)} BCHW and "
@@ -283,7 +287,7 @@ class Exporter:
 
         # Exports
         self.engine, self.onnx = engine, onnx
-        f = [''] * len(fmts)  # exported filenames
+        f = [""] * len(fmts)  # exported filenames
         if jit or ncnn:  # TorchScript
             f[0], _ = self.export_torchscript()
         if engine:  # TensorRT required before ONNX
@@ -367,38 +371,40 @@ class Exporter:
 
         if not self.args.nms:
             if isinstance(self.model, SegmentationModel):
-                output_names = ['outputs', 'proto']
+                output_names = ["outputs", "proto"]
             else:
-                output_names = ['outputs']
+                output_names = ["outputs"]
         else:
             if isinstance(self.model, SegmentationModel):
-                output_names = ['indices', 'outputs', 'proto']
+                output_names = ["indices", "outputs", "proto"]
             else:
-                output_names = ['num_dets', 'bboxes', 'scores', 'labels'] if self.engine else ['output']
+                output_names = ["num_dets", "bboxes", "scores", "labels"] if self.engine else ["output"]
 
         dynamic = None
         if self.args.dynamic:
-            dynamic = {'images': {0: 'batch', 2: 'height', 3: 'width'}}  # shape(1,3,640,640)
+            dynamic = {"images": {0: "batch", 2: "height", 3: "width"}}  # shape(1,3,640,640)
             if not self.args.nms:
                 if isinstance(self.model, SegmentationModel):
-                    dynamic['outputs'] = {0: 'batch', 2: 'anchors'}  # shape(1, 116, 8400)
-                    dynamic['proto'] = {0: 'batch', 2: 'mask_height', 3: 'mask_width'}  # shape(1,32,160,160)
+                    dynamic["outputs"] = {0: "batch", 2: "anchors"}  # shape(1, 116, 8400)
+                    dynamic["proto"] = {0: "batch", 2: "mask_height", 3: "mask_width"}  # shape(1,32,160,160)
                 elif isinstance(self.model, DetectionModel):
-                    dynamic['outputs'] = {0: 'batch', 2: 'anchors'}  # shape(1, 84, 8400)
+                    dynamic["outputs"] = {0: "batch", 2: "anchors"}  # shape(1, 84, 8400)
             else:
                 # FIXME incorrect behaviour
                 if isinstance(self.model, SegmentationModel):
-                    dynamic['outputs'] = {0: 'batch', 2: 'anchors'}  # shape(1, 116, 8400)
-                    dynamic['proto'] = {0: 'batch', 2: 'mask_height', 3: 'mask_width'}  # shape(1,32,160,160)
-                    dynamic['indices'] = {0: 'batch', }
+                    dynamic["outputs"] = {0: "batch", 2: "anchors"}  # shape(1, 116, 8400)
+                    dynamic["proto"] = {0: "batch", 2: "mask_height", 3: "mask_width"}  # shape(1,32,160,160)
+                    dynamic["indices"] = {
+                        0: "batch",
+                    }
                 elif isinstance(self.model, DetectionModel):
                     if self.engine:
-                        dynamic['num_dets'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
-                        dynamic['bboxes'] = {0: 'batch', 1: 'topk'}  # shape(1, topk, 4)
-                        dynamic['scores'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
-                        dynamic['labels'] = {0: 'batch', 1: 'topk'}  # shape(1, topk)
+                        dynamic["num_dets"] = {0: "batch", 1: "topk"}  # shape(1, topk)
+                        dynamic["bboxes"] = {0: "batch", 1: "topk"}  # shape(1, topk, 4)
+                        dynamic["scores"] = {0: "batch", 1: "topk"}  # shape(1, topk)
+                        dynamic["labels"] = {0: "batch", 1: "topk"}  # shape(1, topk)
                     else:
-                        dynamic['output'] = {0: 'num_boxes'}  # shape(num_boxes, 7), 7 = 1(batch_index) + 6
+                        dynamic["output"] = {0: "num_boxes"}  # shape(num_boxes, 7), 7 = 1(batch_index) + 6
 
         torch.onnx.export(
             self.model,
@@ -425,7 +431,7 @@ class Exporter:
                 LOGGER.info(f"{prefix} simplifying with onnxsim {onnxsim.__version__}...")
                 # subprocess.run(f'onnxsim "{f}" "{f}"', shell=True)
                 model_onnx_optimized, check = onnxsim.simplify(model_onnx)
-                assert check, 'Simplified ONNX model could not be validated'
+                assert check, "Simplified ONNX model could not be validated"
                 print("Finish! Here is the difference:")
                 onnxsim.model_info.print_simplifying_info(model_onnx, model_onnx_optimized)
                 model_onnx = model_onnx_optimized
@@ -689,6 +695,7 @@ class Exporter:
         ]
 
         import ctypes
+
         for m in self.model.modules():
             if isinstance(m, C2f_DCNv3):
                 list_custom_trt_plugins[0][1] = True
@@ -699,7 +706,7 @@ class Exporter:
             else:
                 LOGGER.warning(f"\n{prefix} WARNING ⚠️ Detected custom TensorRT module, but it wasn't built yet...")
 
-        check_version(trt.__version__, '7.0.0', hard=True)  # require tensorrt>=7.0.0
+        check_version(trt.__version__, "7.0.0", hard=True)  # require tensorrt>=7.0.0
 
         LOGGER.info(f"\n{prefix} starting export with TensorRT {trt.__version__}...")
         assert Path(f_onnx).exists(), f"failed to export ONNX file: {f_onnx}"
@@ -745,13 +752,12 @@ class Exporter:
             for idx in range(network.num_inputs):
                 input_l = network.get_input(idx)
                 input_l.dtype = trt.float16
-            
-            # explicity set outputs to fp16 or uint16
+
+            # explicitly set outputs to fp16 or uint16
             for idx in range(network.num_outputs):
                 output_l = network.get_output(idx)
                 if output_l.dtype == trt.float32:
                     output_l.dtype = trt.float16
-                
 
         del self.model
         torch.cuda.empty_cache()

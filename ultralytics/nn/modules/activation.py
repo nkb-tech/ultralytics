@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-__all__ = ['MemoryEfficientMish', 'MemoryEfficientSwish', 'Squareplus', 'HSigmoid']
+__all__ = ["MemoryEfficientMish", "MemoryEfficientSwish", "Squareplus", "HSigmoid"]
 
 
 # A memory-efficient implementation of Swish function
@@ -22,7 +22,7 @@ class SwishImplementation(torch.autograd.Function):
 class MemoryEfficientSwish(nn.Module):
     def forward(self, x):
         return SwishImplementation.apply(x)
-    
+
 
 # A memory-efficient implementation of Mish function
 class MishImplementation(torch.autograd.Function):
@@ -35,31 +35,32 @@ class MishImplementation(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         i = ctx.saved_variables[0]
-  
-        v = 1. + i.exp()
-        h = v.log() 
-        grad_gh = 1. / h.cosh().pow_(2) 
+
+        v = 1.0 + i.exp()
+        h = v.log()
+        grad_gh = 1.0 / h.cosh().pow_(2)
 
         # Note that grad_hv * grad_vx = sigmoid(x)
-        #grad_hv = 1./v  
-        #grad_vx = i.exp()
-        
+        # grad_hv = 1./v
+        # grad_vx = i.exp()
+
         grad_hx = i.sigmoid()
 
-        grad_gx = grad_gh * grad_hx  # grad_hv * grad_vx 
-        
-        grad_f = torch.tanh(torch.nn.functional.softplus(i)) + i * grad_gx 
-        
-        return grad_output * grad_f 
+        grad_gx = grad_gh * grad_hx  # grad_hv * grad_vx
+
+        grad_f = torch.tanh(torch.nn.functional.softplus(i)) + i * grad_gx
+
+        return grad_output * grad_f
 
 
 class MemoryEfficientMish(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
         pass
+
     def forward(self, input_tensor):
         return MishImplementation.apply(input_tensor)
-    
+
 
 class Squareplus(nn.Module):
     """Squareplus activation presented https://arxiv.org/pdf/2112.11687.pdf.
@@ -67,7 +68,7 @@ class Squareplus(nn.Module):
     Faster than Softplus.
     """
 
-    __constants__ = ['beta', 'shift']
+    __constants__ = ["beta", "shift"]
     beta: float
     shift: float
 
@@ -84,11 +85,11 @@ class Squareplus(nn.Module):
         """Call forward and returns and processed tensor."""
         _input = input * self.beta
         return 1 / (2 * self.beta) * (_input + torch.sqrt(_input * _input + self.shift))
-    
-    def extra_repr(self) -> str:
-        return f'beta={self.beta}, shift={self.shift}'
 
-    
+    def extra_repr(self) -> str:
+        return f"beta={self.beta}, shift={self.shift}"
+
+
 class HSigmoid(nn.Module):
     def __init__(self, inplace=True):
         super(HSigmoid, self).__init__()
@@ -97,6 +98,6 @@ class HSigmoid(nn.Module):
 
     def forward(self, x):
         return self.relu(x + 3) / 6
-    
+
     def extra_repr(self) -> str:
-        return f'inplace={self.inplace}'
+        return f"inplace={self.inplace}"
