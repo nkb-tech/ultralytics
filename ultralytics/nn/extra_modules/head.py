@@ -7,11 +7,18 @@ from ultralytics.nn.modules import Conv, DFL
 from ultralytics.nn.extra_modules import AFPN_P345, AFPN_P345_Custom, AFPN_P2345, AFPN_P2345_Custom
 from .block import DyHeadBlockWithDCNV3
 
-__all__ = ['Detect_DyHeadWithDCNV3', 'Detect_AFPN_P345', 'Detect_AFPN_P345_Custom', 'Detect_AFPN_P2345', 'Detect_AFPN_P2345_Custom']
+__all__ = [
+    "Detect_DyHeadWithDCNV3",
+    "Detect_AFPN_P345",
+    "Detect_AFPN_P345_Custom",
+    "Detect_AFPN_P2345",
+    "Detect_AFPN_P2345_Custom",
+]
 
 
 class Detect_DyHeadWithDCNV3(nn.Module):
     """YOLOv8 Detect head with DyHead for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -29,8 +36,11 @@ class Detect_DyHeadWithDCNV3(nn.Module):
         self.conv = nn.ModuleList(nn.Sequential(Conv(x, hidc, 1)) for x in ch)
         self.dyhead = nn.Sequential(*[DyHeadBlockWithDCNV3(hidc) for i in range(block_num)])
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch)
+            nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch
+        )
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch
+        )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def pre_forward(self, x):
@@ -46,7 +56,7 @@ class Detect_DyHeadWithDCNV3(nn.Module):
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
         x, shape = self.pre_forward(x)
-        
+
         if self.training:
             return x
         elif self.dynamic or self.shape != shape:
@@ -55,14 +65,14 @@ class Detect_DyHeadWithDCNV3(nn.Module):
 
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
 
-        if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
-            box = x_cat[:, :self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+        if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
 
-        if self.export and self.format in ('tflite', 'edgetpu'):
+        if self.export and self.format in ("tflite", "edgetpu"):
             # Normalize xywh with image size to mitigate quantization error of TFLite integer models as done in YOLOv5:
             # https://github.com/ultralytics/yolov5/blob/0c8de3fca4a702f8ff5c435e67f378d1fce70243/models/tf.py#L307-L309
             # See this PR for details: https://github.com/ultralytics/ultralytics/pull/1695
@@ -81,11 +91,12 @@ class Detect_DyHeadWithDCNV3(nn.Module):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
 
 
 class Detect_AFPN_P345(nn.Module):
     """YOLOv8 Detect head with AFPN for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -102,8 +113,11 @@ class Detect_AFPN_P345(nn.Module):
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], self.nc)  # channels
         self.afpn = AFPN_P345(ch, hidc)
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch)
+            nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch
+        )
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch
+        )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def pre_forward(self, x):
@@ -124,14 +138,14 @@ class Detect_AFPN_P345(nn.Module):
             self.shape = shape
 
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
-        if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
-            box = x_cat[:, :self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+        if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
 
-        if self.export and self.format in ('tflite', 'edgetpu'):
+        if self.export and self.format in ("tflite", "edgetpu"):
             # Normalize xywh with image size to mitigate quantization error of TFLite integer models as done in YOLOv5:
             # https://github.com/ultralytics/yolov5/blob/0c8de3fca4a702f8ff5c435e67f378d1fce70243/models/tf.py#L307-L309
             # See this PR for details: https://github.com/ultralytics/ultralytics/pull/1695
@@ -150,24 +164,26 @@ class Detect_AFPN_P345(nn.Module):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
 
 
 class Detect_AFPN_P345_Custom(Detect_AFPN_P345):
     """YOLOv8 Detect head with AFPN for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, hidc=256, block_type='C2f', ch=()):  # detection layer
+    def __init__(self, nc=80, hidc=256, block_type="C2f", ch=()):  # detection layer
         super().__init__(nc, hidc, ch)
         self.afpn = AFPN_P345_Custom(ch, hidc, block_type, 4)
 
 
 class Detect_AFPN_P2345(Detect_AFPN_P345):
     """YOLOv8 Detect head with AFPN for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -181,12 +197,13 @@ class Detect_AFPN_P2345(Detect_AFPN_P345):
 
 class Detect_AFPN_P2345_Custom(Detect_AFPN_P345):
     """YOLOv8 Detect head with AFPN for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, hidc=256, block_type='C2f', ch=()):  # detection layer
+    def __init__(self, nc=80, hidc=256, block_type="C2f", ch=()):  # detection layer
         super().__init__(nc, hidc, ch)
         self.afpn = AFPN_P2345_Custom(ch, hidc, block_type)

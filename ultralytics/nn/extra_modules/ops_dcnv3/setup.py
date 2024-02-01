@@ -41,7 +41,7 @@ def get_extensions():
             "-D__CUDA_NO_HALF2_OPERATORS__",
         ]
     else:
-        raise NotImplementedError('Cuda is not availabel')
+        raise NotImplementedError("Cuda is not available")
 
     sources = [os.path.join(extensions_dir, s) for s in sources]
     include_dirs = [extensions_dir]
@@ -62,12 +62,13 @@ setup(
     version="1.1",
     author="InternImage",
     url="https://github.com/OpenGVLab/InternImage",
-    description=
-    "PyTorch Wrapper for CUDA Functions of DCNv3",
-    packages=find_packages(exclude=(
-        "configs",
-        "tests",
-    )),
+    description="PyTorch Wrapper for CUDA Functions of DCNv3",
+    packages=find_packages(
+        exclude=(
+            "configs",
+            "tests",
+        )
+    ),
     ext_modules=get_extensions(),
     cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension},
 )

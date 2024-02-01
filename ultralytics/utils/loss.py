@@ -21,11 +21,12 @@ class SlideLoss(nn.Module):
     """
     YOLO-FaceV2 https://arxiv.org/pdf/2208.02019.pdf
     """
+
     def __init__(self, loss_fcn):
         super(SlideLoss, self).__init__()
         self.loss_fcn = loss_fcn
         self.reduction = loss_fcn.reduction
-        self.loss_fcn.reduction = 'none'  # required to apply SL to each element
+        self.loss_fcn.reduction = "none"  # required to apply SL to each element
 
     def forward(self, pred, true, auto_iou=0.5):
         loss = self.loss_fcn(pred, true)
@@ -39,9 +40,9 @@ class SlideLoss(nn.Module):
         a3 = torch.exp(-(true - 1.0))
         modulating_weight = a1 * b1 + a2 * b2 + a3 * b3
         loss *= modulating_weight
-        if self.reduction == 'mean':
+        if self.reduction == "mean":
             return loss.mean()
-        elif self.reduction == 'sum':
+        elif self.reduction == "sum":
             return loss.sum()
         else:  # 'none'
             return loss
@@ -52,12 +53,12 @@ class EMASlideLoss:
         super(EMASlideLoss, self).__init__()
         self.loss_fcn = loss_fcn
         self.reduction = loss_fcn.reduction
-        self.loss_fcn.reduction = 'none'  # required to apply SL to each element
+        self.loss_fcn.reduction = "none"  # required to apply SL to each element
         self.decay = lambda x: decay * (1 - math.exp(-x / tau))
         self.is_train = True
         self.updates = 0
         self.iou_mean = 1.0
-    
+
     def __call__(self, pred, true, auto_iou=0.5):
         if self.is_train and auto_iou != -1:
             self.updates += 1
@@ -75,9 +76,9 @@ class EMASlideLoss:
         a3 = torch.exp(-(true - 1.0))
         modulating_weight = a1 * b1 + a2 * b2 + a3 * b3
         loss *= modulating_weight
-        if self.reduction == 'mean':
+        if self.reduction == "mean":
             return loss.mean()
-        elif self.reduction == 'sum':
+        elif self.reduction == "sum":
             return loss.sum()
         else:  # 'none'
             return loss
@@ -105,10 +106,9 @@ class VarifocalLoss(nn.Module):
                 .sum()
             )
         return loss
-    
+
 
 class BCFLoss(nn.Module):
-
     def __init__(self, gamma=2, alpha=0.25, reduction="mean"):
         super(BCFLoss, self).__init__()
         self.gamma = gamma
@@ -117,8 +117,9 @@ class BCFLoss(nn.Module):
 
     def forward(self, _input, target):
         pt = torch.sigmoid(_input) * 0.999 + 0.0005
-        loss = - self.alpha * (1 - pt) ** self.gamma * target * torch.log(pt) - \
-                 (1 - self.alpha) * pt ** self.gamma * (1 - target) * torch.log(1 - pt)
+        loss = -self.alpha * (1 - pt) ** self.gamma * target * torch.log(pt) - (1 - self.alpha) * pt**self.gamma * (
+            1 - target
+        ) * torch.log(1 - pt)
         if self.reduction == "mean":
             return torch.mean(loss)
         elif self.reduction == "sum":
@@ -127,7 +128,6 @@ class BCFLoss(nn.Module):
 
 
 class HybridRandomLoss(nn.Module):
-
     def __init__(self, reduction="mean"):
         super(HybridRandomLoss, self).__init__()
         self.loss_bce = nn.BCEWithLogitsLoss(reduction=reduction)
@@ -157,14 +157,16 @@ class FocalLoss(nn.Module):
             alpha_factor = label * alpha + (1 - label) * (1 - alpha)
             loss *= alpha_factor
         return loss.mean(1).sum()
-    
+
 
 class QFocalLoss(nn.Module):
-    """Wraps Quality Focal Loss around existing loss_fcn(), i.e. criteria = FocalLoss(nn.BCEWithLogitsLoss(), gamma=1.5)"""
+    """Wraps Quality Focal Loss around existing loss_fcn(), i.e. criteria = FocalLoss(nn.BCEWithLogitsLoss(),
+    gamma=1.5)
+    """
 
     @staticmethod
     def forward(pred, label, gamma=1.5, alpha=0.25):
-        loss = F.binary_cross_entropy_with_logits(pred, label, reduction='none')
+        loss = F.binary_cross_entropy_with_logits(pred, label, reduction="none")
         # p_t = torch.exp(-loss)
         # loss *= self.alpha * (1.000001 - p_t) ** self.gamma  # non-zero power for gradient stability
 
@@ -203,9 +205,11 @@ class BboxLoss(nn.Module):
             elif len(bbox_iou_data) == 1:
                 loss_iou = ((1.0 - bbox_iou_data[0]) * weight).sum() / target_scores_sum
             else:
-                raise RuntimeError(f'Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3')
+                raise RuntimeError(
+                    f"Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3"
+                )
         else:
-            RuntimeError(f'bbox_iou output should be tuple, got {type(bbox_iou_data)}')
+            RuntimeError(f"bbox_iou output should be tuple, got {type(bbox_iou_data)}")
 
         # NWD loss
         if self.use_nwd:
@@ -385,7 +389,7 @@ class v8DetectionLoss:
             auto_iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True).mean()
             loss[1] = self.bce(pred_scores, target_scores.to(dtype), auto_iou)  # BCE
         else:
-            raise RuntimeError('Define bce loss')
+            raise RuntimeError("Define bce loss")
 
         # Bbox loss
         if fg_mask.sum():

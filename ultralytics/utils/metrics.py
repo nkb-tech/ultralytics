@@ -11,19 +11,22 @@ import torch
 
 from ultralytics.utils import LOGGER, SimpleClass, TryExcept, plt_settings
 
-OKS_SIGMA = np.array([.26, .25, .25, .35, .35, .79, .79, .72, .72, .62, .62, 1.07, 1.07, .87, .87, .89, .89]) / 10.0
+OKS_SIGMA = (
+    np.array([0.26, 0.25, 0.25, 0.35, 0.35, 0.79, 0.79, 0.72, 0.72, 0.62, 0.62, 1.07, 1.07, 0.87, 0.87, 0.89, 0.89])
+    / 10.0
+)
 SIOU_THRESHOLD = pow(2, 0.5) / 2
 
 
 class WIoUScale:
-    '''monotonous: {
-            None: origin v1
-            True: monotonic FM v2
-            False: non-monotonic FM v3
-        }
-        momentum: The momentum of running mean'''
-    
-    iou_mean = 1.
+    """monotonous: {
+        None: origin v1
+        True: monotonic FM v2
+        False: non-monotonic FM v3
+    }
+    momentum: The momentum of running mean"""
+
+    iou_mean = 1.0
     monotonous = False
     _momentum = 1 - pow(0.05, 1 / 216)
     _is_train = True
@@ -31,12 +34,12 @@ class WIoUScale:
     def __init__(self, iou):
         self.iou = iou
         self._update(self)
-    
+
     @classmethod
     def _update(cls, self):
-        if cls._is_train: cls.iou_mean = (1 - cls._momentum) * cls.iou_mean + \
-                                         cls._momentum * self.iou.detach().mean().item()
-    
+        if cls._is_train:
+            cls.iou_mean = (1 - cls._momentum) * cls.iou_mean + cls._momentum * self.iou.detach().mean().item()
+
     @classmethod
     def _scaled_loss(cls, self, gamma=1.9, delta=3):
         if isinstance(self.monotonous, bool):
@@ -105,22 +108,24 @@ def box_iou(box1, box2, eps=1e-7):
 
 
 def bbox_iou(
-    box1, box2, xywh=True,
-    GIoU=False,     # https://arxiv.org/pdf/1902.09630.pdf
-    DIoU=False,     # https://arxiv.org/pdf/1911.08287.pdf
-    CIoU=False,     # https://arxiv.org/pdf/1911.08287.pdf
-    NGIoU=False,    # https://www.mdpi.com/2076-3417/12/24/12785
-    WIoU=False,     # https://arxiv.org/pdf/2301.10051.pdf
-    SIoU=False,     # https://arxiv.org/pdf/2205.12740.pdf
-    EIoU=False,     # https://arxiv.org/pdf/2101.08158.pdf
-    MPDIoU=False,   # https://arxiv.org/pdf/2307.07662.pdf
-    focal=False,    # param from EIoU [https://arxiv.org/pdf/2101.08158.pdf]
-    alpha=1.,
+    box1,
+    box2,
+    xywh=True,
+    GIoU=False,  # https://arxiv.org/pdf/1902.09630.pdf
+    DIoU=False,  # https://arxiv.org/pdf/1911.08287.pdf
+    CIoU=False,  # https://arxiv.org/pdf/1911.08287.pdf
+    NGIoU=False,  # https://www.mdpi.com/2076-3417/12/24/12785
+    WIoU=False,  # https://arxiv.org/pdf/2301.10051.pdf
+    SIoU=False,  # https://arxiv.org/pdf/2205.12740.pdf
+    EIoU=False,  # https://arxiv.org/pdf/2101.08158.pdf
+    MPDIoU=False,  # https://arxiv.org/pdf/2307.07662.pdf
+    focal=False,  # param from EIoU [https://arxiv.org/pdf/2101.08158.pdf]
+    alpha=1.0,
     gamma=0.5,
-    mpdiou_hw=1.,   # param from MPDIoU [https://arxiv.org/pdf/2307.07662.pdf]
+    mpdiou_hw=1.0,  # param from MPDIoU [https://arxiv.org/pdf/2307.07662.pdf]
     scale=True,
-    inner=False,    # https://arxiv.org/pdf/2311.02877.pdf
-    ratio=1.0,      # param from inner [https://arxiv.org/pdf/2311.02877.pdf]
+    inner=False,  # https://arxiv.org/pdf/2311.02877.pdf
+    ratio=1.0,  # param from inner [https://arxiv.org/pdf/2311.02877.pdf]
     eps=1e-7,
 ):
     """
@@ -159,13 +164,22 @@ def bbox_iou(
         b2_x1, b2_x2, b2_y1, b2_y2 = x2 - w2_, x2 + w2_, y2 - h2_, y2 + h2_
 
         if inner:
-            inner_b1_x1, inner_b1_x2, inner_b1_y1, inner_b1_y2 = x1 - w1_*ratio, x1 + w1_*ratio,\
-                                                             y1 - h1_*ratio, y1 + h1_*ratio
-            inner_b2_x1,inner_b2_x2, inner_b2_y1, inner_b2_y2 = x2 - w2_*ratio, x2 + w2_*ratio,\
-                                                                    y2 - h2_*ratio, y2 + h2_*ratio
-            inner_inter = (torch.min(inner_b1_x2, inner_b2_x2) - torch.max(inner_b1_x1, inner_b2_x1)).clamp_min_(0) * \
-                        (torch.min(inner_b1_y2, inner_b2_y2) - torch.max(inner_b1_y1, inner_b2_y1)).clamp_min_(0)
-            inner_union = (w1*ratio * h1*ratio + w2*ratio * h2*ratio - inner_inter).clamp_min_(eps)
+            inner_b1_x1, inner_b1_x2, inner_b1_y1, inner_b1_y2 = (
+                x1 - w1_ * ratio,
+                x1 + w1_ * ratio,
+                y1 - h1_ * ratio,
+                y1 + h1_ * ratio,
+            )
+            inner_b2_x1, inner_b2_x2, inner_b2_y1, inner_b2_y2 = (
+                x2 - w2_ * ratio,
+                x2 + w2_ * ratio,
+                y2 - h2_ * ratio,
+                y2 + h2_ * ratio,
+            )
+            inner_inter = (torch.min(inner_b1_x2, inner_b2_x2) - torch.max(inner_b1_x1, inner_b2_x1)).clamp_min_(0) * (
+                torch.min(inner_b1_y2, inner_b2_y2) - torch.max(inner_b1_y1, inner_b2_y1)
+            ).clamp_min_(0)
+            inner_union = (w1 * ratio * h1 * ratio + w2 * ratio * h2 * ratio - inner_inter).clamp_min_(eps)
 
     else:  # x1, y1, x2, y2 = box1
         b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
@@ -178,8 +192,9 @@ def bbox_iou(
         inter = inner_inter
         union = inner_union
     else:
-        inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_min_(0) * \
-                (b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)).clamp_min_(0)
+        inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_min_(0) * (
+            b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)
+        ).clamp_min_(0)
         union = (w1 * h1 + w2 * h2 - inter).clamp_min_(eps)
 
     iou = inter / union
@@ -191,7 +206,7 @@ def bbox_iou(
         focal_scale = torch.pow(iou, gamma)
 
     # Focal IoU
-    iou = iou.pow_(alpha) # alpha iou
+    iou = iou.pow_(alpha)  # alpha iou
     if CIoU or DIoU or GIoU or NGIoU or WIoU or EIoU or SIoU or MPDIoU:
         if MPDIoU:
             d1 = (b2_x1 - b1_x1) ** 2 + (b2_y1 - b1_y1) ** 2
@@ -204,10 +219,12 @@ def bbox_iou(
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
         if CIoU or DIoU or EIoU or SIoU or WIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
-            c2 = (cw ** 2 + ch ** 2).pow_(alpha).clamp_min_(eps)  # convex diagonal squared
-            rho2 = (((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4).pow_(alpha)  # center dist ** 2
+            c2 = (cw**2 + ch**2).pow_(alpha).clamp_min_(eps)  # convex diagonal squared
+            rho2 = (((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4).pow_(
+                alpha
+            )  # center dist ** 2
             if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
-                v = (4 / torch.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow_(2)
+                v = (4 / torch.pi**2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow_(2)
                 with torch.no_grad():
                     alpha_ciou = v / (1 - iou + v).clamp_min_(eps)
                 ciou = iou - (rho2 / c2 + torch.pow(v * alpha_ciou, alpha))  # CIoU
@@ -217,8 +234,8 @@ def bbox_iou(
             elif EIoU:
                 rho_w2 = ((b2_x2 - b2_x1) - (b1_x2 - b1_x1)) ** 2
                 rho_h2 = ((b2_y2 - b2_y1) - (b1_y2 - b1_y1)) ** 2
-                cw2 = (cw ** 2).pow_(alpha).clamp_min_(eps)
-                ch2 = (ch ** 2).pow_(alpha).clamp_min_(eps)
+                cw2 = (cw**2).pow_(alpha).clamp_min_(eps)
+                ch2 = (ch**2).pow_(alpha).clamp_min_(eps)
                 eiou = iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)
                 if focal:
                     return eiou, focal_scale
@@ -226,7 +243,7 @@ def bbox_iou(
             elif SIoU:
                 s_cw = (b2_x1 + b2_x2 - b1_x1 - b1_x2).mul_(0.5).clamp_min_(eps)
                 s_ch = (b2_y1 + b2_y2 - b1_y1 - b1_y2).mul_(0.5).clamp_min_(eps)
-                sigma = (s_cw ** 2 + s_ch ** 2).pow_(0.5)
+                sigma = (s_cw**2 + s_ch**2).pow_(0.5)
                 sin_alpha_1 = s_cw.abs() / sigma
                 sin_alpha_2 = s_ch.abs() / sigma
                 sin_alpha = torch.where(sin_alpha_1 > SIOU_THRESHOLD, sin_alpha_2, sin_alpha_1)
@@ -244,9 +261,9 @@ def bbox_iou(
                 return (siou, )  # SIoU
             elif WIoU:
                 if focal:
-                    raise RuntimeError('WIoU do not support focal.')
+                    raise RuntimeError("WIoU do not support focal.")
                 elif scale:
-                    return getattr(WIoUScale, '_scaled_loss')(wiou_scale), (1 - iou) * torch.exp((rho2 / c2)), iou
+                    return getattr(WIoUScale, "_scaled_loss")(wiou_scale), (1 - iou) * torch.exp((rho2 / c2)), iou
                 else:
                     return iou, torch.exp((rho2 / c2))
             diou = iou - rho2 / c2
@@ -257,9 +274,8 @@ def bbox_iou(
         c_area = (cw * ch).clamp_min_(eps)  # convex area
 
         if NGIoU:
-
-            d2 = torch.sqrt(h1 ** 2 + w1 ** 2)
-            d1 = torch.sqrt(h2 ** 2 + w2 ** 2)
+            d2 = torch.sqrt(h1**2 + w1**2)
+            d1 = torch.sqrt(h2**2 + w2**2)
 
             b1_in_b2 = torch.logical_and(b1_x1 > b2_x1, b1_x2 < b2_x2)  # b1 (pred) in b2 (truth)
 
@@ -271,13 +287,11 @@ def bbox_iou(
             C1_w = D_x2.maximum(b1_x2) - D_x1.minimum(b1_x1).clamp_min_(0)  # C2 width
             C1_h = D_y2.maximum(b1_y2) - D_y1.minimum(b1_y1).clamp_min_(0)  # C2 height
 
-            d_p1 = torch.sqrt(C1_h ** 2 + C1_w ** 2)  # d'2
+            d_p1 = torch.sqrt(C1_h**2 + C1_w**2)  # d'2
 
             beta_1 = d_p1 / d1
 
-            inter_D_b1 = (
-                D_x2.minimum(b1_x2) - D_x1.maximum(b1_x1)
-            ).clamp_min_(0) * (
+            inter_D_b1 = (D_x2.minimum(b1_x2) - D_x1.maximum(b1_x1)).clamp_min_(0) * (
                 D_y2.minimum(b1_y2) - D_y1.maximum(b1_y1)
             ).clamp_min_(0)
             union_D_b1 = (D_w * D_h + w1 * h1 - inter_D_b1).clamp_min_(eps)
@@ -293,13 +307,11 @@ def bbox_iou(
             C2_w = D_x2.maximum(b2_x2) - D_x1.minimum(b2_x1).clamp_min_(0)  # convex shape C2 width
             C2_h = D_y2.maximum(b2_y2) - D_y1.minimum(b2_y1).clamp_min_(0)  # convex shape C2 height
 
-            d_p2 = torch.sqrt(C2_h ** 2 + C2_w ** 2)  # d'2
+            d_p2 = torch.sqrt(C2_h**2 + C2_w**2)  # d'2
 
             beta_2 = d_p2 / d2
 
-            inter_D_b2 = (
-                D_x2.minimum(b2_x2) - D_x1.maximum(b2_x1)
-            ).clamp_min_(0) * (
+            inter_D_b2 = (D_x2.minimum(b2_x2) - D_x1.maximum(b2_x1)).clamp_min_(0) * (
                 D_y2.minimum(b2_y2) - D_y1.maximum(b2_y1)
             ).clamp_min_(0)
             union_D_b2 = (D_w * D_h + w2 * h2 - inter_D_b2).clamp_min_(eps)
@@ -338,7 +350,7 @@ def wasserstein_loss(box1, box2, xywh=False, eps=1e-7, constant=12.8):
         Tensor: Loss tensor.
     """
 
-     # Get the coordinates of bounding boxes
+    # Get the coordinates of bounding boxes
     if xywh:  # transform from xywh to xyxy
         (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
         w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2
@@ -350,7 +362,7 @@ def wasserstein_loss(box1, box2, xywh=False, eps=1e-7, constant=12.8):
         b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
         w1, h1 = b1_x2 - b1_x1, (b1_y2 - b1_y1).clamp_min_(eps)
         w2, h2 = b2_x2 - b2_x1, (b2_y2 - b2_y1).clamp_min_(eps)
-    
+
     b1_x_center, b1_y_center = b1_x1 + w1 / 2, b1_y1 + h1 / 2
     b2_x_center, b2_y_center = b2_x1 + w2 / 2, b2_y1 + h2 / 2
     center_distance = ((b1_x_center - b2_x_center) ** 2 + (b1_y_center - b2_y_center) ** 2).clamp_min_(eps)
