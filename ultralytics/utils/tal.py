@@ -134,7 +134,7 @@ class TaskAlignedAssigner(nn.Module):
                     f"Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3"
                 )
         else:
-            raise RuntimeError(f'Bbox_iou output should be tuple, got {type(bbox_iou_data)}')
+            raise RuntimeError(f"Bbox_iou output should be tuple, got {type(bbox_iou_data)}")
 
         return iou.squeeze(-1).clamp_(0)
 

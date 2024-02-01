@@ -214,7 +214,7 @@ def bbox_iou(
             mpdiou = iou - d1 / mpdiou_hw - d2 / mpdiou_hw  # MPDIoU
             if focal:
                 return mpdiou, focal_scale
-            return (mpdiou, )
+            return (mpdiou,)
 
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
@@ -230,7 +230,7 @@ def bbox_iou(
                 ciou = iou - (rho2 / c2 + torch.pow(v * alpha_ciou, alpha))  # CIoU
                 if focal:
                     return ciou, focal_scale
-                return (ciou, )  # CIoU
+                return (ciou,)  # CIoU
             elif EIoU:
                 rho_w2 = ((b2_x2 - b2_x1) - (b1_x2 - b1_x1)) ** 2
                 rho_h2 = ((b2_y2 - b2_y1) - (b1_y2 - b1_y1)) ** 2
@@ -239,7 +239,7 @@ def bbox_iou(
                 eiou = iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)
                 if focal:
                     return eiou, focal_scale
-                return (eiou, )  # EIoU
+                return (eiou,)  # EIoU
             elif SIoU:
                 s_cw = (b2_x1 + b2_x2 - b1_x1 - b1_x2).mul_(0.5).clamp_min_(eps)
                 s_ch = (b2_y1 + b2_y2 - b1_y1 - b1_y2).mul_(0.5).clamp_min_(eps)
@@ -258,7 +258,7 @@ def bbox_iou(
                 siou = iou - (distance_cost + shape_cost).mul_(0.5).pow_(alpha).clamp_min_(eps)
                 if focal:
                     return siou, focal_scale
-                return (siou, )  # SIoU
+                return (siou,)  # SIoU
             elif WIoU:
                 if focal:
                     raise RuntimeError("WIoU do not support focal.")
@@ -269,7 +269,7 @@ def bbox_iou(
             diou = iou - rho2 / c2
             if focal:
                 return diou, focal_scale
-            return (diou, )  # DIoU
+            return (diou,)  # DIoU
 
         c_area = (cw * ch).clamp_min_(eps)  # convex area
 
@@ -324,16 +324,16 @@ def bbox_iou(
 
             if focal:
                 return ngiou, focal_scale
-            return (ngiou, )  # NGIoU https://www.mdpi.com/2076-3417/12/24/12785
+            return (ngiou,)  # NGIoU https://www.mdpi.com/2076-3417/12/24/12785
 
         giou = iou - (c_area - union) / c_area
         if focal:
             return giou, focal_scale
-        return (giou, )  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+        return (giou,)  # GIoU https://arxiv.org/pdf/1902.09630.pdf
 
     if focal:
         return iou, focal_scale
-    return (iou, )  # IoU
+    return (iou,)  # IoU
 
 
 def wasserstein_loss(box1, box2, xywh=False, eps=1e-7, constant=12.8):

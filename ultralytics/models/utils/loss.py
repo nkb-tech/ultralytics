@@ -246,7 +246,7 @@ class DETRLoss(nn.Module):
         # if masks is not None and gt_mask is not None:
         #     loss.update(self._get_loss_mask(masks, gt_mask, match_indices, postfix))
         return loss
-    
+
     def iou_calculation(self, gt_bboxes, pd_bboxes, **kwargs):
         """Iou calculation for horizontal bounding boxes."""
         bbox_iou_data = bbox_iou(gt_bboxes, pd_bboxes, **kwargs)
@@ -257,9 +257,11 @@ class DETRLoss(nn.Module):
             elif len(bbox_iou_data) in (1, 2):
                 iou = bbox_iou_data[0]
             else:
-                raise RuntimeError(f'Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3')
+                raise RuntimeError(
+                    f"Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3"
+                )
         else:
-            raise RuntimeError(f'Bbox_iou output should be tuple, got {type(bbox_iou_data)}')
+            raise RuntimeError(f"Bbox_iou output should be tuple, got {type(bbox_iou_data)}")
 
         return iou
 

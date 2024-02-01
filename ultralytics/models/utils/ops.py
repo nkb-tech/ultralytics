@@ -121,7 +121,7 @@ class HungarianMatcher(nn.Module):
             (torch.tensor(i, dtype=torch.long), torch.tensor(j, dtype=torch.long) + gt_groups[k])
             for k, (i, j) in enumerate(indices)
         ]
-    
+
     def iou_calculation(self, gt_bboxes, pd_bboxes):
         """Iou calculation for horizontal bounding boxes."""
         bbox_iou_data = bbox_iou(gt_bboxes, pd_bboxes, xywh=False, WIoU=True)
@@ -132,9 +132,11 @@ class HungarianMatcher(nn.Module):
             elif len(bbox_iou_data) in (1, 2):
                 iou = bbox_iou_data[0]
             else:
-                raise RuntimeError(f'Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3')
+                raise RuntimeError(
+                    f"Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3"
+                )
         else:
-            raise RuntimeError(f'Bbox_iou output should be tuple, got {type(bbox_iou_data)}')
+            raise RuntimeError(f"Bbox_iou output should be tuple, got {type(bbox_iou_data)}")
 
         return iou.squeeze(-1).clamp_(0)
 
