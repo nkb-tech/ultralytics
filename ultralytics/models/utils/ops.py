@@ -96,7 +96,10 @@ class HungarianMatcher(nn.Module):
         cost_bbox = (pred_bboxes.unsqueeze(1) - gt_bboxes.unsqueeze(0)).abs().sum(-1)  # (bs*num_queries, num_gt)
 
         # Compute the GIoU cost between boxes, (bs*num_queries, num_gt)
-        cost_giou = 1.0 - bbox_iou(pred_bboxes.unsqueeze(1), gt_bboxes.unsqueeze(0), xywh=True, GIoU=True).squeeze(-1)
+        cost_giou = 1.0 - self.iou_calculation(
+            gt_bboxes.unsqueeze(0),
+            pred_bboxes.unsqueeze(1),
+        )
 
         # Final cost matrix
         C = (
@@ -118,6 +121,22 @@ class HungarianMatcher(nn.Module):
             (torch.tensor(i, dtype=torch.long), torch.tensor(j, dtype=torch.long) + gt_groups[k])
             for k, (i, j) in enumerate(indices)
         ]
+    
+    def iou_calculation(self, gt_bboxes, pd_bboxes):
+        """Iou calculation for horizontal bounding boxes."""
+        bbox_iou_data = bbox_iou(gt_bboxes, pd_bboxes, xywh=False, WIoU=True)
+
+        if isinstance(bbox_iou_data, tuple):
+            if len(bbox_iou_data) == 3:
+                iou = bbox_iou_data[2]
+            elif len(bbox_iou_data) in (1, 2):
+                iou = bbox_iou_data[0]
+            else:
+                raise RuntimeError(f'Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3')
+        else:
+            raise RuntimeError(f'Bbox_iou output should be tuple, got {type(bbox_iou_data)}')
+
+        return iou.squeeze(-1).clamp_(0)
 
     # This function is for future RT-DETR Segment models
     # def _cost_mask(self, bs, num_gts, masks=None, gt_mask=None):

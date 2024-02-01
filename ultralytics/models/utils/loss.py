@@ -95,7 +95,7 @@ class DETRLoss(nn.Module):
             return loss
 
         loss[name_bbox] = self.loss_gain["bbox"] * F.l1_loss(pred_bboxes, gt_bboxes, reduction="sum") / len(gt_bboxes)
-        loss[name_giou] = 1.0 - bbox_iou(pred_bboxes, gt_bboxes, xywh=True, GIoU=True)
+        loss[name_giou] = 1.0 - self.iou_calculation(gt_bboxes, pred_bboxes, xywh=True, GIoU=True)
         loss[name_giou] = loss[name_giou].sum() / len(gt_bboxes)
         loss[name_giou] = self.loss_gain["giou"] * loss[name_giou]
         return {k: v.squeeze() for k, v in loss.items()}
@@ -238,7 +238,7 @@ class DETRLoss(nn.Module):
 
         gt_scores = torch.zeros([bs, nq], device=pred_scores.device)
         if len(gt_bboxes):
-            gt_scores[idx] = bbox_iou(pred_bboxes.detach(), gt_bboxes, xywh=True).squeeze(-1)
+            gt_scores[idx] = self.iou_calculation(gt_bboxes, pred_bboxes.detach(), xywh=True).squeeze(-1).clamp_(0)
 
         loss = {}
         loss.update(self._get_loss_class(pred_scores, targets, gt_scores, len(gt_bboxes), postfix))
@@ -246,6 +246,22 @@ class DETRLoss(nn.Module):
         # if masks is not None and gt_mask is not None:
         #     loss.update(self._get_loss_mask(masks, gt_mask, match_indices, postfix))
         return loss
+    
+    def iou_calculation(self, gt_bboxes, pd_bboxes, **kwargs):
+        """Iou calculation for horizontal bounding boxes."""
+        bbox_iou_data = bbox_iou(gt_bboxes, pd_bboxes, **kwargs)
+
+        if isinstance(bbox_iou_data, tuple):
+            if len(bbox_iou_data) == 3:
+                iou = bbox_iou_data[2]
+            elif len(bbox_iou_data) in (1, 2):
+                iou = bbox_iou_data[0]
+            else:
+                raise RuntimeError(f'Got length of outputs from bbox_iou {len(bbox_iou_data)}, but supported 0 < l <= 3')
+        else:
+            raise RuntimeError(f'Bbox_iou output should be tuple, got {type(bbox_iou_data)}')
+
+        return iou
 
     def forward(self, pred_bboxes, pred_scores, batch, postfix="", **kwargs):
         """

@@ -260,7 +260,7 @@ class RotatedBboxLoss(BboxLoss):
             loss_dfl = self._df_loss(pred_dist[fg_mask].view(-1, self.reg_max + 1), target_ltrb[fg_mask]) * weight
             loss_dfl = loss_dfl.sum() / target_scores_sum
         else:
-            loss_dfl = torch.tensor(0.0).to(pred_dist.device)
+            loss_dfl = torch.tensor(0.0, device=pred_dist.device)
 
         return loss_iou, loss_dfl
 
@@ -297,7 +297,9 @@ class v8DetectionLoss:
         # self.bce = SlideLoss(nn.BCEWithLogitsLoss(reduction='none')) # Slide Loss
         self.hyp = h
         self.stride = m.stride  # model strides
-        self.nc = m.nc  # number of classesVarifocalLoss
+        self.nc = m.nc  # number of classes
+        self.no = m.no
+        self.reg_max = m.reg_max
         self.device = device
 
         self.use_dfl = m.reg_max > 1
@@ -361,7 +363,7 @@ class v8DetectionLoss:
         # Pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
 
-        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+        target_labels, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             pred_scores.detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
@@ -376,9 +378,9 @@ class v8DetectionLoss:
         if isinstance(self.bce, VarifocalLoss):
             target_labels = torch.where(fg_mask > 0, target_labels, torch.full_like(target_labels, self.nc))
             one_hot_label = F.one_hot(target_labels, self.nc + 1)[..., :-1]
-            loss[1] = self.bce(pred_scores, target_scores, one_hot_label)  # VFL way
+            loss[1] = self.bce(pred_scores, target_scores, one_hot_label) / target_scores_sum  # VFL way
         elif isinstance(self.bce, (nn.BCEWithLogitsLoss, FocalLoss)):
-            loss[1] = self.bce(pred_scores, target_scores.to(dtype))  # BCE
+            loss[1] = self.bce(pred_scores, target_scores.to(dtype)) / target_scores_sum  # BCE
         elif isinstance(self.bce, (EMASlideLoss, SlideLoss)):
             auto_iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True).mean()
             loss[1] = self.bce(pred_scores, target_scores.to(dtype), auto_iou)  # BCE
