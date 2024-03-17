@@ -729,10 +729,11 @@ class Exporter:
                 list_custom_trt_plugins[0][1] = True
 
         for custom_trt_plugin in list_custom_trt_plugins:
-            if custom_trt_plugin[1] and os.path.exists(custom_trt_plugin[0]):
-                ctypes.CDLL(custom_trt_plugin[0])
-            else:
-                LOGGER.warning(f"\n{prefix} WARNING ⚠️ Detected custom TensorRT module, but it wasn't built yet...")
+            if custom_trt_plugin[1]:
+                if os.path.exists(custom_trt_plugin[0]):
+                    ctypes.CDLL(custom_trt_plugin[0])
+                else:
+                    LOGGER.warning(f"\n{prefix} WARNING ⚠️ Detected custom TensorRT module, but it wasn't built yet...")
 
         check_version(trt.__version__, "7.0.0", hard=True)  # require tensorrt>=7.0.0
 
