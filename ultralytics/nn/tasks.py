@@ -51,6 +51,12 @@ from ultralytics.nn.modules import (
     DetectEfficient,
     OBB,
     ResNetLayer,
+    WorldDetect,
+    RepNCSPELAN4,
+    ADown,
+    SPPELAN,
+    CBFuse,
+    CBLinear,
 )
 from ultralytics.nn.backbone.convnextv2 import (
     convnextv2_atto,
@@ -81,13 +87,6 @@ from ultralytics.nn.extra_modules import (
     CAM,
     Fusion,
     GhostHGBlock,
-    WorldDetect,
-    RepNCSPELAN4,
-    ADown,
-    SPPELAN,
-    CBFuse,
-    CBLinear,
-    Silence,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
