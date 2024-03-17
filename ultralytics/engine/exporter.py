@@ -230,7 +230,11 @@ class Exporter:
                     post_detect_class.iou_thres = self.args.iou
                     post_detect_class.max_det = self.args.max_det
                     post_detect_class.pre_forward = m.pre_forward
+                    post_detect_class.dynamic = self.args.dynamic
                     setattr(m, "__class__", post_detect_class)
+                elif isinstance(m, RTDETRDecoder) and self.args.nms:
+                    raise NotImplementedError('RT-DETR with `nms=True` is not supported now.')
+
             elif isinstance(m, (C2f, C2f_DCNv3, C2f_CloAtt, C2f_Faster)) and not any(
                 (saved_model, pb, tflite, edgetpu, tfjs)
             ):
@@ -380,31 +384,49 @@ class Exporter:
             else:
                 output_names = ["num_dets", "bboxes", "scores", "labels"] if self.engine else ["output"]
 
-        dynamic = None
+        # Set shapes
+        dynamic = dict()
+        shapes = {key: [] for key in output_names}
+
+        # ... for inputs
         if self.args.dynamic:
-            dynamic = {"images": {0: "batch", 2: "height", 3: "width"}}  # shape(1,3,640,640)
-            if not self.args.nms:
-                if isinstance(self.model, SegmentationModel):
+            dynamic["images"] = {0: "batch"} # {0: "batch", 2: "height", 3: "width"} onnx optim goes bad
+        
+        # ... for outputs
+        if not self.args.nms:
+            if isinstance(self.model, SegmentationModel):
+                # TODO check shape
+                if self.args.dynamic:
                     dynamic["outputs"] = {0: "batch", 2: "anchors"}  # shape(1, 116, 8400)
                     dynamic["proto"] = {0: "batch", 2: "mask_height", 3: "mask_width"}  # shape(1,32,160,160)
-                elif isinstance(self.model, DetectionModel):
+                
+            elif isinstance(self.model, DetectionModel):
+                if self.args.dynamic:
                     dynamic["outputs"] = {0: "batch", 2: "anchors"}  # shape(1, 84, 8400)
-            else:
-                # FIXME incorrect behaviour
-                if isinstance(self.model, SegmentationModel):
+        else:
+            # FIXME incorrect behaviour
+            if isinstance(self.model, SegmentationModel):
+                if self.args.dynamic:
                     dynamic["outputs"] = {0: "batch", 2: "anchors"}  # shape(1, 116, 8400)
                     dynamic["proto"] = {0: "batch", 2: "mask_height", 3: "mask_width"}  # shape(1,32,160,160)
-                    dynamic["indices"] = {
-                        0: "batch",
-                    }
-                elif isinstance(self.model, DetectionModel):
-                    if self.engine:
-                        dynamic["num_dets"] = {0: "batch", 1: "topk"}  # shape(1, topk)
-                        dynamic["bboxes"] = {0: "batch", 1: "topk"}  # shape(1, topk, 4)
-                        dynamic["scores"] = {0: "batch", 1: "topk"}  # shape(1, topk)
-                        dynamic["labels"] = {0: "batch", 1: "topk"}  # shape(1, topk)
-                    else:
+                    dynamic["indices"] = {0: "batch"}
+            elif isinstance(self.model, DetectionModel):
+                if self.engine:
+                    shapes["num_dets"] = ["batch" if self.args.dynamic else self.args.batch, 1]
+                    shapes["bboxes"] = ["batch" if self.args.dynamic else self.args.batch, self.args.max_det, 4]
+                    shapes["scores"] = ["batch" if self.args.dynamic else self.args.batch, self.args.max_det]
+                    shapes["labels"] = ["batch" if self.args.dynamic else self.args.batch, self.args.max_det]
+                    if self.args.dynamic:
+                        dynamic["num_dets"] = {0: "batch"}  # shape(1, topk)
+                        dynamic["bboxes"] = {0: "batch"}  # shape(1, topk, 4)
+                        dynamic["scores"] = {0: "batch"}  # shape(1, topk)
+                        dynamic["labels"] = {0: "batch"}  # shape(1, topk)
+                elif self.onnx:
+                    shapes["output"] = ["topk" if self.args.dynamic else self.args.batch, 7]
+                    if self.args.dynamic:
                         dynamic["output"] = {0: "num_boxes"}  # shape(num_boxes, 7), 7 = 1(batch_index) + 6
+                else:
+                    dynamic["output"] = {0: "batch"}
 
         torch.onnx.export(
             self.model,
@@ -423,11 +445,15 @@ class Exporter:
         model_onnx = onnx.load(f)  # load onnx model
         onnx.checker.check_model(model_onnx)  # check onnx model
 
+        for output in model_onnx.graph.output:
+            for idx, dim in enumerate(output.type.tensor_type.shape.dim):
+                if output.name in shapes and len(shapes[output.name]):
+                    dim.dim_param = str(shapes[output.name][idx])
+
         # Simplify
         if self.args.simplify:
             try:
                 import onnxsim
-
                 LOGGER.info(f"{prefix} simplifying with onnxsim {onnxsim.__version__}...")
                 # subprocess.run(f'onnxsim "{f}" "{f}"', shell=True)
                 model_onnx_optimized, check = onnxsim.simplify(model_onnx)

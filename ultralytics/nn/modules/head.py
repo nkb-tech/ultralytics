@@ -53,17 +53,16 @@ class Detect(nn.Module):
         for i in range(self.nl):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
 
-        return x
+        return x, x[0].shape  # BCHW
 
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
-        x = self.pre_forward(x)
+        x, shape = self.pre_forward(x)
 
         if self.training:
             return x
 
         # Inference path
-        shape = x[0].shape  # BCHW
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
         if self.dynamic or self.shape != shape:
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
@@ -124,7 +123,7 @@ class DetectEfficient(Detect):
             x[i] = self.stem[i](x[i])
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
 
-        return x
+        return x, x[0].shape
 
     def bias_init(self):
         """Initialize Detect() biases, WARNING: requires stride availability."""
@@ -520,7 +519,11 @@ class PostDetectTRTNMS(nn.Module):
         boxes, scores = self._forward(x)
 
         return Efficient_TRT_NMS.apply(
-            boxes.transpose(1, 2), scores.transpose(1, 2), self.iou_thres, self.conf_thres, self.max_det
+            boxes.transpose(1, 2),
+            scores.transpose(1, 2),
+            self.iou_thres,
+            self.conf_thres,
+            self.max_det,
         )
 
 

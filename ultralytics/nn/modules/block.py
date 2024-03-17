@@ -391,8 +391,8 @@ class Efficient_TRT_NMS(torch.autograd.Function):
         max_output_boxes: int = 100,
         background_class: int = -1,
         box_coding: int = 0,
-        score_activation: int = 0,
         plugin_version: str = "1",
+        score_activation: int = 0,
     ) -> Tuple[Value, Value, Value, Value]:
         out = g.op(
             "TRT::EfficientNMS_TRT",
@@ -458,8 +458,6 @@ class ONNX_NMS(torch.autograd.Function):
         iou_threshold: float = 0.45,
         score_threshold: float = 0.25,
     ):
-        from torch.onnx.symbolic_opset9 import select, squeeze
-
         # TODO check that max_num > 0
         max_output_boxes = g.op(
             "Constant",

@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import torch
 import torchvision.transforms as T
+from torch.nn.modules.utils import _pair
 
 from ultralytics.utils import LOGGER, colorstr
 from ultralytics.utils.checks import check_version
@@ -693,6 +694,37 @@ class LetterBox:
         self.stride = stride
         self.center = center  # Put the image in the middle or top-left
 
+    def precompute_padding(self, new_shape, base_shape):
+        # Scale ratio (new / old)
+        r = min(
+            new_shape[0] / base_shape[0],
+            new_shape[1] / base_shape[1],
+        )
+
+        # Only scale down, do not scale up (for better val mAP)
+        if not self.scaleup:
+            r = min(r, 1.0)
+
+        # Compute padding
+        ratio = r, r  # width, height ratios
+        new_unpad = int(round(base_shape[1] * r)), int(round(base_shape[0] * r))
+        dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+        if self.auto:  # minimum rectangle
+            dw, dh = np.mod(dw, self.stride), np.mod(dh, self.stride)  # wh padding
+        elif self.scaleFill:  # stretch
+            dw, dh = 0.0, 0.0
+            new_unpad = (new_shape[1], new_shape[0])
+            ratio = new_shape[1] / base_shape[1], new_shape[0] / base_shape[0]  # width, height ratios
+
+        if self.center:
+            dw /= 2  # divide padding into 2 sides
+            dh /= 2
+
+        top, bottom = int(round(dh - 0.1)) if self.center else 0, int(round(dh + 0.1))
+        left, right = int(round(dw - 0.1)) if self.center else 0, int(round(dw + 0.1))
+
+        return new_unpad, (top, bottom, left, right), ratio, (dw, dh)
+
     def __call__(self, labels=None, image=None):
         """Return updated labels and image with added border."""
         if labels is None:
@@ -700,33 +732,12 @@ class LetterBox:
         img = labels.get("img") if image is None else image
         shape = img.shape[:2]  # current shape [height, width]
         new_shape = labels.pop("rect_shape", self.new_shape)
-        if isinstance(new_shape, int):
-            new_shape = (new_shape, new_shape)
+        new_shape = _pair(new_shape)
 
-        # Scale ratio (new / old)
-        r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
-        if not self.scaleup:  # only scale down, do not scale up (for better val mAP)
-            r = min(r, 1.0)
-
-        # Compute padding
-        ratio = r, r  # width, height ratios
-        new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
-        dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
-        if self.auto:  # minimum rectangle
-            dw, dh = np.mod(dw, self.stride), np.mod(dh, self.stride)  # wh padding
-        elif self.scaleFill:  # stretch
-            dw, dh = 0.0, 0.0
-            new_unpad = (new_shape[1], new_shape[0])
-            ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]  # width, height ratios
-
-        if self.center:
-            dw /= 2  # divide padding into 2 sides
-            dh /= 2
+        new_unpad, (top, bottom, left, right), ratio, (dw, dh) = self.precompute_padding(new_shape, shape)
 
         if shape[::-1] != new_unpad:  # resize
             img = cv2.resize(img, new_unpad, interpolation=cv2.INTER_LINEAR)
-        top, bottom = int(round(dh - 0.1)) if self.center else 0, int(round(dh + 0.1))
-        left, right = int(round(dw - 0.1)) if self.center else 0, int(round(dw + 0.1))
         img = cv2.copyMakeBorder(
             img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114)
         )  # add border
@@ -748,6 +759,40 @@ class LetterBox:
         labels["instances"].scale(*ratio)
         labels["instances"].add_padding(padw, padh)
         return labels
+
+
+class BatchLetterBox(LetterBox):
+    """Resize image and padding for detection, instance segmentation, pose."""
+
+    def __call__(self, labels=None, image=None):
+        """Return updated labels and image with added border."""
+        if labels is None:
+            labels = {}
+        img = labels.get("img") if image is None else image
+        new_shape = labels.pop("rect_shape", self.new_shape)
+        new_shape = _pair(new_shape)
+
+        # Check that img is batched tensor BxCxHxW
+        assert torch.is_tensor(img) and img.dim() == 4, f'Got image as type {type(img)}, expected `torch.tensor`.'
+
+        shape = img.shape[2:]  # current shape [height, width]
+
+        new_unpad, pad, ratio, (dw, dh) = self.precompute_padding(new_shape, shape)
+
+        if shape[::-1] != new_unpad:  # resize
+            img = T.functional.resize(img, new_unpad, interpolation=T.InterpolationMode.BILINEAR, antialias=True)
+
+        img = T.functional.pad(img, pad, padding_mode='constant', fill=114)  # add border
+        if labels.get("ratio_pad"):
+            labels["ratio_pad"] = (labels["ratio_pad"], (pad[2], pad[0]))  # for evaluation
+
+        if len(labels):
+            labels = self._update_labels(labels, ratio, dw, dh)
+            labels["img"] = img
+            labels["resized_shape"] = new_shape
+            return labels
+        else:
+            return img
 
 
 class CopyPaste:
