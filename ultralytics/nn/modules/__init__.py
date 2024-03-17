@@ -28,6 +28,8 @@ from .block import (
     Bottleneck,
     BottleneckCSP,
     C2f,
+    C2fAttn,
+    ImagePoolingAttn,
     C3Ghost,
     C3x,
     GhostBottleneck,
@@ -38,6 +40,14 @@ from .block import (
     Efficient_TRT_NMS,
     ONNX_NMS,
     ResNetLayer,
+    ContrastiveHead,
+    BNContrastiveHead,
+    RepNCSPELAN4,
+    ADown,
+    SPPELAN,
+    CBFuse,
+    CBLinear,
+    Silence,
 )
 from .conv import (
     CBAM,
@@ -75,6 +85,7 @@ from .head import (
     PostDetectONNXNMS,
     DetectEfficient,
 )
+from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect
 from .transformer import (
     AIFI,
     MLP,
@@ -121,6 +132,7 @@ __all__ = (
     "C2",
     "C3",
     "C2f",
+    "C2fAttn",
     "C3x",
     "C3TR",
     "C3Ghost",
@@ -158,4 +170,15 @@ __all__ = (
     "DetectEfficient",
     "Squareplus",
     "OBB",
+    "WorldDetect",
+    "ImagePoolingAttn",
+    "ContrastiveHead",
+    "BNContrastiveHead",
+    "RepNCSPELAN4",
+    "ADown",
+    "SPPELAN",
+    "CBFuse",
+    "CBLinear",
+    "Silence",
+    "ResNetLayer",
 )
