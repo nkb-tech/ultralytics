@@ -8,12 +8,23 @@ keywords: computer vision, datasets, Ultralytics, YOLO, object detection, instan
 
 Ultralytics provides support for various datasets to facilitate computer vision tasks such as detection, instance segmentation, pose estimation, classification, and multi-object tracking. Below is a list of the main Ultralytics datasets, followed by a summary of each computer vision task and the respective datasets.
 
+<p align="center">
+  <br>
+  <iframe loading="lazy" width="720" height="405" src="https://www.youtube.com/embed/YDXKa1EljmU"
+    title="YouTube video player" frameborder="0"
+    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+    allowfullscreen>
+  </iframe>
+  <br>
+  <strong>Watch:</strong> Ultralytics Datasets Overview
+</p>
+
 ## NEW 🚀 Ultralytics Explorer
 
 Create embeddings for your dataset, search for similar images, run SQL queries, perform semantic search and even search using natural language! You can get started with our GUI app or build your own using the API. Learn more [here](explorer/index.md).
 
 <p>
-<img width="1709" alt="Ultralytics Explorer Screenshot" src="https://github.com/AyushExel/assets/assets/15766192/85675606-fb7f-4b0c-ad1b-d9d07c919414">
+<img alt="Ultralytics Explorer Screenshot" src="https://github.com/RizwanMunawar/RizwanMunawar/assets/62513924/d2ebaffd-e065-4d88-983a-33cb6f593785">
 </p>
 
 - Try the [GUI Demo](explorer/index.md)
@@ -33,6 +44,7 @@ Bounding box object detection is a computer vision technique that involves detec
 - [VisDrone](detect/visdrone.md): A dataset containing object detection and multi-object tracking data from drone-captured imagery with over 10K images and video sequences.
 - [VOC](detect/voc.md): The Pascal Visual Object Classes (VOC) dataset for object detection and segmentation with 20 object classes and over 11K images.
 - [xView](detect/xview.md): A dataset for object detection in overhead imagery with 60 object categories and over 1 million annotated objects.
+- [Roboflow 100](detect/roboflow-100.md): A diverse object detection benchmark with 100 datasets spanning seven imagery domains for comprehensive model evaluation.
 
 ## [Instance Segmentation Datasets](segment/index.md)
 
@@ -40,6 +52,9 @@ Instance segmentation is a computer vision technique that involves identifying a
 
 - [COCO](segment/coco.md): A large-scale dataset designed for object detection, segmentation, and captioning tasks with over 200K labeled images.
 - [COCO8-seg](segment/coco8-seg.md): A smaller dataset for instance segmentation tasks, containing a subset of 8 COCO images with segmentation annotations.
+- [Crack-seg](segment/crack-seg.md): Specifically crafted dataset for detecting cracks on roads and walls, applicable for both object detection and segmentation tasks.
+- [Package-seg](segment/package-seg.md): Tailored dataset for identifying packages in warehouses or industrial settings, suitable for both object detection and segmentation applications.
+- [Carparts-seg](segment/carparts-seg.md): Purpose-built dataset for identifying vehicle parts, catering to design, manufacturing, and research needs. It serves for both object detection and segmentation tasks.
 
 ## [Pose Estimation](pose/index.md)
 
