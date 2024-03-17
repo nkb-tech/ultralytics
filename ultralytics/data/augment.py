@@ -773,7 +773,7 @@ class BatchLetterBox(LetterBox):
         new_shape = _pair(new_shape)
 
         # Check that img is batched tensor BxCxHxW
-        assert torch.is_tensor(img) and img.dim() == 4, f'Got image as type {type(img)}, expected `torch.tensor`.'
+        assert torch.is_tensor(img) and img.dim() == 4, f"Got image as type {type(img)}, expected `torch.tensor`."
 
         shape = img.shape[2:]  # current shape [height, width]
 
@@ -782,7 +782,7 @@ class BatchLetterBox(LetterBox):
         if shape[::-1] != new_unpad:  # resize
             img = T.functional.resize(img, new_unpad, interpolation=T.InterpolationMode.BILINEAR, antialias=True)
 
-        img = T.functional.pad(img, pad, padding_mode='constant', fill=114)  # add border
+        img = T.functional.pad(img, pad, padding_mode="constant", fill=114)  # add border
         if labels.get("ratio_pad"):
             labels["ratio_pad"] = (labels["ratio_pad"], (pad[2], pad[0]))  # for evaluation
 

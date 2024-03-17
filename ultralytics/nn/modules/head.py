@@ -1,5 +1,6 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Model head modules."""
+
 from typing import Tuple
 
 import math

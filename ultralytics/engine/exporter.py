@@ -48,6 +48,7 @@ TensorFlow.js:
     $ ln -s ../../yolov5/yolov8n_web_model public/yolov8n_web_model
     $ npm start
 """
+
 import json
 import os
 import shutil
@@ -233,7 +234,7 @@ class Exporter:
                     post_detect_class.dynamic = self.args.dynamic
                     setattr(m, "__class__", post_detect_class)
                 elif isinstance(m, RTDETRDecoder) and self.args.nms:
-                    raise NotImplementedError('RT-DETR with `nms=True` is not supported now.')
+                    raise NotImplementedError("RT-DETR with `nms=True` is not supported now.")
 
             elif isinstance(m, (C2f, C2f_DCNv3, C2f_CloAtt, C2f_Faster)) and not any(
                 (saved_model, pb, tflite, edgetpu, tfjs)
@@ -390,8 +391,8 @@ class Exporter:
 
         # ... for inputs
         if self.args.dynamic:
-            dynamic["images"] = {0: "batch"} # {0: "batch", 2: "height", 3: "width"} onnx optim goes bad
-        
+            dynamic["images"] = {0: "batch"}  # {0: "batch", 2: "height", 3: "width"} onnx optim goes bad
+
         # ... for outputs
         if not self.args.nms:
             if isinstance(self.model, SegmentationModel):
@@ -399,7 +400,7 @@ class Exporter:
                 if self.args.dynamic:
                     dynamic["outputs"] = {0: "batch", 2: "anchors"}  # shape(1, 116, 8400)
                     dynamic["proto"] = {0: "batch", 2: "mask_height", 3: "mask_width"}  # shape(1,32,160,160)
-                
+
             elif isinstance(self.model, DetectionModel):
                 if self.args.dynamic:
                     dynamic["outputs"] = {0: "batch", 2: "anchors"}  # shape(1, 84, 8400)
@@ -454,6 +455,7 @@ class Exporter:
         if self.args.simplify:
             try:
                 import onnxsim
+
                 LOGGER.info(f"{prefix} simplifying with onnxsim {onnxsim.__version__}...")
                 # subprocess.run(f'onnxsim "{f}" "{f}"', shell=True)
                 model_onnx_optimized, check = onnxsim.simplify(model_onnx)
@@ -1167,9 +1169,9 @@ class Exporter:
         model = ct.models.MLModel(pipeline.spec, weights_dir=weights_dir)
         model.input_description["image"] = "Input image"
         model.input_description["iouThreshold"] = f"(optional) IOU threshold override (default: {nms.iouThreshold})"
-        model.input_description[
-            "confidenceThreshold"
-        ] = f"(optional) Confidence threshold override (default: {nms.confidenceThreshold})"
+        model.input_description["confidenceThreshold"] = (
+            f"(optional) Confidence threshold override (default: {nms.confidenceThreshold})"
+        )
         model.output_description["confidence"] = 'Boxes × Class confidence (see user-defined metadata "classes")'
         model.output_description["coordinates"] = "Boxes × [x, y, width, height] (relative to image size)"
         LOGGER.info(f"{prefix} pipeline success")
