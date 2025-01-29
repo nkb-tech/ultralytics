@@ -98,7 +98,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
     """Build YOLO Dataset."""
     if multi_modal:
         dataset = YOLOMultiModalDataset
-    elif cfg.weighted and mode == "train":
+    elif cfg.weighted_loader and mode == "train":
         dataset = YOLOWeightedDataset
     else:
         dataset = YOLODataset
