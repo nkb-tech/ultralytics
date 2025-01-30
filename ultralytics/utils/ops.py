@@ -669,19 +669,23 @@ def crop_mask(masks, boxes):
     Returns:
         (torch.Tensor): The largest connected component is taken from each mask.
     """
-    comps = []
-    for mask in masks:
-        mask = (mask.gt(0.0).cpu().numpy() * 255).astype(np.uint8)
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
-        if num_labels > 2:
-            stats = stats[1:, :]
-            max_area_id = np.argmax(stats[:, 4]) + 1
-            mask = np.zeros_like(mask)
-            mask = np.where(labels == max_area_id, 1., 0.)
-        comp = torch.from_numpy(mask)
-        comps.append(comp)
+    if masks.requires_grad:
+        return masks
 
-    return torch.stack(comps).to(masks.device, masks.dtype)
+    else:
+        comps = []
+        for mask in masks:
+            mask = (mask.gt(0.0).cpu().numpy() * 255).astype(np.uint8)
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            if num_labels > 2:
+                stats = stats[1:, :]
+                max_area_id = np.argmax(stats[:, 4]) + 1
+                mask = np.zeros_like(mask)
+                mask = np.where(labels == max_area_id, 1., 0.)
+            comp = torch.from_numpy(mask)
+            comps.append(comp)
+
+        return torch.stack(comps).to(masks.device, masks.dtype)
 
 
 def process_mask(protos, masks_in, bboxes, shape, upsample=False):
