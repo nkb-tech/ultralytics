@@ -261,9 +261,14 @@ class YOLOWeightedDataset(YOLODataset):
 
         self.train_mode = "train" in self.prefix
 
-        # You can also specify weights manually instead
         self.count_instances()
-        class_weights = np.sum(self.counts) / self.counts
+        class_weights_option = kwargs["hyp"].get("class_weights", None)
+        if class_weights_option is None or class_weights_option == "linear":
+            class_weights = np.sum(self.counts) / self.counts
+        elif class_weights_option == "sqrt":
+            class_weights = np.sum(np.sqrt(self.counts)) / np.sqrt(self.counts)
+        else:
+            class_weights = class_weights_option
 
         # Aggregation function
         self.agg_func = np.mean
