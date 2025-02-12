@@ -96,9 +96,9 @@ class BboxLoss(nn.Module):
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
 
-    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask, obj_weights):
         """IoU loss."""
-        weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+        weight = (target_scores.sum(-1) * obj_weights)[fg_mask].unsqueeze(-1)
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
@@ -171,6 +171,12 @@ class v8DetectionLoss:
         self.reg_max = m.reg_max
         self.device = device
 
+        if self.hyp.class_weights is not None:
+            assert len(self.hyp.class_weights) == self.nc, "class_weights must have length equal to number of classes"
+            self.class_weights = torch.tensor(self.hyp.class_weights, dtype=torch.float, device=self.device)
+        else:
+            self.class_weights = torch.ones(self.nc, dtype=torch.float, device=self.device)
+
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
@@ -230,7 +236,7 @@ class v8DetectionLoss:
         # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
         # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
 
-        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+        target_labels, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores.detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
@@ -240,17 +246,21 @@ class v8DetectionLoss:
             mask_gt,
         )
 
+        obj_weights = self.class_weights[target_labels.view(-1)].view(target_labels.shape)
+
         target_scores_sum = max(target_scores.sum(), 1)
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss[1] = (
+            self.bce(pred_scores, target_scores.to(dtype)) * obj_weights.unsqueeze(-1)
+        ).sum() / target_scores_sum  # BCE
 
         # Bbox loss
         if fg_mask.sum():
             target_bboxes /= stride_tensor
             loss[0], loss[2] = self.bbox_loss(
-                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
+                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask, obj_weights
             )
 
         loss[0] *= self.hyp.box  # box gain
