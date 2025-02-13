@@ -263,10 +263,12 @@ class YOLOWeightedDataset(YOLODataset):
 
         self.count_instances()
         class_weights_option = kwargs["hyp"].get("class_weights", None)
-        if class_weights_option is None or class_weights_option == "linear":
+        if class_weights_option == "linear":
             class_weights = np.sum(self.counts) / self.counts
         elif class_weights_option == "sqrt":
             class_weights = np.sum(np.sqrt(self.counts)) / np.sqrt(self.counts)
+        elif class_weights_option is None:
+            class_weights = np.ones_like(self.counts)
         else:
             class_weights = class_weights_option
 
