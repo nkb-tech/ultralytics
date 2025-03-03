@@ -1,4 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+import numpy as np
+import cv2
+import torch
 
 from ultralytics.engine.results import Results
 from ultralytics.models.yolo.detect.predict import DetectionPredictor
@@ -70,5 +73,22 @@ class SegmentationPredictor(DetectionPredictor):
             masks = ops.process_mask_native(proto, pred[:, 6:], pred[:, :4], orig_img.shape[:2])  # HWC
         else:
             masks = ops.process_mask(proto, pred[:, 6:], pred[:, :4], img.shape[2:], upsample=True)  # HWC
-            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
+
+            # Adjust bbox by mask
+            batch_size, height, width = masks.shape
+            y_coords = torch.arange(height, device=masks.device).view(1, height, 1)
+            x_coords = torch.arange(width, device=masks.device).view(1, 1, width)
+
+            y_coords = y_coords * masks
+            x_coords = x_coords * masks
+            xrb = x_coords.view(batch_size, height * width).max(1).values
+            yrb = y_coords.view(batch_size, height * width).max(1).values
+
+            y_coords += (height + 1) * (1 - masks)
+            x_coords += (width + 1) * (1 - masks)
+            xlt = x_coords.view(batch_size, height * width).min(1).values
+            ylt = y_coords.view(batch_size, height * width).min(1).values
+
+            bboxes = torch.stack([xlt, ylt, xrb, yrb], dim=1).to(pred.dtype)
+            pred[:, :4] = ops.scale_boxes(img.shape[2:], bboxes, orig_img.shape)
         return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], masks=masks)
