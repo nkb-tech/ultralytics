@@ -1,4 +1,7 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+import numpy as np
+import cv2
+import torch
 
 from ultralytics.engine.results import Results
 from ultralytics.models.yolo.detect.predict import DetectionPredictor
@@ -70,5 +73,15 @@ class SegmentationPredictor(DetectionPredictor):
             masks = ops.process_mask_native(proto, pred[:, 6:], pred[:, :4], orig_img.shape[:2])  # HWC
         else:
             masks = ops.process_mask(proto, pred[:, 6:], pred[:, :4], img.shape[2:], upsample=True)  # HWC
-            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
+            boxes = []
+            for mask in masks:
+                contour = (
+                    ops.scale_coords(img.shape[2:], ops.masks2segments(mask.unsqueeze(0))[0], orig_img.shape)
+                    .astype(np.int64)
+                )
+                x, y, w, h = cv2.boundingRect(contour)
+                box = np.array([x, y, x + w, y + h], dtype=np.int64)
+                boxes.append(box)
+            boxes = np.stack(boxes)
+            pred[:, :4] = torch.from_numpy(boxes).to(device=pred.device, dtype=pred.dtype)
         return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], masks=masks)
