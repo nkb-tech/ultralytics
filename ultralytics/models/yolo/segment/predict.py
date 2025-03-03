@@ -73,15 +73,22 @@ class SegmentationPredictor(DetectionPredictor):
             masks = ops.process_mask_native(proto, pred[:, 6:], pred[:, :4], orig_img.shape[:2])  # HWC
         else:
             masks = ops.process_mask(proto, pred[:, 6:], pred[:, :4], img.shape[2:], upsample=True)  # HWC
-            boxes = []
-            for mask in masks:
-                contour = (
-                    ops.scale_coords(img.shape[2:], ops.masks2segments(mask.unsqueeze(0))[0], orig_img.shape)
-                    .astype(np.int64)
-                )
-                x, y, w, h = cv2.boundingRect(contour)
-                box = np.array([x, y, x + w, y + h], dtype=np.int64)
-                boxes.append(box)
-            boxes = np.stack(boxes)
-            pred[:, :4] = torch.from_numpy(boxes).to(device=pred.device, dtype=pred.dtype)
+
+            # Adjust bbox by mask
+            batch_size, height, width = masks.shape
+            y_coords = torch.arange(height, device=masks.device).view(1, height, 1)
+            x_coords = torch.arange(width, device=masks.device).view(1, 1, width)
+
+            y_coords = y_coords * masks
+            x_coords = x_coords * masks
+            xrb = x_coords.view(batch_size, height * width).max(1).values
+            yrb = y_coords.view(batch_size, height * width).max(1).values
+
+            y_coords += (height + 1) * (1 - masks)
+            x_coords += (width + 1) * (1 - masks)
+            xlt = x_coords.view(batch_size, height * width).min(1).values
+            ylt = y_coords.view(batch_size, height * width).min(1).values
+
+            bboxes = torch.stack([xlt, ylt, xrb, yrb], dim=1).to(pred.dtype)
+            pred[:, :4] = ops.scale_boxes(img.shape[2:], bboxes, orig_img.shape)
         return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], masks=masks)
