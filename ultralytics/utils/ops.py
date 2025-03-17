@@ -843,6 +843,11 @@ def masks2segments(masks, strategy="all"):
                 )
             elif strategy == "largest":  # select largest segment
                 c = np.array(c[np.array([len(x) for x in c]).argmax()]).reshape(-1, 2)
+            c = c.reshape(-1, 1, 2)
+            arc_len = cv2.arcLength(c, True)
+            epsilon = 0.002 * arc_len  # smoothing parameter
+            smoothed = cv2.approxPolyDP(c, epsilon, True)
+            c = smoothed.reshape(-1, 2)
         else:
             c = np.zeros((0, 2))  # no segments found
         segments.append(c.astype("float32"))
