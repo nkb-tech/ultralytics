@@ -125,14 +125,16 @@ class BasePredictor:
         not_tensor = not isinstance(im, torch.Tensor)
         if not_tensor:
             im = np.stack(self.pre_transform(im))
-            im = im[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW, (n, 3, h, w)
+            if len(im.shape) < 4:
+                im = np.expand_dims(im, -1)
+            im = im.transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW, (n, 1, h, w)
             im = np.ascontiguousarray(im)  # contiguous
+            im = im.astype(np.float32)
+            im /= 65_535  # 0 - 65_535 to 0.0 - 1.0
             im = torch.from_numpy(im)
 
         im = im.to(self.device)
         im = im.half() if self.model.fp16 else im.float()  # uint8 to fp16/32
-        if not_tensor:
-            im /= 65_535  # 0 - 65_535 to 0.0 - 1.0
         return im
 
     def inference(self, im, *args, **kwargs):
@@ -238,7 +240,7 @@ class BasePredictor:
 
             # Warmup model
             if not self.done_warmup:
-                self.model.warmup(imgsz=(1 if self.model.pt or self.model.triton else self.dataset.bs, 3, *self.imgsz))
+                self.model.warmup(imgsz=(1 if self.model.pt or self.model.triton else self.dataset.bs, 1, *self.imgsz))
                 self.done_warmup = True
 
             self.seen, self.windows, self.batch = 0, [], None

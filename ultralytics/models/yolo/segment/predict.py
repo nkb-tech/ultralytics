@@ -1,4 +1,5 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+import numpy as np
 
 from ultralytics.engine.results import Results
 from ultralytics.models.yolo.detect.predict import DetectionPredictor
@@ -71,4 +72,10 @@ class SegmentationPredictor(DetectionPredictor):
         else:
             masks = ops.process_mask(proto, pred[:, 6:], pred[:, :4], img.shape[2:], upsample=True)  # HWC
             pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
+        if orig_img.dtype == np.uint16:
+            orig_img = (orig_img >> 8).astype(np.uint8)
+        if orig_img.ndim == 2:
+            orig_img = orig_img[..., None]
+        if orig_img.shape[2] == 1:
+            orig_img = np.repeat(orig_img, 3, axis=2)
         return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], masks=masks)
