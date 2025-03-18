@@ -120,6 +120,11 @@ copy_paste_mode: "flip" # (str) the method to do copy_paste augmentation (flip, 
 auto_augment: randaugment # (str) auto augmentation policy for classification (randaugment, autoaugment, augmix)
 erasing: 0.4 # (float) probability of random erasing during classification training (0-0.9), 0 means no erasing, must be less than 1.0.
 crop_fraction: 1.0 # (float) image crop fraction for classification (0.1-1), 1.0 means no crop, must be greater than 0.
+weighted_loader: false # (bool) whether to use weighted loader to handle data imbalance
+weighted_loss: false # (bool) whether to use weighted loss to handle data imbalance
+class_weights: null # (str | list, optional) class weights list, default all ones
+# if list, then the passed values are used. If weighted loader is used then
+# 'linear' and 'sqrt' str values are available for automatic weighting
 
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg: # (str, optional) for overriding defaults.yaml

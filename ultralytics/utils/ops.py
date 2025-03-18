@@ -659,21 +659,33 @@ def resample_segments(segments, n=1000):
 
 def crop_mask(masks, boxes):
     """
-    It takes a mask and a bounding box, and returns a mask that is cropped to the bounding box.
+    It takes a mask and a bounding box, and returns a mask without cropping by 
+    bounding box, but leaving only the largest connected component.
 
     Args:
         masks (torch.Tensor): [n, h, w] tensor of masks
         boxes (torch.Tensor): [n, 4] tensor of bbox coordinates in relative point form
 
     Returns:
-        (torch.Tensor): The masks are being cropped to the bounding box.
+        (torch.Tensor): The largest connected component is taken from each mask.
     """
-    _, h, w = masks.shape
-    x1, y1, x2, y2 = torch.chunk(boxes[:, :, None], 4, 1)  # x1 shape(n,1,1)
-    r = torch.arange(w, device=masks.device, dtype=x1.dtype)[None, None, :]  # rows shape(1,1,w)
-    c = torch.arange(h, device=masks.device, dtype=x1.dtype)[None, :, None]  # cols shape(1,h,1)
+    if masks.requires_grad:
+        return masks
 
-    return masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2))
+    else:
+        comps = []
+        for mask in masks:
+            mask = (mask.gt(0.0).cpu().numpy() * 255).astype(np.uint8)
+            num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+            if num_labels > 2:
+                stats = stats[1:, :]
+                max_area_id = np.argmax(stats[:, 4]) + 1
+                mask = np.zeros_like(mask)
+                mask = np.where(labels == max_area_id, 1., 0.)
+            comp = torch.from_numpy(mask)
+            comps.append(comp)
+
+        return torch.stack(comps).to(masks.device, masks.dtype)
 
 
 def process_mask(protos, masks_in, bboxes, shape, upsample=False):
@@ -831,6 +843,11 @@ def masks2segments(masks, strategy="all"):
                 )
             elif strategy == "largest":  # select largest segment
                 c = np.array(c[np.array([len(x) for x in c]).argmax()]).reshape(-1, 2)
+            c = c.reshape(-1, 1, 2)
+            arc_len = cv2.arcLength(c, True)
+            epsilon = 0.002 * arc_len  # smoothing parameter
+            smoothed = cv2.approxPolyDP(c, epsilon, True)
+            c = smoothed.reshape(-1, 2)
         else:
             c = np.zeros((0, 2))  # no segments found
         segments.append(c.astype("float32"))
