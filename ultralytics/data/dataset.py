@@ -15,6 +15,7 @@ from torch.utils.data import ConcatDataset
 from ultralytics.utils import LOCAL_RANK, NUM_THREADS, TQDM, colorstr
 from ultralytics.utils.ops import resample_segments
 from ultralytics.utils.torch_utils import TORCHVISION_0_18
+from ultralytics.utils.patches import imread
 
 from .augment import (
     Compose,
@@ -464,13 +465,13 @@ class ClassificationDataset:
         f, j, fn, im = self.samples[i]  # filename, index, filename.with_suffix('.npy'), image
         if self.cache_ram:
             if im is None:  # Warning: two separate if statements required here, do not combine this with previous line
-                im = self.samples[i][3] = cv2.imread(f)
+                im = self.samples[i][3] = imread(f)
         elif self.cache_disk:
             if not fn.exists():  # load npy
-                np.save(fn.as_posix(), cv2.imread(f), allow_pickle=False)
+                np.save(fn.as_posix(), imread(f), allow_pickle=False)
             im = np.load(fn)
         else:  # read image
-            im = cv2.imread(f)  # BGR
+            im = imread(f)  # BGR
         # Convert NumPy array to PIL image
         im = Image.fromarray(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))
         sample = self.torch_transforms(im)

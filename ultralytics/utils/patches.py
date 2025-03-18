@@ -12,18 +12,20 @@ import torch
 _imshow = cv2.imshow  # copy to avoid recursion errors
 
 
-def imread(filename: str, flags: int = cv2.IMREAD_COLOR):
+def imread(filename: str):
     """
     Read an image from a file.
 
     Args:
         filename (str): Path to the file to read.
-        flags (int, optional): Flag that can take values of cv2.IMREAD_*. Defaults to cv2.IMREAD_COLOR.
 
     Returns:
         (np.ndarray): The read image.
     """
-    return cv2.imdecode(np.fromfile(filename, np.uint8), flags)
+    img = cv2.imread(filename, cv2.IMREAD_UNCHANGED)
+    if img.ndim == 2:
+        img = img[:, :, None]
+    return img
 
 
 def imwrite(filename: str, img: np.ndarray, params=None):
