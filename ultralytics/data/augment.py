@@ -2327,7 +2327,6 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
     return Compose(
         [
             pre_transform,
-            Albumentations(p=1.0),
             RandomFlip(direction="vertical", p=hyp.flipud),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
         ]
