@@ -205,7 +205,7 @@ def visualize_image_annotations(image_path, txt_path, label_map):
             annotations.append((x, y, w, h, int(class_id)))
     fig, ax = plt.subplots(1)  # Plot the image and annotations
     for x, y, w, h, label in annotations:
-        color = tuple(c / 255 for c in colors(label, True))  # Get and normalize the RGB color
+        color = tuple(c / 65_535 for c in colors(label, True))  # Get and normalize the RGB color
         rect = plt.Rectangle((x, y), w, h, linewidth=2, edgecolor=color, facecolor="none")  # Create a rectangle
         ax.add_patch(rect)
         luminance = 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]  # Formula for luminance
