@@ -1,103 +1,56 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+"""Activation modules."""
+
 import torch
 import torch.nn as nn
 
-__all__ = ["MemoryEfficientMish", "MemoryEfficientSwish", "Squareplus", "HSigmoid"]
+__all__ = ['EMA', 'AGLU']
 
+class AGLU(nn.Module):
+    """Unified activation function module from https://github.com/kostas1515/AGLU."""
 
-# A memory-efficient implementation of Swish function
-class SwishImplementation(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, i):
-        result = i * torch.sigmoid(i)
-        ctx.save_for_backward(i)
-        return result
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        i = ctx.saved_tensors[0]
-        sigmoid_i = torch.sigmoid(i)
-        return grad_output * (sigmoid_i * (1 + i * (1 - sigmoid_i)))
-
-
-class MemoryEfficientSwish(nn.Module):
-    def forward(self, x):
-        return SwishImplementation.apply(x)
-
-
-# A memory-efficient implementation of Mish function
-class MishImplementation(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, i):
-        result = i * torch.tanh(torch.nn.functional.softplus(i))
-        ctx.save_for_backward(i)
-        return result
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        i = ctx.saved_variables[0]
-
-        v = 1.0 + i.exp()
-        h = v.log()
-        grad_gh = 1.0 / h.cosh().pow_(2)
-
-        # Note that grad_hv * grad_vx = sigmoid(x)
-        # grad_hv = 1./v
-        # grad_vx = i.exp()
-
-        grad_hx = i.sigmoid()
-
-        grad_gx = grad_gh * grad_hx  # grad_hv * grad_vx
-
-        grad_f = torch.tanh(torch.nn.functional.softplus(i)) + i * grad_gx
-
-        return grad_output * grad_f
-
-
-class MemoryEfficientMish(nn.Module):
-    def __init__(self, **kwargs):
+    def __init__(self, device=None, dtype=None) -> None:
+        """Initialize the Unified activation function."""
         super().__init__()
-        pass
+        self.act = nn.Softplus(beta=-1.0)
+        self.lambd = nn.Parameter(nn.init.uniform_(torch.empty(1, device=device, dtype=dtype)))  # lambda parameter
+        self.kappa = nn.Parameter(nn.init.uniform_(torch.empty(1, device=device, dtype=dtype)))  # kappa parameter
 
-    def forward(self, input_tensor):
-        return MishImplementation.apply(input_tensor)
-
-
-class Squareplus(nn.Module):
-    """Squareplus activation presented https://arxiv.org/pdf/2112.11687.pdf.
-    This function produces stable results when inputs is high enough.
-    Faster than Softplus.
-    """
-
-    __constants__ = ["beta", "shift"]
-    beta: float
-    shift: float
-
-    def __init__(
-        self,
-        beta: float = 1.0,
-        shift: float = 4,
-    ) -> None:
-        super().__init__()
-        self.beta = beta
-        self.shift = shift
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        """Call forward and returns and processed tensor."""
-        _input = input * self.beta
-        return 1 / (2 * self.beta) * (_input + torch.sqrt(_input * _input + self.shift))
-
-    def extra_repr(self) -> str:
-        return f"beta={self.beta}, shift={self.shift}"
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Compute the forward pass of the Unified activation function."""
+        lam = torch.clamp(self.lambd, min=0.0001)
+        return torch.exp((1 / lam) * self.act((self.kappa * x) - torch.log(lam)))
 
 
-class HSigmoid(nn.Module):
-    def __init__(self, inplace=True):
-        super(HSigmoid, self).__init__()
-        self.inplace = inplace
-        self.relu = nn.ReLU6(inplace=inplace)
+
+class EMA(nn.Module):
+    '''
+    Attention from paper https://arxiv.org/abs/2305.13563
+    '''
+    def __init__(self, channels: int, factor: int = 32):
+        super(EMA, self).__init__()
+        self.groups = factor
+        assert channels // self.groups > 0
+        self.softmax = nn.Softmax(-1)
+        self.agp = nn.AdaptiveAvgPool2d((1, 1))
+        self.pool_h = nn.AdaptiveAvgPool2d((None, 1))
+        self.pool_w = nn.AdaptiveAvgPool2d((1, None))
+        self.gn = nn.GroupNorm(channels // self.groups, channels // self.groups)
+        self.conv1x1 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=1, stride=1, padding=0)
+        self.conv3x3 = nn.Conv2d(channels // self.groups, channels // self.groups, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x):
-        return self.relu(x + 3) / 6
-
-    def extra_repr(self) -> str:
-        return f"inplace={self.inplace}"
+        b, c, h, w = x.size()
+        group_x = x.reshape(b * self.groups, -1, h, w)  # b*g,c//g,h,w
+        x_h = self.pool_h(group_x)
+        x_w = self.pool_w(group_x).permute(0, 1, 3, 2)
+        hw = self.conv1x1(torch.cat([x_h, x_w], dim=2))
+        x_h, x_w = torch.split(hw, [h, w], dim=2)
+        x1 = self.gn(group_x * x_h.sigmoid() * x_w.permute(0, 1, 3, 2).sigmoid())
+        x2 = self.conv3x3(group_x)
+        x11 = self.softmax(self.agp(x1).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
+        x12 = x2.reshape(b * self.groups, c // self.groups, -1)  # b*g, c//g, hw
+        x21 = self.softmax(self.agp(x2).reshape(b * self.groups, -1, 1).permute(0, 2, 1))
+        x22 = x1.reshape(b * self.groups, c // self.groups, -1)  # b*g, c//g, hw
+        weights = (torch.matmul(x11, x12) + torch.matmul(x21, x22)).reshape(b * self.groups, 1, h, w)
+        return (group_x * weights.sigmoid()).reshape(b, c, h, w)

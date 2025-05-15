@@ -1,7 +1,7 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """
-This module provides functionalities for hyperparameter tuning of the Ultralytics YOLO models for object detection,
-instance segmentation, image classification, pose estimation, and multi-object tracking.
+Module provides functionalities for hyperparameter tuning of the Ultralytics YOLO models for object detection, instance
+segmentation, image classification, pose estimation, and multi-object tracking.
 
 Hyperparameter tuning is the process of systematically searching for the optimal set of hyperparameters
 that yield the best model performance. This is particularly crucial in deep learning models like YOLO,
@@ -12,8 +12,8 @@ Example:
     ```python
     from ultralytics import YOLO
 
-    model = YOLO('yolov8n.pt')
-    model.tune(data='coco8.yaml', epochs=10, iterations=300, optimizer='AdamW', plots=False, save=False, val=False)
+    model = YOLO("yolov8n.pt")
+    model.tune(data="coco8.yaml", epochs=10, iterations=300, optimizer="AdamW", plots=False, save=False, val=False)
     ```
 """
 
@@ -54,15 +54,15 @@ class Tuner:
         ```python
         from ultralytics import YOLO
 
-        model = YOLO('yolov8n.pt')
-        model.tune(data='coco8.yaml', epochs=10, iterations=300, optimizer='AdamW', plots=False, save=False, val=False)
+        model = YOLO("yolov8n.pt")
+        model.tune(data="coco8.yaml", epochs=10, iterations=300, optimizer="AdamW", plots=False, save=False, val=False)
         ```
 
         Tune with custom search space.
         ```python
         from ultralytics import YOLO
 
-        model = YOLO('yolov8n.pt')
+        model = YOLO("yolov8n.pt")
         model.tune(space={key1: val1, key2: val2})  # custom search space dictionary
         ```
     """
@@ -95,6 +95,7 @@ class Tuner:
             "perspective": (0.0, 0.001),  # image perspective (+/- fraction), range 0-0.001
             "flipud": (0.0, 1.0),  # image flip up-down (probability)
             "fliplr": (0.0, 1.0),  # image flip left-right (probability)
+            "bgr": (0.0, 1.0),  # image channel bgr (probability)
             "mosaic": (0.0, 1.0),  # image mixup (probability)
             "mixup": (0.0, 1.0),  # image mixup (probability)
             "copy_paste": (0.0, 1.0),  # segment copy-paste (probability)
@@ -147,6 +148,10 @@ class Tuner:
             hyp = {k: float(x[i + 1] * v[i]) for i, k in enumerate(self.space.keys())}
         else:
             hyp = {k: getattr(self.args, k) for k in self.space.keys()}
+            for k,v in self.space.items(): # allows parameters with value=0 to be mutated
+                if hyp[k]<1e-5:
+                    hyp[k] = v[0] if abs(v[0])>1e-5 else v[1]
+                    
 
         # Constrain to limits
         for k, v in self.space.items():
@@ -175,7 +180,6 @@ class Tuner:
            The method utilizes the `self.tune_csv` Path object to read and log hyperparameters and fitness scores.
            Ensure this path is set correctly in the Tuner instance.
         """
-
         t0 = time.time()
         best_save_dir, best_metrics = None, None
         (self.tune_dir / "weights").mkdir(parents=True, exist_ok=True)
@@ -217,7 +221,7 @@ class Tuner:
                 for ckpt in weights_dir.glob("*.pt"):
                     shutil.copy2(ckpt, self.tune_dir / "weights")
             elif cleanup:
-                shutil.rmtree(ckpt_file.parent)  # remove iteration weights/ dir to reduce storage space
+                shutil.rmtree(weights_dir, ignore_errors=True)  # remove iteration weights/ dir to reduce storage space
 
             # Plot tune results
             plot_tune_results(self.tune_csv)

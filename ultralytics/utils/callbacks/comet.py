@@ -71,7 +71,7 @@ def _get_experiment_type(mode, project_name):
 
 def _create_experiment(args):
     """Ensures that the experiment object is only created in a single process during distributed training."""
-    if RANK not in (-1, 0):
+    if RANK not in {-1, 0}:
         return
     try:
         comet_mode = _get_comet_mode()
@@ -114,7 +114,6 @@ def _scale_bounding_box_to_original_image_shape(box, resized_image_shape, origin
 
     This function rescales the bounding box labels to the original image shape.
     """
-
     resized_image_height, resized_image_width = resized_image_shape
 
     # Convert normalized xywh format predictions to xyxy in resized scale format

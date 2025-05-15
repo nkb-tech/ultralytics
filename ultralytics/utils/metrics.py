@@ -15,41 +15,6 @@ OKS_SIGMA = (
     np.array([0.26, 0.25, 0.25, 0.35, 0.35, 0.79, 0.79, 0.72, 0.72, 0.62, 0.62, 1.07, 1.07, 0.87, 0.87, 0.89, 0.89])
     / 10.0
 )
-SIOU_THRESHOLD = pow(2, 0.5) / 2
-
-
-class WIoUScale:
-    """monotonous: {
-        None: origin v1
-        True: monotonic FM v2
-        False: non-monotonic FM v3
-    }
-    momentum: The momentum of running mean"""
-
-    iou_mean = 1.0
-    monotonous = False
-    _momentum = 1 - pow(0.05, 1 / 216)
-    _is_train = True
-
-    def __init__(self, iou):
-        self.iou = iou
-        self._update(self)
-
-    @classmethod
-    def _update(cls, self):
-        if cls._is_train:
-            cls.iou_mean = (1 - cls._momentum) * cls.iou_mean + cls._momentum * self.iou.detach().mean().item()
-
-    @classmethod
-    def _scaled_loss(cls, self, gamma=1.9, delta=3):
-        if isinstance(self.monotonous, bool):
-            if self.monotonous:
-                return (self.iou.detach() / self.iou_mean).sqrt()
-            else:
-                beta = self.iou.detach() / self.iou_mean
-                alpha = delta * torch.pow(gamma, beta - delta)
-                return beta / alpha
-        return 1
 
 
 def bbox_ioa(box1, box2, iou=False, eps=1e-7):
@@ -65,7 +30,6 @@ def bbox_ioa(box1, box2, iou=False, eps=1e-7):
     Returns:
         (np.ndarray): A numpy array of shape (n, m) representing the intersection over box2 area.
     """
-
     # Get the coordinates of bounding boxes
     b1_x1, b1_y1, b1_x2, b1_y2 = box1.T
     b2_x1, b2_y1, b2_x2, b2_y2 = box2.T
@@ -88,7 +52,7 @@ def bbox_ioa(box1, box2, iou=False, eps=1e-7):
 def box_iou(box1, box2, eps=1e-7):
     """
     Calculate intersection-over-union (IoU) of boxes. Both sets of boxes are expected to be in (x1, y1, x2, y2) format.
-    Based on https://github.com/pytorch/vision/blob/master/torchvision/ops/boxes.py
+    Based on https://github.com/pytorch/vision/blob/master/torchvision/ops/boxes.py.
 
     Args:
         box1 (torch.Tensor): A tensor of shape (N, 4) representing N bounding boxes.
@@ -98,36 +62,16 @@ def box_iou(box1, box2, eps=1e-7):
     Returns:
         (torch.Tensor): An NxM tensor containing the pairwise IoU values for every element in box1 and box2.
     """
-
+    # NOTE: Need .float() to get accurate iou values
     # inter(N,M) = (rb(N,M,2) - lt(N,M,2)).clamp(0).prod(2)
-    (a1, a2), (b1, b2) = box1.unsqueeze(1).chunk(2, 2), box2.unsqueeze(0).chunk(2, 2)
-    inter = (torch.min(a2, b2) - torch.max(a1, b1)).clamp_min_(0).prod(2)
+    (a1, a2), (b1, b2) = box1.float().unsqueeze(1).chunk(2, 2), box2.float().unsqueeze(0).chunk(2, 2)
+    inter = (torch.min(a2, b2) - torch.max(a1, b1)).clamp_(0).prod(2)
 
     # IoU = inter / (area1 + area2 - inter)
     return inter / ((a2 - a1).prod(2) + (b2 - b1).prod(2) - inter + eps)
 
 
-def bbox_iou(
-    box1,
-    box2,
-    xywh=True,
-    GIoU=False,  # https://arxiv.org/pdf/1902.09630.pdf
-    DIoU=False,  # https://arxiv.org/pdf/1911.08287.pdf
-    CIoU=False,  # https://arxiv.org/pdf/1911.08287.pdf
-    NGIoU=False,  # https://www.mdpi.com/2076-3417/12/24/12785
-    WIoU=False,  # https://arxiv.org/pdf/2301.10051.pdf
-    SIoU=False,  # https://arxiv.org/pdf/2205.12740.pdf
-    EIoU=False,  # https://arxiv.org/pdf/2101.08158.pdf
-    MPDIoU=False,  # https://arxiv.org/pdf/2307.07662.pdf
-    focal=False,  # param from EIoU [https://arxiv.org/pdf/2101.08158.pdf]
-    alpha=1.0,
-    gamma=0.5,
-    mpdiou_hw=1.0,  # param from MPDIoU [https://arxiv.org/pdf/2307.07662.pdf]
-    scale=True,
-    inner=False,  # https://arxiv.org/pdf/2311.02877.pdf
-    ratio=1.0,  # param from inner [https://arxiv.org/pdf/2311.02877.pdf]
-    eps=1e-7,
-):
+def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
     """
     Calculate Intersection over Union (IoU) of box1(1, 4) to box2(n, 4).
 
@@ -139,237 +83,50 @@ def bbox_iou(
         GIoU (bool, optional): If True, calculate Generalized IoU. Defaults to False.
         DIoU (bool, optional): If True, calculate Distance IoU. Defaults to False.
         CIoU (bool, optional): If True, calculate Complete IoU. Defaults to False.
-        NGIoU (bool, optional): If True, calculate New Generalized IoU. Defaults to False.
-        WIoU (bool, optional): If True, calculate Wise IoU. Defaults to False.
-        SIoU (bool, optional): If True, calculate SCYLLA-IoU. Defaults to False.
-        EIoU (bool, optional): If True, calculate Efficient IoU. Defaults to False.
-        MPDIou (bool, optional): If True, calculate Minimum Points Distance IoU. Defaults to False.
-        focal (bool, optional): If True, calculate Focal versions of supported losses (except WIoU). Defaults to False.
-        alpha (float, optional): Degree of exponentiation.
-        gamma (float, optional): Focal degree of exponentiation.
-        scale (bool, optional): Parameter of WIoU loss.
-        mpdiou_hw (bool, optional): Scale parameter from MPDIoU loss.
-        inner (bool, optional) Whether to use inner version or not. Supports CIoU or SIoU.
         eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
 
     Returns:
-        (torch.Tensor): IoU, GIoU, DIoU, CIoU, NGIoU, SIoU, EIoU, WIoU or MPDIou values depending on the specified flags.
+        (torch.Tensor): IoU, GIoU, DIoU, or CIoU values depending on the specified flags.
     """
-
     # Get the coordinates of bounding boxes
     if xywh:  # transform from xywh to xyxy
         (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
         w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2
         b1_x1, b1_x2, b1_y1, b1_y2 = x1 - w1_, x1 + w1_, y1 - h1_, y1 + h1_
         b2_x1, b2_x2, b2_y1, b2_y2 = x2 - w2_, x2 + w2_, y2 - h2_, y2 + h2_
-
-        if inner:
-            inner_b1_x1, inner_b1_x2, inner_b1_y1, inner_b1_y2 = (
-                x1 - w1_ * ratio,
-                x1 + w1_ * ratio,
-                y1 - h1_ * ratio,
-                y1 + h1_ * ratio,
-            )
-            inner_b2_x1, inner_b2_x2, inner_b2_y1, inner_b2_y2 = (
-                x2 - w2_ * ratio,
-                x2 + w2_ * ratio,
-                y2 - h2_ * ratio,
-                y2 + h2_ * ratio,
-            )
-            inner_inter = (torch.min(inner_b1_x2, inner_b2_x2) - torch.max(inner_b1_x1, inner_b2_x1)).clamp_min_(0) * (
-                torch.min(inner_b1_y2, inner_b2_y2) - torch.max(inner_b1_y1, inner_b2_y1)
-            ).clamp_min_(0)
-            inner_union = (w1 * ratio * h1 * ratio + w2 * ratio * h2 * ratio - inner_inter).clamp_min_(eps)
-
     else:  # x1, y1, x2, y2 = box1
         b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
         b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
-        w1, h1 = b1_x2 - b1_x1, (b1_y2 - b1_y1).clamp_min_(eps)
-        w2, h2 = b2_x2 - b2_x1, (b2_y2 - b2_y1).clamp_min_(eps)
+        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
 
-    # Intersection & Union area
-    if xywh and inner:
-        inter = inner_inter
-        union = inner_union
-    else:
-        inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_min_(0) * (
-            b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)
-        ).clamp_min_(0)
-        union = (w1 * h1 + w2 * h2 - inter).clamp_min_(eps)
+    # Intersection area
+    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * (
+        b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)
+    ).clamp_(0)
 
+    # Union Area
+    union = w1 * h1 + w2 * h2 - inter + eps
+
+    # IoU
     iou = inter / union
-
-    if scale and WIoU:
-        wiou_scale = WIoUScale(1 - iou)
-
-    if focal:
-        focal_scale = torch.pow(iou, gamma)
-
-    # Focal IoU
-    iou = iou.pow_(alpha)  # alpha iou
-    if CIoU or DIoU or GIoU or NGIoU or WIoU or EIoU or SIoU or MPDIoU:
-        if MPDIoU:
-            d1 = (b2_x1 - b1_x1) ** 2 + (b2_y1 - b1_y1) ** 2
-            d2 = (b2_x2 - b1_x2) ** 2 + (b2_y2 - b1_y2) ** 2
-            mpdiou = iou - d1 / mpdiou_hw - d2 / mpdiou_hw  # MPDIoU
-            if focal:
-                return mpdiou, focal_scale
-            return (mpdiou,)
-
+    if CIoU or DIoU or GIoU:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
-        if CIoU or DIoU or EIoU or SIoU or WIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
-            c2 = (cw**2 + ch**2).pow_(alpha).clamp_min_(eps)  # convex diagonal squared
-            rho2 = (((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4).pow_(
-                alpha
-            )  # center dist ** 2
+        if CIoU or DIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+            c2 = cw.pow(2) + ch.pow(2) + eps  # convex diagonal squared
+            rho2 = (
+                (b2_x1 + b2_x2 - b1_x1 - b1_x2).pow(2) + (b2_y1 + b2_y2 - b1_y1 - b1_y2).pow(2)
+            ) / 4  # center dist**2
             if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
-                v = (4 / torch.pi**2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow_(2)
+                v = (4 / math.pi**2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
                 with torch.no_grad():
-                    alpha_ciou = v / (1 - iou + v).clamp_min_(eps)
-                ciou = iou - (rho2 / c2 + torch.pow(v * alpha_ciou, alpha))  # CIoU
-                if focal:
-                    return ciou, focal_scale
-                return (ciou,)  # CIoU
-            elif EIoU:
-                rho_w2 = ((b2_x2 - b2_x1) - (b1_x2 - b1_x1)) ** 2
-                rho_h2 = ((b2_y2 - b2_y1) - (b1_y2 - b1_y1)) ** 2
-                cw2 = (cw**2).pow_(alpha).clamp_min_(eps)
-                ch2 = (ch**2).pow_(alpha).clamp_min_(eps)
-                eiou = iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)
-                if focal:
-                    return eiou, focal_scale
-                return (eiou,)  # EIoU
-            elif SIoU:
-                s_cw = (b2_x1 + b2_x2 - b1_x1 - b1_x2).mul_(0.5).clamp_min_(eps)
-                s_ch = (b2_y1 + b2_y2 - b1_y1 - b1_y2).mul_(0.5).clamp_min_(eps)
-                sigma = (s_cw**2 + s_ch**2).pow_(0.5)
-                sin_alpha_1 = s_cw.abs() / sigma
-                sin_alpha_2 = s_ch.abs() / sigma
-                sin_alpha = torch.where(sin_alpha_1 > SIOU_THRESHOLD, sin_alpha_2, sin_alpha_1)
-                angle_cost = torch.cos(torch.arcsin(sin_alpha) * 2 - torch.pi / 2)
-                rho_x = (s_cw / cw) ** 2
-                rho_y = (s_ch / ch) ** 2
-                gamma = angle_cost - 2
-                distance_cost = 2 - torch.exp(gamma * rho_x) - torch.exp(gamma * rho_y)
-                omiga_w = torch.abs(w1 - w2) / torch.max(w1, w2)
-                omiga_h = torch.abs(h1 - h2) / torch.max(h1, h2)
-                shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
-                siou = iou - (distance_cost + shape_cost).mul_(0.5).pow_(alpha).clamp_min_(eps)
-                if focal:
-                    return siou, focal_scale
-                return (siou,)  # SIoU
-            elif WIoU:
-                if focal:
-                    raise RuntimeError("WIoU do not support focal.")
-                elif scale:
-                    return getattr(WIoUScale, "_scaled_loss")(wiou_scale), (1 - iou) * torch.exp((rho2 / c2)), iou
-                else:
-                    return iou, torch.exp((rho2 / c2))
-            diou = iou - rho2 / c2
-            if focal:
-                return diou, focal_scale
-            return (diou,)  # DIoU
-
-        c_area = (cw * ch).clamp_min_(eps)  # convex area
-
-        if NGIoU:
-            d2 = torch.sqrt(h1**2 + w1**2)
-            d1 = torch.sqrt(h2**2 + w2**2)
-
-            b1_in_b2 = torch.logical_and(b1_x1 > b2_x1, b1_x2 < b2_x2)  # b1 (pred) in b2 (truth)
-
-            # D has same center as b2 and congruent to b1
-            D_x1, D_y1, D_x2, D_y2 = w1 / 2 - w2 / 2, h1 / 2 - h2 / 2, w1 / 2 + w2 / 2, h1 / 2 + h2 / 2
-            D_w, D_h = w1, h1
-
-            # convex shape C1 enclosing b1 and D
-            C1_w = D_x2.maximum(b1_x2) - D_x1.minimum(b1_x1).clamp_min_(0)  # C2 width
-            C1_h = D_y2.maximum(b1_y2) - D_y1.minimum(b1_y1).clamp_min_(0)  # C2 height
-
-            d_p1 = torch.sqrt(C1_h**2 + C1_w**2)  # d'2
-
-            beta_1 = d_p1 / d1
-
-            inter_D_b1 = (D_x2.minimum(b1_x2) - D_x1.maximum(b1_x1)).clamp_min_(0) * (
-                D_y2.minimum(b1_y2) - D_y1.maximum(b1_y1)
-            ).clamp_min_(0)
-            union_D_b1 = (D_w * D_h + w1 * h1 - inter_D_b1).clamp_min_(eps)
-            ngiou_b1_in_b2 = iou - (beta_1 * (C1_h * C1_w - union_D_b1) / (C1_h * C1_w))
-
-            b2_in_b1 = torch.logical_and(b1_x1 < b2_x1, b1_x2 > b2_x2)  # b2 (truth) in b1 (pred)
-
-            # D has same center as b1 and congruent to b2
-            D_x1, D_y1, D_x2, D_y2 = w1 / 2 - w2 / 2, h1 / 2 - h2 / 2, w1 / 2 + w2 / 2, h1 / 2 + h2 / 2
-            D_w, D_h = w2, h2
-
-            # convex shape C1 enclosing b2 and D
-            C2_w = D_x2.maximum(b2_x2) - D_x1.minimum(b2_x1).clamp_min_(0)  # convex shape C2 width
-            C2_h = D_y2.maximum(b2_y2) - D_y1.minimum(b2_y1).clamp_min_(0)  # convex shape C2 height
-
-            d_p2 = torch.sqrt(C2_h**2 + C2_w**2)  # d'2
-
-            beta_2 = d_p2 / d2
-
-            inter_D_b2 = (D_x2.minimum(b2_x2) - D_x1.maximum(b2_x1)).clamp_min_(0) * (
-                D_y2.minimum(b2_y2) - D_y1.maximum(b2_y1)
-            ).clamp_min_(0)
-            union_D_b2 = (D_w * D_h + w2 * h2 - inter_D_b2).clamp_min_(eps)
-            ngiou_b2_in_b1 = iou - (beta_2 * (C2_h * C2_w - union_D_b2) / (C2_h * C2_w))
-
-            neither = torch.logical_not(torch.logical_or(b1_in_b2, b2_in_b1))
-            ngiou_neither = iou - ((c_area - union) / (c_area))
-
-            ngiou = ngiou_b1_in_b2 * b1_in_b2 + ngiou_b2_in_b1 * b2_in_b1 + ngiou_neither * neither
-
-            if focal:
-                return ngiou, focal_scale
-            return (ngiou,)  # NGIoU https://www.mdpi.com/2076-3417/12/24/12785
-
-        giou = iou - (c_area - union) / c_area
-        if focal:
-            return giou, focal_scale
-        return (giou,)  # GIoU https://arxiv.org/pdf/1902.09630.pdf
-
-    if focal:
-        return iou, focal_scale
-    return (iou,)  # IoU
-
-
-def wasserstein_loss(box1, box2, xywh=False, eps=1e-7, constant=12.8):
-    r"""`Implementation of paper `Enhancing Geometric Factors into
-    Model Learning and Inference for Object Detection and Instance
-    Segmentation <https://arxiv.org/abs/2005.03572>`_.
-    Code is modified from https://github.com/Zzh-tju/CIoU.
-    Args:
-        pred (Tensor): Predicted bboxes of format (x_min, y_min, x_max, y_max),
-            shape (n, 4).
-        target (Tensor): Corresponding gt bboxes, shape (n, 4).
-        eps (float): Eps to avoid log(0).
-    Return:
-        Tensor: Loss tensor.
-    """
-
-    # Get the coordinates of bounding boxes
-    if xywh:  # transform from xywh to xyxy
-        (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
-        w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2
-        b1_x1, b1_x2, b1_y1, b1_y2 = x1 - w1_, x1 + w1_, y1 - h1_, y1 + h1_
-        b2_x1, b2_x2, b2_y1, b2_y2 = x2 - w2_, x2 + w2_, y2 - h2_, y2 + h2_
-
-    else:  # x1, y1, x2, y2 = box1
-        b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
-        b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
-        w1, h1 = b1_x2 - b1_x1, (b1_y2 - b1_y1).clamp_min_(eps)
-        w2, h2 = b2_x2 - b2_x1, (b2_y2 - b2_y1).clamp_min_(eps)
-
-    b1_x_center, b1_y_center = b1_x1 + w1 / 2, b1_y1 + h1 / 2
-    b2_x_center, b2_y_center = b2_x1 + w2 / 2, b2_y1 + h2 / 2
-    center_distance = ((b1_x_center - b2_x_center) ** 2 + (b1_y_center - b2_y_center) ** 2).clamp_min_(eps)
-    wh_distance = ((w1 - w2) ** 2 + (h1 - h2) ** 2) / 4
-
-    wasserstein_2 = center_distance + wh_distance
-    return wasserstein_2.sqrt_().div_(constant).exp_()
+                    alpha = v / (v - iou + (1 + eps))
+                return iou - (rho2 / c2 + v * alpha)  # CIoU
+            return iou - rho2 / c2  # DIoU
+        c_area = cw * ch + eps  # convex area
+        return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+    return iou  # IoU
 
 
 def mask_iou(mask1, mask2, eps=1e-7):
@@ -386,7 +143,7 @@ def mask_iou(mask1, mask2, eps=1e-7):
     Returns:
         (torch.Tensor): A tensor of shape (N, M) representing masks IoU.
     """
-    intersection = torch.matmul(mask1, mask2.T).clamp_min_(0)
+    intersection = torch.matmul(mask1, mask2.T).clamp_(0)
     union = (mask1.sum(1)[:, None] + mask2.sum(1)[None]) - intersection  # (area1 + area2) - intersection
     return intersection / (union + eps)
 
@@ -408,7 +165,7 @@ def kpt_iou(kpt1, kpt2, area, sigma, eps=1e-7):
     d = (kpt1[:, None, :, 0] - kpt2[..., 0]).pow(2) + (kpt1[:, None, :, 1] - kpt2[..., 1]).pow(2)  # (N, M, 17)
     sigma = torch.tensor(sigma, device=kpt1.device, dtype=kpt1.dtype)  # (17, )
     kpt_mask = kpt1[..., 2] != 0  # (N, 17)
-    e = d / (2 * sigma).pow(2) / (area[:, None, None] + eps) / 2  # from cocoeval
+    e = d / ((2 * sigma).pow(2) * (area[:, None, None] + eps) * 2)  # from cocoeval
     # e = d / ((area[None, :, None] + eps) * sigma) ** 2 / 2  # from formula
     return ((-e).exp() * kpt_mask[:, None]).sum(-1) / (kpt_mask.sum(-1)[:, None] + eps)
 
@@ -421,7 +178,7 @@ def _get_covariance_matrix(boxes):
         boxes (torch.Tensor): A tensor of shape (N, 5) representing rotated bounding boxes, with xywhr format.
 
     Returns:
-        (torch.Tensor): Covariance metrixs corresponding to original rotated bounding boxes.
+        (torch.Tensor): Covariance matrices corresponding to original rotated bounding boxes.
     """
     # Gaussian bounding boxes, ignore the center points (the first two columns) because they are not needed here.
     gbbs = torch.cat((boxes[:, 2:4].pow(2) / 12, boxes[:, 4:]), dim=-1)
@@ -435,15 +192,22 @@ def _get_covariance_matrix(boxes):
 
 def probiou(obb1, obb2, CIoU=False, eps=1e-7):
     """
-    Calculate the prob IoU between oriented bounding boxes, https://arxiv.org/pdf/2106.06072v1.pdf.
+    Calculate probabilistic IoU between oriented bounding boxes.
+
+    Implements the algorithm from https://arxiv.org/pdf/2106.06072v1.pdf.
 
     Args:
-        obb1 (torch.Tensor): A tensor of shape (N, 5) representing ground truth obbs, with xywhr format.
-        obb2 (torch.Tensor): A tensor of shape (N, 5) representing predicted obbs, with xywhr format.
-        eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
+        obb1 (torch.Tensor): Ground truth OBBs, shape (N, 5), format xywhr.
+        obb2 (torch.Tensor): Predicted OBBs, shape (N, 5), format xywhr.
+        CIoU (bool, optional): If True, calculate CIoU. Defaults to False.
+        eps (float, optional): Small value to avoid division by zero. Defaults to 1e-7.
 
     Returns:
-        (torch.Tensor): A tensor of shape (N, ) representing obb similarities.
+        (torch.Tensor): OBB similarities, shape (N,).
+
+    Note:
+        OBB format: [center_x, center_y, width, height, rotation_angle].
+        If CIoU is True, returns CIoU instead of IoU.
     """
     x1, y1 = obb1[..., :2].split(1, dim=-1)
     x2, y2 = obb2[..., :2].split(1, dim=-1)
@@ -539,7 +303,7 @@ class ConfusionMatrix:
         self.task = task
         self.matrix = np.zeros((nc + 1, nc + 1)) if self.task == "detect" else np.zeros((nc, nc))
         self.nc = nc  # number of classes
-        self.conf = 0.25 if conf in (None, 0.001) else conf  # apply 0.25 if default val conf is passed
+        self.conf = 0.25 if conf in {None, 0.001} else conf  # apply 0.25 if default val conf is passed
         self.iou_thres = iou_thres
 
     def process_cls_preds(self, preds, targets):
@@ -636,19 +400,19 @@ class ConfusionMatrix:
             names (tuple): Names of classes, used as labels on the plot.
             on_plot (func): An optional callback to pass plots path and data when they are rendered.
         """
-        import seaborn as sn
+        import seaborn  # scope for faster 'import ultralytics'
 
         array = self.matrix / ((self.matrix.sum(0).reshape(1, -1) + 1e-9) if normalize else 1)  # normalize columns
         array[array < 0.005] = np.nan  # don't annotate (would appear as 0.00)
 
         fig, ax = plt.subplots(1, 1, figsize=(12, 9), tight_layout=True)
         nc, nn = self.nc, len(names)  # number of classes, names
-        sn.set(font_scale=1.0 if nc < 50 else 0.8)  # for label size
+        seaborn.set_theme(font_scale=1.0 if nc < 50 else 0.8)  # for label size
         labels = (0 < nn < 99) and (nn == nc)  # apply names to ticklabels
         ticklabels = (list(names) + ["background"]) if labels else "auto"
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")  # suppress empty matrix RuntimeWarning: All-NaN slice encountered
-            sn.heatmap(
+            seaborn.heatmap(
                 array,
                 ax=ax,
                 annot=nc < 30,
@@ -685,7 +449,7 @@ def smooth(y, f=0.05):
 
 
 @plt_settings()
-def plot_pr_curve(px, py, ap, save_dir=Path("pr_curve.png"), names=(), on_plot=None):
+def plot_pr_curve(px, py, ap, save_dir=Path("pr_curve.png"), names={}, on_plot=None):
     """Plots a precision-recall curve."""
     fig, ax = plt.subplots(1, 1, figsize=(9, 6), tight_layout=True)
     py = np.stack(py, axis=1)
@@ -696,7 +460,7 @@ def plot_pr_curve(px, py, ap, save_dir=Path("pr_curve.png"), names=(), on_plot=N
     else:
         ax.plot(px, py, linewidth=1, color="grey")  # plot(recall, precision)
 
-    ax.plot(px, py.mean(1), linewidth=3, color="blue", label="all classes %.3f mAP@0.5" % ap[:, 0].mean())
+    ax.plot(px, py.mean(1), linewidth=3, color="blue", label=f"all classes {ap[:, 0].mean():.3f} mAP@0.5")
     ax.set_xlabel("Recall")
     ax.set_ylabel("Precision")
     ax.set_xlim(0, 1)
@@ -710,7 +474,7 @@ def plot_pr_curve(px, py, ap, save_dir=Path("pr_curve.png"), names=(), on_plot=N
 
 
 @plt_settings()
-def plot_mc_curve(px, py, save_dir=Path("mc_curve.png"), names=(), xlabel="Confidence", ylabel="Metric", on_plot=None):
+def plot_mc_curve(px, py, save_dir=Path("mc_curve.png"), names={}, xlabel="Confidence", ylabel="Metric", on_plot=None):
     """Plots a metric-confidence curve."""
     fig, ax = plt.subplots(1, 1, figsize=(9, 6), tight_layout=True)
 
@@ -747,7 +511,6 @@ def compute_ap(recall, precision):
         (np.ndarray): Precision envelope curve.
         (np.ndarray): Modified recall curve with sentinel values added at the beginning and end.
     """
-
     # Append sentinel values to beginning and end
     mrec = np.concatenate(([0.0], recall, [1.0]))
     mpre = np.concatenate(([1.0], precision, [0.0]))
@@ -768,7 +531,7 @@ def compute_ap(recall, precision):
 
 
 def ap_per_class(
-    tp, conf, pred_cls, target_cls, plot=False, on_plot=None, save_dir=Path(), names=(), eps=1e-16, prefix=""
+    tp, conf, pred_cls, target_cls, plot=False, on_plot=None, save_dir=Path(), names={}, eps=1e-16, prefix=""
 ):
     """
     Computes the average precision per class for object detection evaluation.
@@ -781,7 +544,7 @@ def ap_per_class(
         plot (bool, optional): Whether to plot PR curves or not. Defaults to False.
         on_plot (func, optional): A callback to pass plots path and data when they are rendered. Defaults to None.
         save_dir (Path, optional): Directory to save the PR curves. Defaults to an empty path.
-        names (tuple, optional): Tuple of class names to plot PR curves. Defaults to an empty tuple.
+        names (dict, optional): Dict of class names to plot PR curves. Defaults to an empty tuple.
         eps (float, optional): A small value to avoid division by zero. Defaults to 1e-16.
         prefix (str, optional): A prefix string for saving the plot files. Defaults to an empty string.
 
@@ -800,7 +563,6 @@ def ap_per_class(
             x (np.ndarray): X-axis values for the curves. Shape: (1000,).
             prec_values: Precision values at mAP@0.5 for each class. Shape: (nc, 1000).
     """
-
     # Sort by objectness
     i = np.argsort(-conf)
     tp, conf, pred_cls = tp[i], conf[i], pred_cls[i]
@@ -1032,20 +794,20 @@ class Metric(SimpleClass):
 
 class DetMetrics(SimpleClass):
     """
-    This class is a utility class for computing detection metrics such as precision, recall, and mean average precision
-    (mAP) of an object detection model.
+    Utility class for computing detection metrics such as precision, recall, and mean average precision (mAP) of an
+    object detection model.
 
     Args:
         save_dir (Path): A path to the directory where the output plots will be saved. Defaults to current directory.
         plot (bool): A flag that indicates whether to plot precision-recall curves for each class. Defaults to False.
         on_plot (func): An optional callback to pass plots path and data when they are rendered. Defaults to None.
-        names (tuple of str): A tuple of strings that represents the names of the classes. Defaults to an empty tuple.
+        names (dict of str): A dict of strings that represents the names of the classes. Defaults to an empty tuple.
 
     Attributes:
         save_dir (Path): A path to the directory where the output plots will be saved.
         plot (bool): A flag that indicates whether to plot the precision-recall curves for each class.
         on_plot (func): An optional callback to pass plots path and data when they are rendered.
-        names (tuple of str): A tuple of strings that represents the names of the classes.
+        names (dict of str): A dict of strings that represents the names of the classes.
         box (Metric): An instance of the Metric class for storing the results of the detection metrics.
         speed (dict): A dictionary for storing the execution time of different parts of the detection process.
 
@@ -1062,7 +824,7 @@ class DetMetrics(SimpleClass):
         curves_results: TODO
     """
 
-    def __init__(self, save_dir=Path("."), plot=False, on_plot=None, names=()) -> None:
+    def __init__(self, save_dir=Path("."), plot=False, on_plot=None, names={}) -> None:
         """Initialize a DetMetrics instance with a save directory, plot flag, callback function, and class names."""
         self.save_dir = save_dir
         self.plot = plot
@@ -1182,7 +944,6 @@ class SegmentMetrics(SimpleClass):
             pred_cls (list): List of predicted classes.
             target_cls (list): List of target classes.
         """
-
         results_mask = ap_per_class(
             tp_m,
             conf,
@@ -1324,7 +1085,6 @@ class PoseMetrics(SegmentMetrics):
             pred_cls (list): List of predicted classes.
             target_cls (list): List of target classes.
         """
-
         results_pose = ap_per_class(
             tp_p,
             conf,
@@ -1412,8 +1172,6 @@ class ClassifyMetrics(SimpleClass):
         top1 (float): The top-1 accuracy.
         top5 (float): The top-5 accuracy.
         speed (Dict[str, float]): A dictionary containing the time taken for each step in the pipeline.
-
-    Properties:
         fitness (float): The fitness of the model, which is equal to top-5 accuracy.
         results_dict (Dict[str, Union[float, str]]): A dictionary containing the classification metrics and fitness.
         keys (List[str]): A list of keys for the results_dict.
@@ -1463,7 +1221,10 @@ class ClassifyMetrics(SimpleClass):
 
 
 class OBBMetrics(SimpleClass):
+    """Metrics for evaluating oriented bounding box (OBB) detection, see https://arxiv.org/pdf/2106.06072.pdf."""
+
     def __init__(self, save_dir=Path("."), plot=False, on_plot=None, names=()) -> None:
+        """Initialize an OBBMetrics instance with directory, plotting, callback, and class names."""
         self.save_dir = save_dir
         self.plot = plot
         self.on_plot = on_plot

@@ -1,96 +1,31 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
 import contextlib
+import pickle
+import types
 from copy import deepcopy
 from pathlib import Path
 
+import timm
 import torch
 import torch.nn as nn
 
-from ultralytics.nn.modules import (
-    SimFusion4In,
-    SimFusion3In,
-    IFM,
-    InjectionMultiSumAutoPool,
-    PyramidPoolAgg,
-    AdvPoolFusion,
-    TopBasicLayer,
-    AIFI,
-    C1,
-    C2,
-    C3,
-    C3TR,
-    SPP,
-    SPPF,
-    Bottleneck,
-    BottleneckCSP,
-    C2f,
-    C2fAttn,
-    ImagePoolingAttn,
-    C3Ghost,
-    C3x,
-    Classify,
-    Concat,
-    Conv,
-    Conv2,
-    ConvTranspose,
-    Detect,
-    DWConv,
-    DWConvTranspose2d,
-    Focus,
-    GhostBottleneck,
-    GhostConv,
-    HGBlock,
-    HGStem,
-    Pose,
-    RepC3,
-    RepConv,
-    RTDETRDecoder,
-    Segment,
-    ResBlockCBAM,
-    DetectEfficient,
-    OBB,
-    ResNetLayer,
-    WorldDetect,
-    RepNCSPELAN4,
-    ADown,
-    SPPELAN,
-    CBFuse,
-    CBLinear,
-)
-from ultralytics.nn.backbone.convnextv2 import (
-    convnextv2_atto,
-    convnextv2_pico,
-    convnextv2_base,
-    convnextv2_femto,
-    convnextv2_huge,
-    convnextv2_large,
-    convnextv2_nano,
-    convnextv2_tiny,
-)
-from ultralytics.nn.extra_modules import (
-    Detect_AFPN_P345,
-    Detect_AFPN_P345_Custom,
-    Detect_AFPN_P2345,
-    Detect_AFPN_P2345_Custom,
-    C3_DCNv3,
-    C2f_DCNv3,
-    Detect_DyHeadWithDCNV3,
-    DCNV3_YOLO,
-    C2_DCNv3,
-    C2f_DCNv2_Dynamic,
-    MHSA,
-    C3_CloAtt,
-    C2f_CloAtt,
-    C2f_Faster,
-    C3_Faster,
-    CAM,
-    Fusion,
-    GhostHGBlock,
-)
+from ultralytics.nn.modules import *
+from ultralytics.nn.extra_modules import *
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
-from ultralytics.utils.loss import v8ClassificationLoss, v8DetectionLoss, v8OBBLoss, v8PoseLoss, v8SegmentationLoss
+
+from ultralytics.utils.loss import (
+    E2EDetectLoss,
+    E2EPoseLoss,
+    E2ESegmentLoss,
+    v8ClassificationLoss,
+    v8DetectionLoss,
+    v8OBBLoss,
+    v8PoseLoss,
+    v8SegmentationLoss,
+)
+from ultralytics.utils.ops import make_divisible
 from ultralytics.utils.plotting import feature_visualization
 from ultralytics.utils.torch_utils import (
     fuse_conv_and_bn,
@@ -103,6 +38,23 @@ from ultralytics.utils.torch_utils import (
     time_sync,
 )
 
+from ultralytics.nn.backbone.convnextv2 import *
+from ultralytics.nn.backbone.fasternet import *
+from ultralytics.nn.backbone.efficientViT import *
+from ultralytics.nn.backbone.EfficientFormerV2 import *
+from ultralytics.nn.backbone.VanillaNet import *
+from ultralytics.nn.backbone.revcol import *
+from ultralytics.nn.backbone.lsknet import *
+from ultralytics.nn.backbone.SwinTransformer import *
+from ultralytics.nn.backbone.repvit import *
+from ultralytics.nn.backbone.CSwomTramsformer import *
+from ultralytics.nn.backbone.UniRepLKNet import *
+from ultralytics.nn.backbone.TransNext import *
+from ultralytics.nn.backbone.rmt import *
+from ultralytics.nn.backbone.pkinet import *
+from ultralytics.nn.backbone.mobilenetv4 import *
+from ultralytics.nn.backbone.starnet import *
+
 try:
     import thop
 except ImportError:
@@ -114,13 +66,17 @@ class BaseModel(nn.Module):
 
     def forward(self, x, *args, **kwargs):
         """
-        Forward pass of the model on a single scale. Wrapper for `_forward_once` method.
+        Perform forward pass of the model for either training or inference.
+
+        If x is a dict, calculates and returns the loss for training. Otherwise, returns predictions for inference.
 
         Args:
-            x (torch.Tensor | dict): The input image tensor or a dict including image tensor and gt labels.
+            x (torch.Tensor | dict): Input tensor for inference, or dict with image tensor and labels for training.
+            *args (Any): Variable length argument list.
+            **kwargs (Any): Arbitrary keyword arguments.
 
         Returns:
-            (torch.Tensor): The output of the network.
+            (torch.Tensor): Loss if x is a dict (training), or network predictions (inference).
         """
         if isinstance(x, dict):  # for cases of training and validating while training.
             return self.loss(x, *args, **kwargs)
@@ -163,8 +119,8 @@ class BaseModel(nn.Module):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            x = m(x)  # run
-            if hasattr(m, "backbone"):
+            if hasattr(m, 'backbone'):
+                x = m(x)
                 for _ in range(5 - len(x)):
                     x.insert(0, None)
                 for i_idx, i in enumerate(x):
@@ -174,6 +130,7 @@ class BaseModel(nn.Module):
                         y.append(None)
                 x = x[-1]
             else:
+                x = m(x)  # run
                 y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
@@ -186,8 +143,8 @@ class BaseModel(nn.Module):
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference."""
         LOGGER.warning(
-            f"WARNING ⚠️ {self.__class__.__name__} does not support augmented inference yet. "
-            f"Reverting to single-scale inference instead."
+            f"WARNING ⚠️ {self.__class__.__name__} does not support 'augment=True' prediction. "
+            f"Reverting to single-scale prediction."
         )
         return self._predict_once(x)
 
@@ -205,11 +162,7 @@ class BaseModel(nn.Module):
             None
         """
         c = m == self.model[-1] and isinstance(x, list)  # is final layer list, copy input as inplace fix
-        if isinstance(x, list):
-            bs = x[0].size(0)
-        else:
-            bs = x.size(0)
-        flops = thop.profile(m, inputs=[x.copy() if c else x], verbose=False)[0] / 1e9 * 2 / bs if thop else 0  # FLOPs
+        flops = thop.profile(m, inputs=[x.copy() if c else x], verbose=False)[0] / 1e9 * 2 if thop else 0  # GFLOPs
         t = time_sync()
         for _ in range(10):
             m(x.copy() if c else x)
@@ -243,8 +196,9 @@ class BaseModel(nn.Module):
                 if isinstance(m, RepConv):
                     m.fuse_convs()
                     m.forward = m.forward_fuse  # update forward
-                if hasattr(m, "switch_to_deploy"):
-                    m.switch_to_deploy()
+                if isinstance(m, RepVGGDW):
+                    m.fuse()
+                    m.forward = m.forward_fuse
             self.info(verbose=verbose)
 
         return self
@@ -285,19 +239,9 @@ class BaseModel(nn.Module):
         """
         self = super()._apply(fn)
         m = self.model[-1]  # Detect()
-        if isinstance(
-            m,
-            (
-                Detect,
-                Segment,
-                Detect_DyHeadWithDCNV3,
-                Detect_AFPN_P2345,
-                Detect_AFPN_P2345_Custom,
-                Detect_AFPN_P345,
-                Detect_AFPN_P345_Custom,
-                DetectEfficient,
-            ),
-        ):
+        if isinstance(m,(Detect, v11Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
+                    Detect_Efficient, DetectAux, Detect_SEAM, Detect_MultiSEAM, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_DyHead_Prune,
+                    Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Detect_LADH, Segment_LADH, Detect_LSCSBD, Segment_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
             m.stride = fn(m.stride)
             m.anchors = fn(m.anchors)
             m.strides = fn(m.strides)
@@ -326,7 +270,7 @@ class BaseModel(nn.Module):
             batch (dict): Batch to compute loss on
             preds (torch.Tensor | List[torch.Tensor]): Predictions.
         """
-        if not hasattr(self, "criterion"):
+        if getattr(self, "criterion", None) is None:
             self.criterion = self.init_criterion()
 
         preds = self.forward(batch["img"]) if preds is None else preds
@@ -344,6 +288,12 @@ class DetectionModel(BaseModel):
         """Initialize the YOLOv8 detection model with the given config and parameters."""
         super().__init__()
         self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)  # cfg dict
+        if self.yaml["backbone"][0][2] == "Silence":
+            LOGGER.warning(
+                "WARNING ⚠️ YOLOv9 `Silence` module is deprecated in favor of nn.Identity. "
+                "Please delete local *.pt file and re-download the latest model checkpoint."
+            )
+            self.yaml["backbone"][0][2] = "nn.Identity"
 
         # Define model
         ch = self.yaml["ch"] = self.yaml.get("ch", ch)  # input channels
@@ -353,27 +303,25 @@ class DetectionModel(BaseModel):
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
+        self.end2end = getattr(self.model[-1], "end2end", False)
 
         # Build strides
         m = self.model[-1]  # Detect()
-        if isinstance(
-            m,
-            (
-                Detect,
-                Segment,
-                Pose,
-                Detect_DyHeadWithDCNV3,
-                Detect_AFPN_P2345,
-                Detect_AFPN_P2345_Custom,
-                Detect_AFPN_P345,
-                Detect_AFPN_P345_Custom,
-                OBB,
-            ),
-        ):
+        if isinstance(m, (Detect, v11Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
+                Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM, Detect_DyHead_Prune, 
+                Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Pose, Pose_LSCD, Pose_TADDH, OBB, OBB_LSCD, OBB_TADDH,
+                Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH, Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetec
             s = 256  # 2x min stride
             m.inplace = self.inplace
-            forward = lambda x: self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
-            m.stride = torch.tensor([s / x.shape[-2] for x in forward(torch.zeros(1, ch, s, s))])  # forward
+
+            def _forward(x):
+                """Performs a forward pass through the model, handling different Detect subclass types accordingly."""
+                if self.end2end:
+                    y =self.forward(x)["one2many"]
+                    return y[0] if isinstance(m, (v10Pose, v10Segment)) else y
+                return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
+
+            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
             m.bias_init()  # only run once
         else:
@@ -387,6 +335,9 @@ class DetectionModel(BaseModel):
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference and train outputs."""
+        if getattr(self, "end2end", False) or self.__class__.__name__ != "DetectionModel":
+            LOGGER.warning("WARNING ⚠️ Model does not support 'augment=True', reverting to single-scale prediction.")
+            return self._predict_once(x)
         img_size = x.shape[-2:]  # height, width
         s = [1, 0.83, 0.67]  # scales
         f = [None, 3, None]  # flips (2-ud, 3-lr)
@@ -423,7 +374,7 @@ class DetectionModel(BaseModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
-        return v8DetectionLoss(self)
+        return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
 
 
 class OBBModel(DetectionModel):
@@ -447,7 +398,7 @@ class SegmentationModel(DetectionModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the SegmentationModel."""
-        return v8SegmentationLoss(self)
+        return E2ESegmentLoss(self) if getattr(self, "end2end", False) else v8SegmentationLoss(self)
 
 
 class PoseModel(DetectionModel):
@@ -464,7 +415,8 @@ class PoseModel(DetectionModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the PoseModel."""
-        return v8PoseLoss(self)
+        return E2EPoseLoss(self) if getattr(self, "end2end", False) else v8PoseLoss(self)
+
 
 
 class ClassificationModel(BaseModel):
@@ -504,17 +456,17 @@ class ClassificationModel(BaseModel):
         elif isinstance(m, nn.Sequential):
             types = [type(x) for x in m]
             if nn.Linear in types:
-                i = types.index(nn.Linear)  # nn.Linear index
+                i = len(types) - 1 - types[::-1].index(nn.Linear)  # last nn.Linear index
                 if m[i].out_features != nc:
                     m[i] = nn.Linear(m[i].in_features, nc)
             elif nn.Conv2d in types:
-                i = types.index(nn.Conv2d)  # nn.Conv2d index
+                i = len(types) - 1 - types[::-1].index(nn.Conv2d)  # last nn.Conv2d index
                 if m[i].out_channels != nc:
                     m[i] = nn.Conv2d(m[i].in_channels, nc, m[i].kernel_size, m[i].stride, bias=m[i].bias is not None)
 
-    def init_criterion(self):
+    def init_criterion(self, weights=None):
         """Initialize the loss criterion for the ClassificationModel."""
-        return v8ClassificationLoss()
+        return v8ClassificationLoss(weights)
 
 
 class RTDETRDetectionModel(DetectionModel):
@@ -622,20 +574,7 @@ class RTDETRDetectionModel(DetectionModel):
             if profile:
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
-            if hasattr(m, "backbone"):
-                for _ in range(5 - len(x)):
-                    x.insert(0, None)
-                for i_idx, i in enumerate(x):
-                    if i_idx in self.save:
-                        y.append(i)
-                    else:
-                        y.append(None)
-                # for i in x:
-                #     if i is not None:
-                #         print(i.size())
-                x = x[-1]
-            else:
-                y.append(x if m.i in self.save else None)  # save output
+            y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
             if embed and m.i in embed:
@@ -652,30 +591,32 @@ class WorldModel(DetectionModel):
 
     def __init__(self, cfg="yolov8s-world.yaml", ch=3, nc=None, verbose=True):
         """Initialize YOLOv8 world model with given config and parameters."""
-        self.txt_feats = torch.randn(1, nc or 80, 512)  # placeholder
+        self.txt_feats = torch.randn(1, nc or 80, 512)  # features placeholder
+        self.clip_model = None  # CLIP model placeholder
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def set_classes(self, text):
-        """Perform a forward pass with optional profiling, visualization, and embedding extraction."""
+    def set_classes(self, text, batch=80, cache_clip_model=True):
+        """Set classes in advance so that model could do offline-inference without clip model."""
         try:
             import clip
         except ImportError:
-            check_requirements("git+https://github.com/openai/CLIP.git")
+            check_requirements("git+https://github.com/ultralytics/CLIP.git")
             import clip
 
-        model, _ = clip.load("ViT-B/32")
+        if (
+            not getattr(self, "clip_model", None) and cache_clip_model
+        ):  # for backwards compatibility of models lacking clip_model attribute
+            self.clip_model = clip.load("ViT-B/32")[0]
+        model = self.clip_model if cache_clip_model else clip.load("ViT-B/32")[0]
         device = next(model.parameters()).device
         text_token = clip.tokenize(text).to(device)
-        txt_feats = model.encode_text(text_token).to(dtype=torch.float32)
+        txt_feats = [model.encode_text(token).detach() for token in text_token.split(batch)]
+        txt_feats = txt_feats[0] if len(txt_feats) == 1 else torch.cat(txt_feats, dim=0)
         txt_feats = txt_feats / txt_feats.norm(p=2, dim=-1, keepdim=True)
-        self.txt_feats = txt_feats.reshape(-1, len(text), txt_feats.shape[-1]).detach()
+        self.txt_feats = txt_feats.reshape(-1, len(text), txt_feats.shape[-1])
         self.model[-1].nc = len(text)
 
-    def init_criterion(self):
-        """Initialize the loss criterion for the model."""
-        raise NotImplementedError
-
-    def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
+    def predict(self, x, profile=False, visualize=False, txt_feats=None, augment=False, embed=None):
         """
         Perform a forward pass through the model.
 
@@ -683,13 +624,14 @@ class WorldModel(DetectionModel):
             x (torch.Tensor): The input tensor.
             profile (bool, optional): If True, profile the computation time for each layer. Defaults to False.
             visualize (bool, optional): If True, save feature maps for visualization. Defaults to False.
+            txt_feats (torch.Tensor): The text features, use it if it's given. Defaults to None.
             augment (bool, optional): If True, perform data augmentation during inference. Defaults to False.
             embed (list, optional): A list of feature vectors/embeddings to return.
 
         Returns:
             (torch.Tensor): Model's output tensor.
         """
-        txt_feats = self.txt_feats.to(device=x.device, dtype=x.dtype)
+        txt_feats = (self.txt_feats if txt_feats is None else txt_feats).to(device=x.device, dtype=x.dtype)
         if len(txt_feats) != len(x):
             txt_feats = txt_feats.repeat(len(x), 1, 1)
         ori_txt_feats = txt_feats.clone()
@@ -717,6 +659,21 @@ class WorldModel(DetectionModel):
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
         return x
 
+    def loss(self, batch, preds=None):
+        """
+        Compute loss.
+
+        Args:
+            batch (dict): Batch to compute loss on.
+            preds (torch.Tensor | List[torch.Tensor]): Predictions.
+        """
+        if not hasattr(self, "criterion"):
+            self.criterion = self.init_criterion()
+
+        if preds is None:
+            preds = self.forward(batch["img"], txt_feats=batch["txt_feats"])
+        return self.criterion(preds, batch)
+
 
 class Ensemble(nn.ModuleList):
     """Ensemble of models."""
@@ -738,7 +695,7 @@ class Ensemble(nn.ModuleList):
 
 
 @contextlib.contextmanager
-def temporary_modules(modules=None):
+def temporary_modules(modules=None, attributes=None):
     """
     Context manager for temporarily adding or modifying modules in Python's module cache (`sys.modules`).
 
@@ -748,11 +705,13 @@ def temporary_modules(modules=None):
 
     Args:
         modules (dict, optional): A dictionary mapping old module paths to new module paths.
+        attributes (dict, optional): A dictionary mapping old module attributes to new module attributes.
 
     Example:
         ```python
-        with temporary_modules({'old.module.path': 'new.module.path'}):
-            import old.module.path  # this will now import new.module.path
+        with temporary_modules({"old.module": "new.module"}, {"old.module.attribute": "new.module.attribute"}):
+            import old.module  # this will now import new.module
+            from old.module import attribute  # this will now import new.module.attribute
         ```
 
     Note:
@@ -760,16 +719,23 @@ def temporary_modules(modules=None):
         Be aware that directly manipulating `sys.modules` can lead to unpredictable results, especially in larger
         applications or libraries. Use this function with caution.
     """
-    if not modules:
+    if modules is None:
         modules = {}
-
-    import importlib
+    if attributes is None:
+        attributes = {}
     import sys
+    from importlib import import_module
 
     try:
+        # Set attributes in sys.modules under their old name
+        for old, new in attributes.items():
+            old_module, old_attr = old.rsplit(".", 1)
+            new_module, new_attr = new.rsplit(".", 1)
+            setattr(import_module(old_module), old_attr, getattr(import_module(new_module), new_attr))
+
         # Set modules in sys.modules under their old name
         for old, new in modules.items():
-            sys.modules[old] = importlib.import_module(new)
+            sys.modules[old] = import_module(new)
 
         yield
     finally:
@@ -779,17 +745,58 @@ def temporary_modules(modules=None):
                 del sys.modules[old]
 
 
-def torch_safe_load(weight):
+class SafeClass:
+    """A placeholder class to replace unknown classes during unpickling."""
+
+    def __init__(self, *args, **kwargs):
+        """Initialize SafeClass instance, ignoring all arguments."""
+        pass
+
+    def __call__(self, *args, **kwargs):
+        """Run SafeClass instance, ignoring all arguments."""
+        pass
+
+
+class SafeUnpickler(pickle.Unpickler):
+    """Custom Unpickler that replaces unknown classes with SafeClass."""
+
+    def find_class(self, module, name):
+        """Attempt to find a class, returning SafeClass if not among safe modules."""
+        safe_modules = (
+            "torch",
+            "collections",
+            "collections.abc",
+            "builtins",
+            "math",
+            "numpy",
+            # Add other modules considered safe
+        )
+        if module in safe_modules:
+            return super().find_class(module, name)
+        else:
+            return SafeClass
+
+
+def torch_safe_load(weight, safe_only=False):
     """
-    This function attempts to load a PyTorch model with the torch.load() function. If a ModuleNotFoundError is raised,
-    it catches the error, logs a warning message, and attempts to install the missing module via the
-    check_requirements() function. After installation, the function again attempts to load the model using torch.load().
+    Attempts to load a PyTorch model with the torch.load() function. If a ModuleNotFoundError is raised, it catches the
+    error, logs a warning message, and attempts to install the missing module via the check_requirements() function.
+    After installation, the function again attempts to load the model using torch.load().
 
     Args:
         weight (str): The file path of the PyTorch model.
+        safe_only (bool): If True, replace unknown classes with SafeClass during loading.
+
+    Example:
+    ```python
+    from ultralytics.nn.tasks import torch_safe_load
+
+    ckpt, file = torch_safe_load("path/to/best.pt", safe_only=True)
+    ```
 
     Returns:
-        (dict): The loaded PyTorch model.
+        ckpt (dict): The loaded model checkpoint.
+        file (str): The loaded filename
     """
     from ultralytics.utils.downloads import attempt_download_asset
 
@@ -797,13 +804,26 @@ def torch_safe_load(weight):
     file = attempt_download_asset(weight)  # search online if missing locally
     try:
         with temporary_modules(
-            {
+            modules={
                 "ultralytics.yolo.utils": "ultralytics.utils",
                 "ultralytics.yolo.v8": "ultralytics.models.yolo",
                 "ultralytics.yolo.data": "ultralytics.data",
-            }
-        ):  # for legacy 8.0 Classify and Pose models
-            ckpt = torch.load(file, map_location="cpu")
+            },
+            attributes={
+                "ultralytics.nn.modules.block.Silence": "torch.nn.Identity",  # YOLOv9e
+                "ultralytics.nn.tasks.YOLOv10DetectionModel": "ultralytics.nn.tasks.DetectionModel",  # YOLOv10
+                "ultralytics.utils.loss.v10DetectLoss": "ultralytics.utils.loss.E2EDetectLoss",  # YOLOv10
+            },
+        ):
+            if safe_only:
+                # Load via custom pickle module
+                safe_pickle = types.ModuleType("safe_pickle")
+                safe_pickle.Unpickler = SafeUnpickler
+                safe_pickle.load = lambda file_obj: SafeUnpickler(file_obj).load()
+                with open(file, "rb") as f:
+                    ckpt = torch.load(f, pickle_module=safe_pickle)
+            else:
+                ckpt = torch.load(file, map_location="cpu")
 
     except ModuleNotFoundError as e:  # e.name is missing module name
         if e.name == "models":
@@ -813,14 +833,14 @@ def torch_safe_load(weight):
                     f"with https://github.com/ultralytics/yolov5.\nThis model is NOT forwards compatible with "
                     f"YOLOv8 at https://github.com/ultralytics/ultralytics."
                     f"\nRecommend fixes are to train a new model using the latest 'ultralytics' package or to "
-                    f"run a command with an official YOLOv8 model, i.e. 'yolo predict model=yolov8n.pt'"
+                    f"run a command with an official Ultralytics model, i.e. 'yolo predict model=yolov8n.pt'"
                 )
             ) from e
         LOGGER.warning(
-            f"WARNING ⚠️ {weight} appears to require '{e.name}', which is not in ultralytics requirements."
+            f"WARNING ⚠️ {weight} appears to require '{e.name}', which is not in Ultralytics requirements."
             f"\nAutoInstall will run now for '{e.name}' but this feature will be removed in the future."
             f"\nRecommend fixes are to train a new model using the latest 'ultralytics' package or to "
-            f"run a command with an official YOLOv8 model, i.e. 'yolo predict model=yolov8n.pt'"
+            f"run a command with an official Ultralytics model, i.e. 'yolo predict model=yolov8n.pt'"
         )
         check_requirements(e.name)  # install missing module
         ckpt = torch.load(file, map_location="cpu")
@@ -833,12 +853,11 @@ def torch_safe_load(weight):
         )
         ckpt = {"model": ckpt.model}
 
-    return ckpt, file  # load
+    return ckpt, file
 
 
 def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     """Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a."""
-
     ensemble = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
         ckpt, w = torch_safe_load(w)  # load ckpt
@@ -857,25 +876,8 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
 
     # Module updates
     for m in ensemble.modules():
-        t = type(m)
-        if t in (
-            nn.Hardswish,
-            nn.LeakyReLU,
-            nn.ReLU,
-            nn.ReLU6,
-            nn.SiLU,
-            Detect,
-            Pose,
-            Segment,
-            Detect_DyHeadWithDCNV3,
-            Detect_AFPN_P2345,
-            Detect_AFPN_P2345_Custom,
-            Detect_AFPN_P345,
-            Detect_AFPN_P345_Custom,
-            DetectEfficient,
-            OBB,
-        ):
-            m.inplace = inplace  # torch 1.7.0 compatibility
+        if hasattr(m, "inplace"):
+            m.inplace = inplace
         elif isinstance(m, nn.Upsample) and not hasattr(m, "recompute_scale_factor"):
             m.recompute_scale_factor = None  # torch 1.11.0 compatibility
 
@@ -909,8 +911,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
 
     # Module updates
     for m in model.modules():
-        t = type(m)
-        if t in (nn.Hardswish, nn.LeakyReLU, nn.ReLU, nn.ReLU6, nn.SiLU, Detect, Segment, DetectEfficient, Pose, OBB):
+        if hasattr(m, "inplace"):
             m.inplace = inplace
         elif isinstance(m, nn.Upsample) and not hasattr(m, "recompute_scale_factor"):
             m.recompute_scale_factor = None  # torch 1.11.0 compatibility
@@ -919,7 +920,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     return model, ckpt
 
 
-def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, input_channels(3)
+def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     """Parse a YOLO model.yaml dictionary into a PyTorch model."""
     import ast
 
@@ -942,8 +943,8 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
     ch = [ch]
-    layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     is_backbone = False
+    layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
         try:
             if m == "node_mode":
@@ -965,182 +966,239 @@ def parse_model(d, ch, verbose=True, warehouse_manager=None):  # model_dict, inp
                         args[j] = a
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
-        if m in (
-            Classify,
-            ResBlockCBAM,
-            Conv,
-            ConvTranspose,
-            GhostConv,
-            Bottleneck,
-            GhostBottleneck,
-            SPP,
-            SPPF,
-            DWConv,
-            Focus,
-            C2_DCNv3,
-            BottleneckCSP,
-            C1,
-            C2,
-            C2f,
-            RepNCSPELAN4,
-            ADown,
-            SPPELAN,
-            C2fAttn,
-            C3,
-            C3TR,
-            C3Ghost,
-            nn.ConvTranspose2d,
-            DWConvTranspose2d,
-            C3x,
-            RepC3,
-            DCNV3_YOLO,
-            C3_DCNv3,
-            C2f_DCNv3,
-            C2f_DCNv2_Dynamic,
-            C2f_CloAtt,
-            C3_CloAtt,
-            C2f_Faster,
-            C3_Faster,
-        ):
-            if args[0] == "head_channel":
+        if m in (Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, C2PSA, C2fPSA, C3k2, DWConv, DSConv, Focus,
+            BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, nn.Conv2d, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3, C2f_Faster, C2f_ODConv,
+            C2f_Faster_EMA, C2f_DBB, GSConv, GSConvns, VoVGSCSP, VoVGSCSPns, VoVGSCSPC, C2f_CloAtt, C3_CloAtt, SCConv, C2f_SCConv, C3_SCConv, C2f_ScConv, C3_ScConv,
+            C3_EMSC, C3_EMSCP, C2f_EMSC, C2f_EMSCP, RCSOSA, KWConv, C2f_KW, C3_KW, DySnakeConv, C2f_DySnakeConv, C3_DySnakeConv,
+            DCNv2, C3_DCNv2, C2f_DCNv2, DCNV3_YOLO, C3_DCNv3, C2f_DCNv3, C3_Faster, C3_Faster_EMA, C3_ODConv,
+            OREPA, OREPA_LargeConv, RepVGGBlock_OREPA, C3_OREPA, C2f_OREPA, C3_DBB, C3_REPVGGOREPA, C2f_REPVGGOREPA,
+            C3_DCNv2_Dynamic, C2f_DCNv2_Dynamic, C3_ContextGuided, C2f_ContextGuided, C3_MSBlock, C2f_MSBlock,
+            C3_DLKA, C2f_DLKA, CSPStage, SPDConv, RepBlock, C3_EMBC, C2f_EMBC, SPPF_LSKA, C3_DAttention, C2f_DAttention,
+            C3_Parc, C2f_Parc, C3_DWR, C2f_DWR, RFAConv, RFCAConv, RFCBAMConv, C3_RFAConv, C2f_RFAConv,
+            C3_RFCBAMConv, C2f_RFCBAMConv, C3_RFCAConv, C2f_RFCAConv, C3_FocusedLinearAttention, C2f_FocusedLinearAttention,
+            C3_AKConv, C2f_AKConv, AKConv, C3_MLCA, C2f_MLCA, C3k2,
+            C3_UniRepLKNetBlock, C2f_UniRepLKNetBlock, C3_DRB, C2f_DRB, C3_DWR_DRB, C2f_DWR_DRB, CSP_EDLAN,
+            C3_AggregatedAtt, C2f_AggregatedAtt, DCNV4_YOLO, C3_DCNv4, C2f_DCNv4, HWD, SEAM,
+            C3_SWC, C2f_SWC, C3_iRMB, C2f_iRMB, C3_iRMB_Cascaded, C2f_iRMB_Cascaded, C3_iRMB_DRB, C2f_iRMB_DRB, C3_iRMB_SWC, C2f_iRMB_SWC,
+            C3_VSS, C2f_VSS, C3_LVMB, C2f_LVMB, RepNCSPELAN4, DBBNCSPELAN4, OREPANCSPELAN4, DRBNCSPELAN4, ADown, AConv, V7DownSampling,
+            C3_DynamicConv, C2f_DynamicConv, C3_GhostDynamicConv, C2f_GhostDynamicConv, C3_RVB, C2f_RVB, C3_RVB_SE, C2f_RVB_SE, C3_RVB_EMA, C2f_RVB_EMA, DGCST,
+            C3_RetBlock, C2f_RetBlock, C3_PKIModule, C2f_PKIModule, RepNCSPELAN4_CAA, C3_FADC, C2f_FADC, C3_PPA, C2f_PPA, SRFD, DRFD, RGCSPELAN,
+            C3_Faster_CGLU, C2f_Faster_CGLU, C3_Star, C2f_Star, C3_Star_CAA, C2f_Star_CAA, ELAN1,  SPPELAN,C2fAttn, RepC3,  PSA, SCDown, C2fCIB):
+            if args[0] == 'head_channel':
                 args[0] = d[args[0]]
+            
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
-            args = [c1, c2, *args[1:]]
-            if m in (
-                BottleneckCSP,
-                C1,
-                C2,
-                C2f,
-                C3,
-                C3TR,
-                C3Ghost,
-                C3x,
-                RepC3,
-                C3_DCNv3,
-                C2f_DCNv3,
-                C2_DCNv3,
-                C2f_DCNv2_Dynamic,
-                C3_CloAtt,
-                C2f_CloAtt,
-                C2f_Faster,
-                C3_Faster,
-                C2fAttn,
-            ):
+            if m is C2fAttn:
                 args[1] = make_divisible(min(args[1], max_channels // 2) * width, 8)  # embed channels
                 args[2] = int(
                     max(round(min(args[2], max_channels // 2 // 32)) * width, 1) if args[2] > 1 else args[2]
                 )  # num heads
 
             args = [c1, c2, *args[1:]]
-            if m in (BottleneckCSP, C1, C2, C2f, C2fAttn, C3, C3TR, C3Ghost, C3x, RepC3):
+            if m in (KWConv, C2f_KW, C3_KW):
+                args.insert(2, f'layer{i}')
+                args.insert(2, warehouse_manager)
+            if m in (DySnakeConv,):
+                c2 = c2 * 3
+            if m in (RepNCSPELAN4, DBBNCSPELAN4, OREPANCSPELAN4, DRBNCSPELAN4, RepNCSPELAN4_CAA):
+                args[2] = make_divisible(min(args[2], max_channels) * width, 8)
+                args[3] = make_divisible(min(args[3], max_channels) * width, 8)
+            
+            if m in (BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost,C2fAttn, C3x, RepC3, C2f_Faster, C2f_ODConv, C2f_Faster_EMA, C2f_DBB,
+                     VoVGSCSP, VoVGSCSPns, VoVGSCSPC, C2f_CloAtt, C3_CloAtt, C2f_SCConv, C3_SCConv, C2f_ScConv, C3_ScConv,
+                     C3_EMSC, C3_EMSCP, C2f_EMSC, C2f_EMSCP, RCSOSA, C2f_KW, C3_KW, C2f_DySnakeConv, C3_DySnakeConv,
+                     C3_DCNv2, C2f_DCNv2, C3_DCNv3, C2f_DCNv3, C3_Faster, C3_Faster_EMA, C3_ODConv, C3_OREPA, C2f_OREPA, C3_DBB,
+                     C3_REPVGGOREPA, C2f_REPVGGOREPA, C3_DCNv2_Dynamic, C2f_DCNv2_Dynamic, C3_ContextGuided, C2f_ContextGuided, 
+                     C3_MSBlock, C2f_MSBlock, C3_DLKA, C2f_DLKA, CSPStage, RepBlock, C3_EMBC, C2f_EMBC, C3_DAttention, C2f_DAttention,
+                     C3_Parc, C2f_Parc, C3_DWR, C2f_DWR, C3_RFAConv, C2f_RFAConv, C3_RFCBAMConv, C2f_RFCBAMConv, C3_RFCAConv, C2f_RFCAConv,
+                     C3_FocusedLinearAttention, C2f_FocusedLinearAttention, C3_AKConv, C2f_AKConv, C3_MLCA, C2f_MLCA,
+                     C3_UniRepLKNetBlock, C2f_UniRepLKNetBlock, C3_DRB, C2f_DRB, C3_DWR_DRB, C2f_DWR_DRB, CSP_EDLAN,
+                     C3_AggregatedAtt, C2f_AggregatedAtt, C3_DCNv4, C2f_DCNv4, C3_SWC, C2f_SWC,
+                     C3_iRMB, C2f_iRMB, C3_iRMB_Cascaded, C2f_iRMB_Cascaded, C3_iRMB_DRB, C2f_iRMB_DRB, C3_iRMB_SWC, C2f_iRMB_SWC,
+                     C3_VSS, C2f_VSS, C3_LVMB, C2f_LVMB, C3_DynamicConv, C2f_DynamicConv, C3_GhostDynamicConv, C2f_GhostDynamicConv,
+                     C3_RVB, C2f_RVB, C3_RVB_SE, C2f_RVB_SE, C3_RVB_EMA, C2f_RVB_EMA, C3_RetBlock, C2f_RetBlock, C3_PKIModule, C2f_PKIModule,
+                     C3_FADC, C2f_FADC, C3_PPA, C2f_PPA, RGCSPELAN, C3_Faster_CGLU, C2f_Faster_CGLU, C3_Star, C2f_Star, C3_Star_CAA, C2f_Star_CAA, 
+                     C2fPSA, C2PSA, C3k2, C2fCIB):
                 args.insert(2, n)  # number of repeats
                 n = 1
+            if m is C3k2:  # for M/L/X sizes
+                legacy = False
+                if scale in "mlx":
+                    args[3] = True
         elif m is AIFI:
             args = [ch[f], *args]
-        elif m in (HGStem, HGBlock, GhostHGBlock):
+        elif m in {HGStem, HGBlock, Ghost_HGBlock, Rep_HGBlock, Dynamic_HGBlock}:
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]
-            if m in (HGBlock, GhostHGBlock):
+            if m is (HGBlock, Ghost_HGBlock, Rep_HGBlock, Dynamic_HGBlock):
                 args.insert(4, n)  # number of repeats
                 n = 1
-        elif m in (
-            convnextv2_tiny,
-            convnextv2_pico,
-            convnextv2_atto,
-            convnextv2_femto,
-            convnextv2_huge,
-            convnextv2_large,
-            convnextv2_base,
-            convnextv2_nano,
-        ):
-            m = m(*args)
-            c2 = m.channel
-        elif m is SimFusion4In:
-            c2 = sum(ch[x] for x in f)
-        elif m is SimFusion3In:
-            c2 = args[0]
-            if c2 != nc:  # if not output
-                c2 = make_divisible(c2 * width, 8)
-            args = [[ch[f_] for f_ in f], c2]
-        elif m is IFM:
-            c1 = ch[f]
-            c2 = sum(args[0])
-            args = [c1, *args]
-        elif m is InjectionMultiSumAutoPool:
-            c1 = ch[f[0]]
-            c2 = args[0]
-            args = [c1, *args]
-        elif m is PyramidPoolAgg:
-            c2 = args[0]
-            args = [sum([ch[f_] for f_ in f]), *args]
-        elif m is AdvPoolFusion:
-            c2 = sum(ch[x] for x in f)
-        elif m is TopBasicLayer:
-            c2 = sum(args[1])
         elif m is ResNetLayer:
             c2 = args[1] if args[3] else args[1] * 4
         elif m is nn.BatchNorm2d:
             args = [ch[f]]
-        elif m is MHSA:
-            args = [ch[f], *args]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m is CAM:
-            c1, c2 = ch[f], (ch[f] * 3 if args[0] == "concat" else ch[f])
-            args = [c1, args[0]]
-        elif m in (
-            Detect,
-            WorldDetect,
-            Segment,
-            Pose,
-            Detect_DyHeadWithDCNV3,
-            Detect_AFPN_P2345,
-            Detect_AFPN_P2345_Custom,
-            Detect_AFPN_P345,
-            Detect_AFPN_P345_Custom,
-            DetectEfficient,
-            OBB,
-            ImagePoolingAttn,
-        ):
+        elif m in (Detect, v11Detect, WorldDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
+                   Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM, 
+                   Detect_DyHead_Prune, Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, 
+                   Pose, Pose_LSCD, Pose_TADDH, OBB, OBB_LSCD, OBB_TADDH, Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH,
+                   Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect,v10Pose, v10Segment):
             args.append([ch[x] for x in f])
-            if m is Segment:
+            if m is(Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Segment_LADH, Segment_LSCSBD):
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-        elif m is Fusion:
-            args[0] = d[args[0]]
-            c1, c2 = [ch[x] for x in f], (sum([ch[x] for x in f]) if args[0] == "concat" else ch[f[0]])
-            args = [c1, args[0]]
+                if m in (Segment_LSCD, Segment_TADDH, Segment_LSCSBD):
+                    args[3] = make_divisible(min(args[3], max_channels) * width, 8)
+            if m in (Detect_LSCD, Detect_TADDH, Detect_LSCSBD):
+                args[1] = make_divisible(min(args[1], max_channels) * width, 8)
+            if m in (Pose_LSCD, Pose_TADDH, Pose_LSCSBD, OBB_LSCD, OBB_TADDH, OBB_LSCSBD):
+                args[2] = make_divisible(min(args[2], max_channels) * width, 8)
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
+            
+        elif m is Fusion:
+            args[0] = d[args[0]]
+            c1, c2 = [ch[x] for x in f], (sum([ch[x] for x in f]) if args[0] == 'concat' else ch[f[0]])
+            args = [c1, args[0]]
         elif m is CBLinear:
             c2 = args[0]
             c1 = ch[f]
             args = [c1, c2, *args[1:]]
         elif m is CBFuse:
             c2 = ch[f[-1]]
+        elif m in {convnextv2_atto, convnextv2_femto, convnextv2_pico, convnextv2_nano, convnextv2_tiny, convnextv2_base, convnextv2_large, convnextv2_huge,
+                   fasternet_t0, fasternet_t1, fasternet_t2, fasternet_s, fasternet_m, fasternet_l,
+                   EfficientViT_M0, EfficientViT_M1, EfficientViT_M2, EfficientViT_M3, EfficientViT_M4, EfficientViT_M5,
+                   efficientformerv2_s0, efficientformerv2_s1, efficientformerv2_s2, efficientformerv2_l,
+                   vanillanet_5, vanillanet_6, vanillanet_7, vanillanet_8, vanillanet_9, vanillanet_10, vanillanet_11, vanillanet_12, vanillanet_13, vanillanet_13_x1_5, vanillanet_13_x1_5_ada_pool,
+                   RevCol,
+                   lsknet_t, lsknet_s,
+                   SwinTransformer_Tiny,
+                   repvit_m0_9, repvit_m1_0, repvit_m1_1, repvit_m1_5, repvit_m2_3,
+                   CSWin_tiny, CSWin_small, CSWin_base, CSWin_large,
+                   unireplknet_a, unireplknet_f, unireplknet_p, unireplknet_n, unireplknet_t, unireplknet_s, unireplknet_b, unireplknet_l, unireplknet_xl,
+                   transnext_micro, transnext_tiny, transnext_small, transnext_base,
+                   RMT_T, RMT_S, RMT_B, RMT_L,
+                   PKINET_T, PKINET_S, PKINET_B,
+                   MobileNetV4ConvSmall, MobileNetV4ConvMedium, MobileNetV4ConvLarge, MobileNetV4HybridMedium, MobileNetV4HybridLarge,
+                   starnet_s050, starnet_s100, starnet_s150, starnet_s1, starnet_s2, starnet_s3, starnet_s4
+                   }:
+            if m is RevCol:
+                args[1] = [make_divisible(min(k, max_channels) * width, 8) for k in args[1]]
+                args[2] = [max(round(k * depth), 1) for k in args[2]]
+            m = m(*args)
+            c2 = m.channel
+        elif m in {EMA, SpatialAttention, BiLevelRoutingAttention, BiLevelRoutingAttention_nchw,
+                   TripletAttention, CoordAtt, CBAM, BAMBlock, LSKBlock, ScConv, LAWDS, EMSConv, EMSConvP,
+                   SEAttention, CPCA, Partial_conv3, FocalModulation, EfficientAttention, MPCA, deformable_LKA,
+                   EffectiveSEModule, LSKA, SegNext_Attention, DAttention, MLCA, TransNeXt_AggregatedAttention,
+                   FocusedLinearAttention, LocalWindowAttention, ChannelAttention_HSFPN, ELA_HSFPN, CA_HSFPN, CAA_HSFPN, 
+                   DySample, CARAFE, CAA, ELA, CAFM}:
+            c2 = ch[f]
+            args = [c2, *args]
+            # print(args)
+        elif m in {SimAM, SpatialGroupEnhance}:
+            c2 = ch[f]
+        elif m is ContextGuidedBlock_Down:
+            c2 = ch[f] * 2
+            args = [ch[f], c2, *args]
+        elif m is BiFusion:
+            c1 = [ch[x] for x in f]
+            c2 = make_divisible(min(args[0], max_channels) * width, 8)
+            args = [c1, c2]
+        # --------------GOLD-YOLO--------------
+        elif m in {SimFusion_4in, AdvPoolFusion}:
+            c2 = sum(ch[x] for x in f)
+        elif m is SimFusion_3in:
+            c2 = args[0]
+            if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            args = [[ch[f_] for f_ in f], c2]
+        elif m is IFM:
+            c1 = ch[f]
+            c2 = sum(args[0])
+            args = [c1, *args]
+        elif m is InjectionMultiSum_Auto_pool:
+            c1 = ch[f[0]]
+            c2 = args[0]
+            args = [c1, *args]
+        elif m is PyramidPoolAgg:
+            c2 = args[0]
+            args = [sum([ch[f_] for f_ in f]), *args]
+        elif m is TopBasicLayer:
+            c2 = sum(args[1])
+        # --------------GOLD-YOLO--------------
+        # --------------ASF--------------
+        elif m is Zoom_cat:
+            c2 = sum(ch[x] for x in f)
+        elif m is Add:
+            c2 = ch[f[-1]]
+        elif m in {ScalSeq, DynamicScalSeq}:
+            c1 = [ch[x] for x in f]
+            c2 = make_divisible(args[0] * width, 8)
+            args = [c1, c2]
+        elif m is asf_attention_model:
+            args = [ch[f[-1]]]
+        # --------------ASF--------------
+        elif m is SDI:
+            args = [[ch[x] for x in f]]
+        elif m is Multiply:
+            c2 = ch[f[0]]
+        elif m is FocusFeature:
+            c1 = [ch[x] for x in f]
+            c2 = int(c1[1] * 0.5 * 3)
+            args = [c1, *args]
+        elif m is DASI:
+            c1 = [ch[x] for x in f]
+            args = [c1, c2]
+        elif m is CSMHSA:
+            c1 = [ch[x] for x in f]
+            c2 = ch[f[-1]]
+            args = [c1, c2]
+        elif m is CFC_CRB:
+            c1 = ch[f]
+            c2 = c1 // 2
+            args = [c1, *args]
+        elif m is SFC_G2:
+            c1 = [ch[x] for x in f]
+            c2 = c1[0]
+            args = [c1]
+        elif m in {CGAFusion, CAFMFusion, SDFM, PSFM}:
+            c2 = ch[f[1]]
+            args = [c2, *args]
+        elif m in {CrossLayerChannelAttention, CrossLayerSpatialAttention}:
+            c2 = [ch[x] for x in f]
+            args = [c2[0], *args]
+        elif m in {GetIndexOutput}:
+            c2 = ch[f][args[0]]
+        elif isinstance(m, str):
+            t = m
+            if len(args) == 2:        
+                m = timm.create_model(m, pretrained=args[0], pretrained_cfg_overlay={'file': args[1]}, features_only=True)
+            elif len(args) == 1:
+                m = timm.create_model(m, pretrained=args[0], features_only=True)
+            c2 = m.feature_info.channels()
         else:
             c2 = ch[f]
 
-        if isinstance(c2, list):
+        if isinstance(c2, list) and m not in {ChannelTransformer, CrossLayerChannelAttention, CrossLayerSpatialAttention}:
             is_backbone = True
             m_ = m
             m_.backbone = True
         else:
             m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
             t = str(m)[8:-2].replace("__main__.", "")  # module type
-
-        m.np = sum(x.numel() for x in m_.parameters())  # number params
-        m_.i, m_.f, m_.type = i + 4 if is_backbone else i, f, t  # attach index, 'from' index, type
+        np = sum(x.numel() for x in m_.parameters())  # number params
+        m_.i, m_.f, m_.type, m_.np = i + 4 if is_backbone else i, f, t, np  # attach index, 'from' index, type, number params
         if verbose:
-            LOGGER.info(f"{i:>3}{str(f):>20}{n_:>3}{m.np:10.0f}  {t:<60}{str(args):<30}")  # print
-        save.extend(
-            x % (i + 4 if is_backbone else i) for x in ([f] if isinstance(f, int) else f) if x != -1
-        )  # append to savelist
+            LOGGER.info(f"{i:>3}{str(f):>20}{n_:>3}{np:10.0f}  {t:<45}{str(args):<30}")  # print
+        save.extend(x % (i + 4 if is_backbone else i) for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
         layers.append(m_)
         if i == 0:
             ch = []
-        if isinstance(c2, list):
+        if isinstance(c2, list) and m not in {ChannelTransformer, CrossLayerChannelAttention, CrossLayerSpatialAttention}:
             ch.extend(c2)
             for _ in range(5 - len(ch)):
                 ch.insert(0, 0)
@@ -1182,7 +1240,7 @@ def guess_model_scale(model_path):
     with contextlib.suppress(AttributeError):
         import re
 
-        return re.search(r"yolov\d+([nslmx])", Path(model_path).stem).group(1)  # n, s, m, l, or x
+        return re.search(r"yolo[v]?\d+([nslmx])", Path(model_path).stem).group(1)  # n, s, m, l, or x
     return ""
 
 
@@ -1203,9 +1261,9 @@ def guess_model_task(model):
     def cfg2task(cfg):
         """Guess from YAML dictionary."""
         m = cfg["head"][-1][-2].lower()  # output module name
-        if m in ("classify", "classifier", "cls", "fc"):
+        if m in {"classify", "classifier", "cls", "fc"}:
             return "classify"
-        if m == "detect":
+        if "detect" in m:
             return "detect"
         if m == "segment":
             return "segment"
@@ -1229,28 +1287,15 @@ def guess_model_task(model):
                 return cfg2task(eval(x))
 
         for m in model.modules():
-            if isinstance(
-                m,
-                (
-                    Detect,
-                    Detect_AFPN_P2345,
-                    Detect_AFPN_P2345_Custom,
-                    DetectEfficient,
-                    Detect_AFPN_P345,
-                    Detect_AFPN_P345_Custom,
-                    Detect_DyHeadWithDCNV3,
-                ),
-            ):
-                return "detect"
-            elif isinstance(m, Segment):
+            if isinstance(m, (Segment, v10Segment)):
                 return "segment"
             elif isinstance(m, Classify):
                 return "classify"
-            elif isinstance(m, Pose):
+            elif isinstance(m, (Pose, v10Pose)):
                 return "pose"
             elif isinstance(m, OBB):
                 return "obb"
-            elif isinstance(m, (Detect, WorldDetect)):
+            elif isinstance(m, (Detect, WorldDetect, v10Detect, v11Detect)):
                 return "detect"
 
     # Guess from model filename
@@ -1269,7 +1314,7 @@ def guess_model_task(model):
 
     # Unable to determine task from model
     LOGGER.warning(
-        "WARNING ⚠️ Unable to automatically guess model task, assuming 'task=detect'. "
+        "WARNING ⚠️ Unable t automatically guess model task, assuming 'task=detect'. "
         "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify','pose' or 'obb'."
     )
     return "detect"  # assume detect
