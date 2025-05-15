@@ -1,9 +1,5 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
-from typing import Union
-
-from typing import Union
-
 import glob
 import math
 import os
@@ -12,8 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Thread
 from urllib.parse import urlparse
-from collections import deque
-from collections import deque
 
 import cv2
 import numpy as np
@@ -21,8 +15,8 @@ import requests
 import torch
 from PIL import Image
 
-from ultralytics.data.utils import IMG_FORMATS, VID_FORMATS
-from ultralytics.utils import LOGGER, is_colab, is_kaggle, ops
+from ultralytics.data.utils import FORMATS_HELP_MSG, IMG_FORMATS, VID_FORMATS
+from ultralytics.utils import IS_COLAB, IS_KAGGLE, LOGGER, ops
 from ultralytics.utils.checks import check_requirements
 
 
@@ -43,6 +37,7 @@ class LoadStreams:
     Attributes:
         sources (str): The source input paths or URLs for the video streams.
         vid_stride (int): Video frame-rate stride, defaults to 1.
+        buffer (bool): Whether to buffer input streams, defaults to False.
         running (bool): Flag to indicate if the streaming thread is running.
         mode (str): Set to 'stream' indicating real-time capture.
         imgs (list): List of image frames for each stream.
@@ -67,62 +62,32 @@ class LoadStreams:
          ```
     """
 
-    def __init__(
-        self,
-        sources: str = "file.streams",
-        imgsz: int = 640,
-        buffer_length: Union[str, int] = "auto",
-        vid_fps: Union[str, int] = "auto",
-    ) -> "LoadStreams":
-        """Initialize instance variables and check for consistent input stream shapes.
-        Args:
-            sources: File with streams.
-            buffer_length: Length of buffer. If -1 - auto mode.
-            vid_fps: New FPS for all videos. if 'auto', all videos will be aligned by min fps in streams.
-                     If `isinstance(vid_fps, int)` - all videos will be set to this value.
-                     If vid_fps == -1, fps alignment will not be applied.
-        """
-
-    def __init__(
-        self,
-        sources: str = "file.streams",
-        imgsz: int = 640,
-        buffer_length: Union[str, int] = "auto",
-        vid_fps: Union[str, int] = "auto",
-    ) -> "LoadStreams":
-        """Initialize instance variables and check for consistent input stream shapes.
-        Args:
-            sources: File with streams.
-            buffer_length: Length of buffer. If -1 - auto mode.
-            vid_fps: New FPS for all videos. if 'auto', all videos will be aligned by min fps in streams.
-                     If `isinstance(vid_fps, int)` - all videos will be set to this value.
-                     If vid_fps == -1, fps alignment will not be applied.
-        """
+    def __init__(self, sources="file.streams", vid_stride=1, buffer=False):
+        """Initialize instance variables and check for consistent input stream shapes."""
         torch.backends.cudnn.benchmark = True  # faster for fixed-size inference
-        self.buffer_length = buffer_length  # max buffer length
+        self.buffer = buffer  # buffer input streams
         self.running = True  # running flag for Thread
         self.mode = "stream"
-        self.imgsz = imgsz
+        self.vid_stride = vid_stride  # video frame-rate stride
 
         sources = Path(sources).read_text().rsplit() if os.path.isfile(sources) else [sources]
         n = len(sources)
         self.bs = n
-        self.fps = [0] * n  # fps of each stream
-        self.frames = [0] * n  # number of frames in each stream
-        self.threads = [None] * n  # buffer stored streams
+        self.fps = [0] * n  # frames per second
+        self.frames = [0] * n
+        self.threads = [None] * n
         self.caps = [None] * n  # video capture objects
-        self.imgs = [[] for _ in range(n)]  # buffer with images
+        self.imgs = [[] for _ in range(n)]  # images
         self.shape = [[] for _ in range(n)]  # image shapes
         self.sources = [ops.clean_str(x) for x in sources]  # clean source names for later
-        self.buffer_lengths = [0] * n  # keep buffer lengths
         for i, s in enumerate(sources):  # index, source
             # Start thread to read frames from video stream
             st = f"{i + 1}/{n}: {s}... "
-            if urlparse(s).hostname in ("www.youtube.com", "youtube.com", "youtu.be"):  # if source is YouTube video
-                # YouTube format i.e. 'https://www.youtube.com/watch?v=Zgi9g1ksQHc' or 'https://youtu.be/LNwODJXcvt4'
-                raise NotImplementedError(f"Kaggle, YouTube are not supported now.")
+            if urlparse(s).hostname in {"www.youtube.com", "youtube.com", "youtu.be"}:  # if source is YouTube video
+                # YouTube format i.e. 'https://www.youtube.com/watch?v=Jsn8D3aC840' or 'https://youtu.be/Jsn8D3aC840'
+                s = get_best_youtube_url(s)
             s = eval(s) if s.isnumeric() else s  # i.e. s = '0' local webcam
-            if s == 0 and (is_colab() or is_kaggle()):
+            if s == 0 and (IS_COLAB or IS_KAGGLE):
                 raise NotImplementedError(
                     "'source=0' webcam not supported in Colab and Kaggle notebooks. "
                     "Try running 'source=0' in a local environment."
@@ -132,58 +97,41 @@ class LoadStreams:
                 raise ConnectionError(f"{st}Failed to open {s}")
             w = int(self.caps[i].get(cv2.CAP_PROP_FRAME_WIDTH))
             h = int(self.caps[i].get(cv2.CAP_PROP_FRAME_HEIGHT))
-            fps = self.caps[i].get(cv2.CAP_PROP_FPS)
-            # warning: may return 0 or nan
-            if not math.isfinite(fps) or fps == 0:
-                LOGGER.warning(f"{st}Warning ⚠️ Stream returned {fps} FPS, set default 30 FPS.")
+            fps = self.caps[i].get(cv2.CAP_PROP_FPS)  # warning: may return 0 or nan
             self.frames[i] = max(int(self.caps[i].get(cv2.CAP_PROP_FRAME_COUNT)), 0) or float(
                 "inf"
             )  # infinite stream fallback
             self.fps[i] = max((fps if math.isfinite(fps) else 0) % 100, 0) or 30  # 30 FPS fallback
+
             success, im = self.caps[i].read()  # guarantee first frame
             if not success or im is None:
                 raise ConnectionError(f"{st}Failed to read images from {s}")
-            stream_buffer_length = (
-                math.ceil(self.fps[i])
-                if (isinstance(buffer_length, str) and buffer_length == "auto") or buffer_length == -1
-                else buffer_length
-            )
-            self.buffer_lengths[i] = stream_buffer_length
-            buf = deque(maxlen=stream_buffer_length)
-            buf.append(im)
-            self.imgs.append(buf)
+            self.imgs[i].append(im)
             self.shape[i] = im.shape
             self.threads[i] = Thread(target=self.update, args=([i, self.caps[i], s]), daemon=True)
             LOGGER.info(f"{st}Success ✅ ({self.frames[i]} frames of shape {w}x{h} at {self.fps[i]:.2f} FPS)")
-
-        self.new_fps = min(self.fps) if isinstance(vid_fps, str) and vid_fps == "auto" else vid_fps  # fps alignment
-        LOGGER.info("")  # newline
-
-        # run all threads
-        for i in range(n):
             self.threads[i].start()
-
-        # Check for common shapes
-        self.bs = self.__len__()
+        LOGGER.info("")  # newline
 
     def update(self, i, cap, stream):
         """Read stream `i` frames in daemon thread."""
         n, f = 0, self.frames[i]  # frame number, frame array
         while self.running and cap.isOpened() and n < (f - 1):
-            success = cap.grab()  # .read() = .grab() followed by .retrieve()
-            if not success:
-                im = None
-                LOGGER.warning(f"WARNING ⚠️ Video stream {i} unresponsive, please check your IP camera connection.")
-                cap.open(stream)  # re-open stream if signal was lost
+            if len(self.imgs[i]) < 30:  # keep a <=30-image buffer
+                n += 1
+                cap.grab()  # .read() = .grab() followed by .retrieve()
+                if n % self.vid_stride == 0:
+                    success, im = cap.retrieve()
+                    if not success:
+                        im = np.zeros(self.shape[i], dtype=np.uint8)
+                        LOGGER.warning("WARNING ⚠️ Video stream unresponsive, please check your IP camera connection.")
+                        cap.open(stream)  # re-open stream if signal was lost
+                    if self.buffer:
+                        self.imgs[i].append(im)
+                    else:
+                        self.imgs[i] = [im]
             else:
-                success, im = cap.retrieve()
-                if not success:
-                    im = None
-                    LOGGER.warning(f"WARNING ⚠️ Cannot decode image from video stream {i}. Unknown error.")
-            self.imgs[i].append(im)
-            n += 1
-        else:
-            LOGGER.info(f"End of stream {i}.")
+                time.sleep(0.01)  # wait until the buffer is empty
 
     def close(self):
         """Close stream loader and release resources."""
@@ -199,32 +147,34 @@ class LoadStreams:
         cv2.destroyAllWindows()
 
     def __iter__(self):
-        """Iterates through image feed and re-opens unresponsive streams."""
+        """Iterates through YOLO image feed and re-opens unresponsive streams."""
         self.count = -1
         return self
 
     def __next__(self):
         """Returns source paths, transformed and original images for processing."""
         self.count += 1
+
         images = []
-
-        # sleep to align fps
-        time.sleep(1 / self.new_fps)
-
         for i, x in enumerate(self.imgs):
-            # If image is not available
-            if not x:
+            # Wait until a frame is available in each buffer
+            while not x:
                 if not self.threads[i].is_alive() or cv2.waitKey(1) == ord("q"):  # q to quit
                     self.close()
                     raise StopIteration
-                LOGGER.warning(f"WARNING ⚠️ Waiting for stream {i}")
-                im = None
-            # Get the last element from buffer
-            else:
-                # Main process just read from buffer, not delete
-                im = x[-1]
+                time.sleep(1 / min(self.fps))
+                x = self.imgs[i]
+                if not x:
+                    LOGGER.warning(f"WARNING ⚠️ Waiting for stream {i}")
 
-            images.append(im)
+            # Get and remove the first frame from imgs buffer
+            if self.buffer:
+                images.append(x.pop(0))
+
+            # Get the last frame, and clear the rest from the imgs buffer
+            else:
+                images.append(x.pop(-1) if x else np.zeros(self.shape[i], dtype=np.uint8))
+                x.clear()
 
         return self.sources, images, [""] * self.bs
 
@@ -290,7 +240,7 @@ class LoadScreenshots:
         return self
 
     def __next__(self):
-        """mss screen capture: get raw pixels from the screen as np array."""
+        """Screen capture with 'mss' to get raw pixels from the screen as np array."""
         im0 = np.asarray(self.sct.grab(self.monitor))[:, :, :3]  # BGRA to BGR
         s = f"screen {self.screen} (LTWH): {self.left},{self.top},{self.width},{self.height}: "
 
@@ -341,8 +291,14 @@ class LoadImagesAndVideos:
             else:
                 raise FileNotFoundError(f"{p} does not exist")
 
-        images = [x for x in files if x.split(".")[-1].lower() in IMG_FORMATS]
-        videos = [x for x in files if x.split(".")[-1].lower() in VID_FORMATS]
+        # Define files as images or videos
+        images, videos = [], []
+        for f in files:
+            suffix = f.split(".")[-1].lower()  # Get file extension without the dot and lowercase
+            if suffix in IMG_FORMATS:
+                images.append(f)
+            elif suffix in VID_FORMATS:
+                videos.append(f)
         ni, nv = len(images), len(videos)
 
         self.files = images + videos
@@ -357,10 +313,7 @@ class LoadImagesAndVideos:
         else:
             self.cap = None
         if self.nf == 0:
-            raise FileNotFoundError(
-                f"No images or videos found in {p}. "
-                f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
-            )
+            raise FileNotFoundError(f"No images or videos found in {p}. {FORMATS_HELP_MSG}")
 
     def __iter__(self):
         """Returns an iterator object for VideoStream or ImageFolder."""
@@ -372,7 +325,7 @@ class LoadImagesAndVideos:
         paths, imgs, info = [], [], []
         while len(imgs) < self.bs:
             if self.count >= self.nf:  # end of file list
-                if len(imgs) > 0:
+                if imgs:
                     return paths, imgs, info  # return last partial batch
                 else:
                     raise StopIteration
@@ -409,10 +362,11 @@ class LoadImagesAndVideos:
                 self.mode = "image"
                 im0 = cv2.imread(path)  # BGR
                 if im0 is None:
-                    raise FileNotFoundError(f"Image Not Found {path}")
-                paths.append(path)
-                imgs.append(im0)
-                info.append(f"image {self.count + 1}/{self.nf} {path}: ")
+                    LOGGER.warning(f"WARNING ⚠️ Image Read Error {path}")
+                else:
+                    paths.append(path)
+                    imgs.append(im0)
+                    info.append(f"image {self.count + 1}/{self.nf} {path}: ")
                 self.count += 1  # move to the next file
                 if self.count >= self.ni:  # end of image list
                     break
@@ -569,26 +523,44 @@ def autocast_list(source):
     return files
 
 
-def get_best_youtube_url(url, use_pafy=True):
+def get_best_youtube_url(url, method="pytube"):
     """
     Retrieves the URL of the best quality MP4 video stream from a given YouTube video.
 
-    This function uses the pafy or yt_dlp library to extract the video info from YouTube. It then finds the highest
-    quality MP4 format that has video codec but no audio codec, and returns the URL of this video stream.
+    This function uses the specified method to extract the video info from YouTube. It supports the following methods:
+    - "pytube": Uses the pytube library to fetch the video streams.
+    - "pafy": Uses the pafy library to fetch the video streams.
+    - "yt-dlp": Uses the yt-dlp library to fetch the video streams.
+
+    The function then finds the highest quality MP4 format that has a video codec but no audio codec, and returns the
+    URL of this video stream.
 
     Args:
         url (str): The URL of the YouTube video.
-        use_pafy (bool): Use the pafy package, default=True, otherwise use yt_dlp package.
+        method (str): The method to use for extracting video info. Default is "pytube". Other options are "pafy" and
+            "yt-dlp".
 
     Returns:
         (str): The URL of the best quality MP4 video stream, or None if no suitable stream is found.
     """
-    if use_pafy:
+    if method == "pytube":
+        # Switched from pytube to pytubefix to resolve https://github.com/pytube/pytube/issues/1954
+        check_requirements("pytubefix>=6.5.2")
+        from pytubefix import YouTube
+
+        streams = YouTube(url).streams.filter(file_extension="mp4", only_video=True)
+        streams = sorted(streams, key=lambda s: s.resolution, reverse=True)  # sort streams by resolution
+        for stream in streams:
+            if stream.resolution and int(stream.resolution[:-1]) >= 1080:  # check if resolution is at least 1080p
+                return stream.url
+
+    elif method == "pafy":
         check_requirements(("pafy", "youtube_dl==2020.12.2"))
         import pafy  # noqa
 
         return pafy.new(url).getbestvideo(preftype="mp4").url
-    else:
+
+    elif method == "yt-dlp":
         check_requirements("yt-dlp")
         import yt_dlp
 

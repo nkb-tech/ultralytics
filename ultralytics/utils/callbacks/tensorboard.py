@@ -1,4 +1,5 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
+
 import contextlib
 
 from ultralytics.utils import LOGGER, SETTINGS, TESTS_RUNNING, colorstr
@@ -15,6 +16,7 @@ try:
     # Imports below only required if TensorBoard enabled
     import warnings
     from copy import deepcopy
+
     from ultralytics.utils.torch_utils import de_parallel, torch
 
 except (ImportError, AssertionError, TypeError, AttributeError):
@@ -32,7 +34,6 @@ def _log_scalars(scalars, step=0):
 
 def _log_tensorboard_graph(trainer):
     """Log model graph to TensorBoard."""
-
     # Input image
     imgsz = trainer.args.imgsz
     imgsz = (imgsz, imgsz) if isinstance(imgsz, int) else imgsz

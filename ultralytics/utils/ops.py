@@ -1,20 +1,19 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
-from typing import List
 
 import contextlib
 import math
 import re
 import time
+from typing import List
 
 import cv2
 import numpy as np
 import torch
 from torch import Tensor
 import torch.nn.functional as F
-import torchvision
 
 from ultralytics.utils import LOGGER
-from ultralytics.utils.metrics import batch_probiou, bbox_iou
+from ultralytics.utils.metrics import batch_probiou
 
 
 class Profile(contextlib.ContextDecorator):
@@ -142,48 +141,17 @@ def make_divisible(x, divisor):
     return math.ceil(x / divisor) * divisor
 
 
-def soft_nms(bboxes, scores, iou_thresh=0.5, sigma=0.5, score_threshold=0.25):
-    order = torch.arange(0, scores.size(0), device=bboxes.device)
-    keep = []
-
-    while order.numel() > 1:
-        if order.numel() == 1:
-            keep.append(order[0])
-            break
-        else:
-            i = order[0]
-            keep.append(i)
-
-        iou = bbox_iou(bboxes[i], bboxes[order[1:]], xywh=False, EIoU=True).squeeze()
-
-        idx = (iou > iou_thresh).nonzero().squeeze()
-        if idx.numel() > 0:
-            iou = iou[idx]
-            newScores = torch.exp(-torch.pow(iou, 2) / sigma)
-            scores[order[idx + 1]] *= newScores
-
-        newOrder = (scores[order[1:]] > score_threshold).nonzero().squeeze()
-        if newOrder.numel() == 0:
-            break
-        else:
-            maxScoreIndex = torch.argmax(scores[order[newOrder + 1]])
-            if maxScoreIndex != 0:
-                newOrder[[0, maxScoreIndex],] = newOrder[[maxScoreIndex, 0],]
-            order = order[newOrder + 1]
-
-    return torch.tensor(keep, dtype=torch.long, device=bboxes.device)
-
-
 def nms_rotated(boxes, scores, threshold=0.45):
     """
-    NMS for obbs, powered by probiou and fast-nms.
+    NMS for oriented bounding boxes using probiou and fast-nms.
 
     Args:
-        boxes (torch.Tensor): (N, 5), xywhr.
-        scores (torch.Tensor): (N, ).
-        threshold (float): IoU threshold.
+        boxes (torch.Tensor): Rotated bounding boxes, shape (N, 5), format xywhr.
+        scores (torch.Tensor): Confidence scores, shape (N,).
+        threshold (float, optional): IoU threshold. Defaults to 0.45.
 
     Returns:
+        (torch.Tensor): Indices of boxes to keep after NMS.
     """
     if len(boxes) == 0:
         return np.empty((0,), dtype=np.int8)
@@ -207,7 +175,6 @@ def non_max_suppression(
     max_time_img=0.05,
     max_nms=30000,
     max_wh=7680,
-    nms_type="nms",
     in_place=True,
     rotated=False,
 ):
@@ -235,27 +202,40 @@ def non_max_suppression(
         max_nms (int): The maximum number of boxes into torchvision.ops.nms().
         max_wh (int): The maximum box width and height in pixels.
         in_place (bool): If True, the input prediction tensor will be modified in place.
+        rotated (bool): If Oriented Bounding Boxes (OBB) are being passed for NMS.
 
     Returns:
         (List[torch.Tensor]): A list of length batch_size, where each element is a tensor of
             shape (num_boxes, 6 + num_masks) containing the kept boxes, with columns
             (x1, y1, x2, y2, confidence, class, mask1, mask2, ...).
     """
+    import torchvision  # scope for faster 'import ultralytics'
 
     # Checks
-    assert nms_type in ("nms", "soft-nms"), f'Invalid NMS Type {nms_type}, valid values are ("nms", "soft-nms")'
     assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
     assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
     if isinstance(prediction, (list, tuple)):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
         prediction = prediction[0]  # select only inference output
+    if classes is not None:
+        classes = torch.tensor(classes, device=prediction.device)
 
-    bs = prediction.shape[0]  # batch size
+
+    if prediction.shape[-1] == 6 or prediction.shape[-2] == max_det:  # end-to-end model (BNC, i.e. 1,300,6)
+        output = [pred[pred[:, 4] > conf_thres] for pred in prediction]
+        if classes is not None:
+            output = [pred[(pred[:, 5:6] == classes).any(1)] for pred in output]
+        # nms for yolov10
+        # output = [
+        #     pred[torchvision.ops.nms(pred[:, :4], pred[:, 4], iou_thres)]
+        #     for pred in output
+        # ]
+        return output
+
+    bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
     nc = nc or (prediction.shape[1] - 4)  # number of classes
-    nm = prediction.shape[1] - nc - 4
+    nm = prediction.shape[1] - nc - 4  # number of masks
     mi = 4 + nc  # mask start index
     xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
-
-    nms_func = torchvision.ops.nms if nms_type == "nms" else soft_nms
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
@@ -270,7 +250,7 @@ def non_max_suppression(
             prediction = torch.cat((xywh2xyxy(prediction[..., :4]), prediction[..., 4:]), dim=-1)  # xywh to xyxy
 
     t = time.time()
-    output = [torch.zeros((0, 6 + nm), device=prediction.device) for _ in range(bs)]
+    output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[:, 2:4] < min_wh) | (x[:, 2:4] > max_wh)).any(1), 4] = 0  # width-height
@@ -300,7 +280,7 @@ def non_max_suppression(
 
         # Filter by class
         if classes is not None:
-            x = x[(x[:, 5:6] == torch.tensor(classes, device=x.device)).any(1)]
+            x = x[(x[:, 5:6] == classes).any(1)]
 
         # Check shape
         n = x.shape[0]  # number of boxes
@@ -312,16 +292,13 @@ def non_max_suppression(
         # Batched NMS
         c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
         scores = x[:, 4]  # scores
-
         if rotated:
             boxes = torch.cat((x[:, :2] + c, x[:, 2:4], x[:, -1:]), dim=-1)  # xywhr
             i = nms_rotated(boxes, scores, iou_thres)
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
-            i = nms_func(boxes, scores, iou_thres)  # NMS
-
-        if i.shape[0] > max_det:
-            i = i[:max_det]  # limit detections
+            i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+        i = i[:max_det]  # limit detections
 
         # # Experimental
         # merge = False  # use merge-NMS
@@ -395,7 +372,7 @@ def scale_image(masks, im0_shape, ratio_pad=None):
         ratio_pad (tuple): the ratio of the padding to the original image.
 
     Returns:
-        masks (torch.Tensor): The masks that are being returned.
+        masks (np.ndarray): The masks that are being returned with shape [h, w, num].
     """
     # Rescale coordinates (xyxy) from im1_shape to im0_shape
     im1_shape = masks.shape
@@ -443,7 +420,7 @@ def xyxy2xywh(x):
 def xywh2xyxy(x):
     """
     Convert bounding box coordinates from (x, y, width, height) format to (x1, y1, x2, y2) format where (x1, y1) is the
-    top-left corner and (x2, y2) is the bottom-right corner.
+    top-left corner and (x2, y2) is the bottom-right corner. Note: ops per 2 channels faster than per channel.
 
     Args:
         x (np.ndarray | torch.Tensor): The input bounding box coordinates in (x, y, width, height) format.
@@ -453,12 +430,10 @@ def xywh2xyxy(x):
     """
     assert x.shape[-1] == 4, f"input shape last dimension expected 4 but input shape is {x.shape}"
     y = torch.empty_like(x) if isinstance(x, torch.Tensor) else np.empty_like(x)  # faster than clone/copy
-    dw = x[..., 2] / 2  # half-width
-    dh = x[..., 3] / 2  # half-height
-    y[..., 0] = x[..., 0] - dw  # top left x
-    y[..., 1] = x[..., 1] - dh  # top left y
-    y[..., 2] = x[..., 0] + dw  # bottom right x
-    y[..., 3] = x[..., 1] + dh  # bottom right y
+    xy = x[..., :2]  # centers
+    wh = x[..., 2:] / 2  # half width-height
+    y[..., :2] = xy - wh  # top left xy
+    y[..., 2:] = xy + wh  # bottom right xy
     return y
 
 
@@ -559,59 +534,58 @@ def ltwh2xywh(x):
     return y
 
 
-def xyxyxyxy2xywhr(corners):
+def xyxyxyxy2xywhr(x):
     """
     Convert batched Oriented Bounding Boxes (OBB) from [xy1, xy2, xy3, xy4] to [xywh, rotation]. Rotation values are
-    expected in degrees from 0 to 90.
+    returned in radians from 0 to pi/2.
 
     Args:
-        corners (numpy.ndarray | torch.Tensor): Input corners of shape (n, 8).
+        x (numpy.ndarray | torch.Tensor): Input box corners [xy1, xy2, xy3, xy4] of shape (n, 8).
 
     Returns:
         (numpy.ndarray | torch.Tensor): Converted data in [cx, cy, w, h, rotation] format of shape (n, 5).
     """
-    is_torch = isinstance(corners, torch.Tensor)
-    points = corners.cpu().numpy() if is_torch else corners
-    points = points.reshape(len(corners), -1, 2)
+    is_torch = isinstance(x, torch.Tensor)
+    points = x.cpu().numpy() if is_torch else x
+    points = points.reshape(len(x), -1, 2)
     rboxes = []
     for pts in points:
         # NOTE: Use cv2.minAreaRect to get accurate xywhr,
         # especially some objects are cut off by augmentations in dataloader.
-        (x, y), (w, h), angle = cv2.minAreaRect(pts)
-        rboxes.append([x, y, w, h, angle / 180 * np.pi])
-    return (
-        torch.tensor(rboxes, device=corners.device, dtype=corners.dtype)
-        if is_torch
-        else np.asarray(rboxes, dtype=points.dtype)
-    )  # rboxes
+        (cx, cy), (w, h), angle = cv2.minAreaRect(pts)
+        rboxes.append([cx, cy, w, h, angle / 180 * np.pi])
+    return torch.tensor(rboxes, device=x.device, dtype=x.dtype) if is_torch else np.asarray(rboxes)
 
 
-def xywhr2xyxyxyxy(rboxes):
+def xywhr2xyxyxyxy(x):
     """
     Convert batched Oriented Bounding Boxes (OBB) from [xywh, rotation] to [xy1, xy2, xy3, xy4]. Rotation values should
-    be in degrees from 0 to 90.
+    be in radians from 0 to pi/2.
 
     Args:
-        rboxes (numpy.ndarray | torch.Tensor): Boxes in [cx, cy, w, h, rotation] format of shape (n, 5) or (b, n, 5).
+        x (numpy.ndarray | torch.Tensor): Boxes in [cx, cy, w, h, rotation] format of shape (n, 5) or (b, n, 5).
 
     Returns:
         (numpy.ndarray | torch.Tensor): Converted corner points of shape (n, 4, 2) or (b, n, 4, 2).
     """
-    is_numpy = isinstance(rboxes, np.ndarray)
-    cos, sin = (np.cos, np.sin) if is_numpy else (torch.cos, torch.sin)
+    cos, sin, cat, stack = (
+        (torch.cos, torch.sin, torch.cat, torch.stack)
+        if isinstance(x, torch.Tensor)
+        else (np.cos, np.sin, np.concatenate, np.stack)
+    )
 
-    ctr = rboxes[..., :2]
-    w, h, angle = (rboxes[..., i : i + 1] for i in range(2, 5))
+    ctr = x[..., :2]
+    w, h, angle = (x[..., i : i + 1] for i in range(2, 5))
     cos_value, sin_value = cos(angle), sin(angle)
     vec1 = [w / 2 * cos_value, w / 2 * sin_value]
     vec2 = [-h / 2 * sin_value, h / 2 * cos_value]
-    vec1 = np.concatenate(vec1, axis=-1) if is_numpy else torch.cat(vec1, dim=-1)
-    vec2 = np.concatenate(vec2, axis=-1) if is_numpy else torch.cat(vec2, dim=-1)
+    vec1 = cat(vec1, -1)
+    vec2 = cat(vec2, -1)
     pt1 = ctr + vec1 + vec2
     pt2 = ctr + vec1 - vec2
     pt3 = ctr - vec1 - vec2
     pt4 = ctr - vec1 + vec2
-    return np.stack([pt1, pt2, pt3, pt4], axis=-2) if is_numpy else torch.stack([pt1, pt2, pt3, pt4], dim=-2)
+    return stack([pt1, pt2, pt3, pt4], -2)
 
 
 def ltwh2xyxy(x):
@@ -632,7 +606,7 @@ def ltwh2xyxy(x):
 
 def segments2boxes(segments):
     """
-    It converts segment labels to box labels, i.e. (cls, xy1, xy2, ...) to (cls, xywh)
+    It converts segment labels to box labels, i.e. (cls, xy1, xy2, ...) to (cls, xywh).
 
     Args:
         segments (list): list of segments, each segment is a list of points, each point is a list of x, y coordinates
@@ -687,27 +661,6 @@ def crop_mask(masks, boxes):
     return masks * ((r >= x1) * (r < x2) * (c >= y1) * (c < y2))
 
 
-def process_mask_upsample(protos, masks_in, bboxes, shape):
-    """
-    Takes the output of the mask head, and applies the mask to the bounding boxes. This produces masks of higher quality
-    but is slower.
-
-    Args:
-        protos (torch.Tensor): [mask_dim, mask_h, mask_w]
-        masks_in (torch.Tensor): [n, mask_dim], n is number of masks after nms
-        bboxes (torch.Tensor): [n, 4], n is number of masks after nms
-        shape (tuple): the size of the input image (h,w)
-
-    Returns:
-        (torch.Tensor): The upsampled masks.
-    """
-    c, mh, mw = protos.shape  # CHW
-    masks = (masks_in @ protos.float().view(c, -1)).sigmoid().view(-1, mh, mw)
-    masks = F.interpolate(masks[None], shape, mode="bilinear", align_corners=False)[0]  # CHW
-    masks = crop_mask(masks, bboxes)  # CHW
-    return masks.gt_(0.5)
-
-
 def process_mask(protos, masks_in, bboxes, shape, upsample=False):
     """
     Apply masks to bounding boxes using the output of the mask head.
@@ -723,10 +676,9 @@ def process_mask(protos, masks_in, bboxes, shape, upsample=False):
         (torch.Tensor): A binary mask tensor of shape [n, h, w], where n is the number of masks after NMS, and h and w
             are the height and width of the input image. The mask is applied to the bounding boxes.
     """
-
     c, mh, mw = protos.shape  # CHW
     ih, iw = shape
-    masks = (masks_in @ protos.float().view(c, -1)).sigmoid().view(-1, mh, mw)  # CHW
+    masks = (masks_in @ protos.float().view(c, -1)).view(-1, mh, mw)  # CHW
     width_ratio = mw / iw
     height_ratio = mh / ih
 
@@ -739,7 +691,7 @@ def process_mask(protos, masks_in, bboxes, shape, upsample=False):
     masks = crop_mask(masks, downsampled_bboxes)  # CHW
     if upsample:
         masks = F.interpolate(masks[None], shape, mode="bilinear", align_corners=False)[0]  # CHW
-    return masks.gt_(0.5)
+    return masks.gt_(0.0)
 
 
 def process_mask_native(protos, masks_in, bboxes, shape):
@@ -756,10 +708,10 @@ def process_mask_native(protos, masks_in, bboxes, shape):
         masks (torch.Tensor): The returned masks with dimensions [h, w, n]
     """
     c, mh, mw = protos.shape  # CHW
-    masks = (masks_in @ protos.float().view(c, -1)).sigmoid().view(-1, mh, mw)
+    masks = (masks_in @ protos.float().view(c, -1)).view(-1, mh, mw)
     masks = scale_masks(masks[None], shape)[0]  # CHW
     masks = crop_mask(masks, bboxes)  # CHW
-    return masks.gt_(0.5)
+    return masks.gt_(0.0)
 
 
 def scale_masks(masks, shape, padding=True):
@@ -826,7 +778,7 @@ def regularize_rboxes(rboxes):
     Regularize rotated boxes in range [0, pi/2].
 
     Args:
-        rboxes (torch.Tensor): (N, 5), xywhr.
+        rboxes (torch.Tensor): Input boxes of shape(N, 5) in xywhr format.
 
     Returns:
         (torch.Tensor): The regularized boxes.
@@ -841,7 +793,7 @@ def regularize_rboxes(rboxes):
 
 def masks2segments(masks, strategy="largest"):
     """
-    It takes a list of masks(n,h,w) and returns a list of segments(n,xy)
+    It takes a list of masks(n,h,w) and returns a list of segments(n,xy).
 
     Args:
         masks (torch.Tensor): the output of the model, which is a tensor of shape (batch_size, 160, 160)
@@ -851,7 +803,7 @@ def masks2segments(masks, strategy="largest"):
         segments (List): list of segment masks
     """
     segments = []
-    for x in masks.int().cpu().numpy().astype("uint8"):
+    for x in (masks.int().cpu().numpy() if isinstance(masks, torch.Tensor) else masks).astype('uint8'):
         c = cv2.findContours(x, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
         if c:
             if strategy == "concat":  # concatenate all segments
@@ -879,7 +831,7 @@ def convert_torch2numpy_batch(batch: torch.Tensor) -> np.ndarray:
 
 def clean_str(s):
     """
-    Cleans a string by replacing special characters with underscore _
+    Cleans a string by replacing special characters with '_' character.
 
     Args:
         s (str): a string needing special characters replaced

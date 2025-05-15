@@ -1,3 +1,0 @@
-```bash
-sh make.sh
-```

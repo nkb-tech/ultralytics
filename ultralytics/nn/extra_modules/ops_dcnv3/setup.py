@@ -9,7 +9,9 @@ import glob
 
 import torch
 
-from torch.utils.cpp_extension import CUDA_HOME, CppExtension, CUDAExtension
+from torch.utils.cpp_extension import CUDA_HOME
+from torch.utils.cpp_extension import CppExtension
+from torch.utils.cpp_extension import CUDAExtension
 
 from setuptools import find_packages
 from setuptools import setup
@@ -35,13 +37,13 @@ def get_extensions():
         sources += source_cuda
         define_macros += [("WITH_CUDA", None)]
         extra_compile_args["nvcc"] = [
-            "-DCUDA_HAS_FP16=1",
-            "-D__CUDA_NO_HALF_OPERATORS__",
-            "-D__CUDA_NO_HALF_CONVERSIONS__",
-            "-D__CUDA_NO_HALF2_OPERATORS__",
+            # "-DCUDA_HAS_FP16=1",
+            # "-D__CUDA_NO_HALF_OPERATORS__",
+            # "-D__CUDA_NO_HALF_CONVERSIONS__",
+            # "-D__CUDA_NO_HALF2_OPERATORS__",
         ]
     else:
-        raise NotImplementedError("Cuda is not available")
+        raise NotImplementedError('Cuda is not availabel')
 
     sources = [os.path.join(extensions_dir, s) for s in sources]
     include_dirs = [extensions_dir]
@@ -62,13 +64,12 @@ setup(
     version="1.1",
     author="InternImage",
     url="https://github.com/OpenGVLab/InternImage",
-    description="PyTorch Wrapper for CUDA Functions of DCNv3",
-    packages=find_packages(
-        exclude=(
-            "configs",
-            "tests",
-        )
-    ),
+    description=
+    "PyTorch Wrapper for CUDA Functions of DCNv3",
+    packages=find_packages(exclude=(
+        "configs",
+        "tests",
+    )),
     ext_modules=get_extensions(),
     cmdclass={"build_ext": torch.utils.cpp_extension.BuildExtension},
 )

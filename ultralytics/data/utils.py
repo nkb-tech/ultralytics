@@ -22,11 +22,12 @@ from ultralytics.utils import (
     LOGGER,
     NUM_THREADS,
     ROOT,
-    SETTINGS_YAML,
+    SETTINGS_FILE,
     TQDM,
     clean_url,
     colorstr,
     emojis,
+    is_dir_writeable,
     yaml_load,
     yaml_save,
 )
@@ -34,10 +35,11 @@ from ultralytics.utils.checks import check_file, check_font, is_ascii
 from ultralytics.utils.downloads import download, safe_download, unzip_file
 from ultralytics.utils.ops import segments2boxes
 
-HELP_URL = "See https://docs.ultralytics.com/datasets/detect for dataset formatting guidance."
-IMG_FORMATS = "bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp", "pfm"  # image suffixes
-VID_FORMATS = "asf", "avi", "gif", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "wmv", "webm"  # video suffixes
+HELP_URL = "See https://docs.ultralytics.com/datasets for dataset formatting guidance."
+IMG_FORMATS = {"bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp", "pfm"}  # image suffixes
+VID_FORMATS = {"asf", "avi", "gif", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "wmv", "webm"}  # video suffixes
 PIN_MEMORY = str(os.getenv("PIN_MEMORY", True)).lower() == "true"  # global pin_memory for dataloaders
+FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
 
 
 def img2label_paths(img_paths):
@@ -62,12 +64,12 @@ def exif_size(img: Image.Image):
             exif = img.getexif()
             if exif:
                 rotation = exif.get(274, None)  # the EXIF key for the orientation tag is 274
-                if rotation in [6, 8]:  # rotation 270 or 90
+                if rotation in {6, 8}:  # rotation 270 or 90
                     s = s[1], s[0]
     return s
 
 
-def verify_image(args):
+def verify_image(args, min_size=25):
     """Verify one image."""
     (im_file, cls), prefix = args
     # Number (found, corrupt), message
@@ -77,9 +79,9 @@ def verify_image(args):
         im.verify()  # PIL verify
         shape = exif_size(im)  # image size
         shape = (shape[1], shape[0])  # hw
-        assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
-        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}"
-        if im.format.lower() in ("jpg", "jpeg"):
+        assert (shape[0] >= min_size) & (shape[1] >= min_size), f"image size {shape} <{min_size} pixels"
+        assert im.format.lower() in IMG_FORMATS, f"Invalid image format {im.format}. {FORMATS_HELP_MSG}"
+        if im.format.lower() in {"jpg", "jpeg"}:
             with open(im_file, "rb") as f:
                 f.seek(-2, 2)
                 if f.read() != b"\xff\xd9":  # corrupt JPEG
@@ -92,7 +94,7 @@ def verify_image(args):
     return (im_file, cls), nf, nc, msg
 
 
-def verify_image_label(args):
+def verify_image_label(args, min_size=25):
     """Verify one image-label pair."""
     im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim = args
     # Number (missing, found, empty, corrupt), message, segments, keypoints
@@ -103,9 +105,9 @@ def verify_image_label(args):
         im.verify()  # PIL verify
         shape = exif_size(im)  # image size
         shape = (shape[1], shape[0])  # hw
-        assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
-        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}"
-        if im.format.lower() in ("jpg", "jpeg"):
+        assert (shape[0] >= min_size) & (shape[1] >= min_size), f"image size {shape} <{min_size} pixels"
+        assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}. {FORMATS_HELP_MSG}"
+        if im.format.lower() in {"jpg", "jpeg"}:
             with open(im_file, "rb") as f:
                 f.seek(-2, 2)
                 if f.read() != b"\xff\xd9":  # corrupt JPEG
@@ -214,7 +216,7 @@ def polygons2masks_overlap(imgsz, segments, downsample_ratio=1):
     ms = []
     for si in range(len(segments)):
         mask = polygon2mask(imgsz, [segments[si].reshape(-1)], downsample_ratio=downsample_ratio, color=1)
-        ms.append(mask)
+        ms.append(mask.astype(masks.dtype))
         areas.append(mask.sum())
     areas = np.asarray(areas)
     index = np.argsort(-areas)
@@ -263,7 +265,6 @@ def check_det_dataset(dataset, autodownload=True):
     Returns:
         (dict): Parsed dataset information and paths.
     """
-
     file = check_file(dataset)
 
     # Download (optional)
@@ -303,7 +304,7 @@ def check_det_dataset(dataset, autodownload=True):
 
     # Set paths
     data["path"] = path  # download scripts
-    for k in "train", "val", "test":
+    for k in "train", "val", "test", "minival":
         if data.get(k):  # prepend path
             if isinstance(data[k], str):
                 x = (path / data[k]).resolve()
@@ -323,7 +324,7 @@ def check_det_dataset(dataset, autodownload=True):
             if s and autodownload:
                 LOGGER.warning(m)
             else:
-                m += f"\nNote dataset download directory is '{DATASETS_DIR}'. You can update this in '{SETTINGS_YAML}'"
+                m += f"\nNote dataset download directory is '{DATASETS_DIR}'. You can update this in '{SETTINGS_FILE}'"
                 raise FileNotFoundError(m)
             t = time.time()
             r = None  # success
@@ -335,7 +336,7 @@ def check_det_dataset(dataset, autodownload=True):
             else:  # python script
                 exec(s, {"yaml": data})
             dt = f"({round(time.time() - t, 1)}s)"
-            s = f"success ✅ {dt}, saved to {colorstr('bold', DATASETS_DIR)}" if r in (0, None) else f"failure {dt} ❌"
+            s = f"success ✅ {dt}, saved to {colorstr('bold', DATASETS_DIR)}" if r in {0, None} else f"failure {dt} ❌"
             LOGGER.info(f"Dataset download {s}\n")
     check_font("Arial.ttf" if is_ascii(data["names"]) else "Arial.Unicode.ttf")  # download fonts
 
@@ -344,81 +345,169 @@ def check_det_dataset(dataset, autodownload=True):
 
 def check_cls_dataset(dataset, split=""):
     """
-    Checks a classification dataset such as Imagenet.
-
-    This function accepts a `dataset` name and attempts to retrieve the corresponding dataset information.
-    If the dataset is not found locally, it attempts to download the dataset from the internet and save it locally.
-
+    Checks a classification dataset such as Imagenet, now with .yaml support.
+    
+    This function first checks if `dataset` is a YAML file. If so, it parses the YAML similar to `check_det_dataset`.
+    Otherwise, it treats `dataset` as a directory (or attempts download if it's a known dataset name or URL).
+    
     Args:
-        dataset (str | Path): The name of the dataset.
+        dataset (str | Path): The name or path of the dataset or a YAML file describing it.
         split (str, optional): The split of the dataset. Either 'val', 'test', or ''. Defaults to ''.
 
     Returns:
-        (dict): A dictionary containing the following keys:
-            - 'train' (Path): The directory path containing the training set of the dataset.
-            - 'val' (Path): The directory path containing the validation set of the dataset.
-            - 'test' (Path): The directory path containing the test set of the dataset.
+        (dict): A dictionary containing:
+            - 'train' (list[Path]): List of directories/paths containing the training set of the dataset.
+            - 'val' (list[Path]): List of directories/paths containing the validation set of the dataset.
+            - 'test' (list[Path]): List of directories/paths containing the test set of the dataset (if any).
             - 'nc' (int): The number of classes in the dataset.
             - 'names' (dict): A dictionary of class names in the dataset.
     """
-
-    # Download (optional if dataset=https://file.zip is passed directly)
-    if str(dataset).startswith(("http:/", "https:/")):
-        dataset = safe_download(dataset, dir=DATASETS_DIR, unzip=True, delete=False)
-    elif Path(dataset).suffix in (".zip", ".tar", ".gz"):
+    # If dataset is a URL or archive, attempt download/unzip
+    if str(dataset).startswith(("http:/", "https:/")) or Path(dataset).suffix in {".zip", ".tar", ".gz"}:
         file = check_file(dataset)
         dataset = safe_download(file, dir=DATASETS_DIR, unzip=True, delete=False)
+        dataset = Path(dataset).resolve()
 
     dataset = Path(dataset)
-    data_dir = (dataset if dataset.is_dir() else (DATASETS_DIR / dataset)).resolve()
-    if not data_dir.is_dir():
-        LOGGER.warning(f"\nDataset not found ⚠️, missing path {data_dir}, attempting download...")
-        t = time.time()
-        if str(dataset) == "imagenet":
-            subprocess.run(f"bash {ROOT / 'data/scripts/get_imagenet.sh'}", shell=True, check=True)
-        else:
-            url = f"https://github.com/ultralytics/yolov5/releases/download/v1.0/{dataset}.zip"
-            download(url, dir=data_dir.parent)
-        s = f"Dataset download success ✅ ({time.time() - t:.1f}s), saved to {colorstr('bold', data_dir)}\n"
-        LOGGER.info(s)
-    train_set = data_dir / "train"
-    val_set = (
-        data_dir / "val"
-        if (data_dir / "val").exists()
-        else data_dir / "validation"
-        if (data_dir / "validation").exists()
-        else None
-    )  # data/test or data/val
-    test_set = data_dir / "test" if (data_dir / "test").exists() else None  # data/val or data/test
-    if split == "val" and not val_set:
-        LOGGER.warning("WARNING ⚠️ Dataset 'split=val' not found, using 'split=test' instead.")
-    elif split == "test" and not test_set:
-        LOGGER.warning("WARNING ⚠️ Dataset 'split=test' not found, using 'split=val' instead.")
 
-    nc = len([x for x in (data_dir / "train").glob("*") if x.is_dir()])  # number of classes
-    names = [x.name for x in (data_dir / "train").iterdir() if x.is_dir()]  # class names list
-    names = dict(enumerate(sorted(names)))
+    # Check if dataset is a YAML file
+    if dataset.suffix == ".yaml":
+        # Load YAML
+        data = yaml_load(dataset, append_filename=True)
 
-    # Print to console
-    for k, v in {"train": train_set, "val": val_set, "test": test_set}.items():
-        prefix = f'{colorstr(f"{k}:")} {v}...'
-        if v is None:
-            LOGGER.info(prefix)
+        # Check required keys
+        for k in ["train", "val"]:
+            if k not in data and (k != "val" or "validation" not in data):
+                raise SyntaxError(
+                    emojis(f"{dataset} '{k}:' key missing ❌.\n'train' and 'val' are required in all data YAMLs.")
+                )
+            if k == "val" and "val" not in data and "validation" in data:
+                LOGGER.info("WARNING ⚠️ renaming data YAML 'validation' key to 'val' to match YOLO format.")
+                data["val"] = data.pop("validation")
+
+        if "names" not in data and "nc" not in data:
+            raise SyntaxError(emojis(f"{dataset} key missing ❌.\n either 'names' or 'nc' are required."))
+
+        if "names" in data and "nc" in data and len(data["names"]) != data["nc"]:
+            raise SyntaxError(emojis(f"{dataset} 'names' length {len(data['names'])} does not match 'nc: {data['nc']}'."))
+
+        # If only nc given, create generic names
+        if "names" not in data:
+            data["names"] = [f"class_{i}" for i in range(data["nc"])]
         else:
-            files = [path for path in v.rglob("*.*") if path.suffix[1:].lower() in IMG_FORMATS]
-            nf = len(files)  # number of files
-            nd = len({file.parent for file in files})  # number of directories
-            if nf == 0:
-                if k == "train":
-                    raise FileNotFoundError(emojis(f"{dataset} '{k}:' no training images found ❌ "))
-                else:
-                    LOGGER.warning(f"{prefix} found {nf} images in {nd} classes: WARNING ⚠️ no images found")
+            data["nc"] = len(data["names"])
+
+        data["names"] = check_class_names(data["names"])
+
+        # Resolve dataset root path
+        path = Path(data.get("path", "")).resolve() if "path" in data else dataset.parent
+        if not path.is_absolute():
+            path = (DATASETS_DIR / path).resolve()
+        data["path"] = path
+
+        # Convert train/val/test to absolute paths
+        def make_paths(x):
+            if not x:
+                return []
+            if isinstance(x, str):
+                x = [x]
+            return [str((path / p).resolve()) for p in x]
+
+        train_paths = make_paths(data.get("train", []))
+        val_paths = make_paths(data.get("val", []))
+        test_paths = make_paths(data.get("test", []))
+
+        # If split is specified, we can adjust sets accordingly
+        # However, for classification, we usually rely on directories only.
+        # split='val' or 'test' means we might just return val or test sets.
+        # For now, we assume user wants entire dataset info, not filtered by split.
+        # If split == 'val', we might just return val sets as primary sets, and so forth.
+        
+        # If nc/names provided by YAML, we don't need to scan. But we must ensure directories exist
+        # If directories not found or empty, warn or raise error.
+        # Check for existence of provided directories
+        def check_dirs(dirs, name):
+            checked = []
+            for d in dirs:
+                p = Path(d)
+                if not p.exists():
+                    raise FileNotFoundError(emojis(f"'{name}' directory {p} not found ❌"))
+                checked.append(p)
+            return checked
+
+        train_dirs = check_dirs(train_paths, "train")
+        val_dirs = check_dirs(val_paths, "val")
+        test_dirs = check_dirs(test_paths, "test") if test_paths else []
+
+        nc = data["nc"]
+        names = {i: n for i, n in enumerate(data["names"].values())}
+
+    else:
+        # Original behavior: dataset is a directory
+        data_dir = dataset if dataset.is_dir() else (DATASETS_DIR / dataset)
+        data_dir = data_dir.resolve()
+        if not data_dir.is_dir():
+            LOGGER.warning(f"\nDataset not found ⚠️, missing path {data_dir}, attempting download...")
+            t = time.time()
+            if str(dataset) == "imagenet":
+                subprocess.run(f"bash {ROOT / 'data/scripts/get_imagenet.sh'}", shell=True, check=True)
+            else:
+                url = f"https://github.com/ultralytics/assets/releases/download/v0.0.0/{dataset.name}.zip"
+                download(url, dir=data_dir.parent)
+            s = f"Dataset download success ✅ ({time.time() - t:.1f}s), saved to {colorstr('bold', data_dir)}\n"
+            LOGGER.info(s)
+
+        train_dirs = [data_dir / "train"]
+        val_dirs = [data_dir / "val"] if (data_dir / "val").exists() else [data_dir / "validation"] if (data_dir / "validation").exists() else []
+        test_dirs = [data_dir / "test"] if (data_dir / "test").exists() else []
+
+        # Infer nc and names from directory structure
+        # We assume a standard classification folder structure:
+        # train/class_0/*.jpg, train/class_1/*.jpg, ...
+        train_dir = train_dirs[0] if train_dirs else None
+        if train_dir and train_dir.exists():
+            # number of classes
+            sub_dirs = [x for x in train_dir.glob("*") if x.is_dir()]
+            nc = len(sub_dirs)
+            names = dict(enumerate(sorted([x.name for x in sub_dirs])))
+        else:
+            # No train_dir found, can't infer classes
+            raise FileNotFoundError(emojis(f"{dataset} 'train:' directory not found ❌"))
+
+    # Print dataset info for train, val, test
+    def log_dataset_info(name, dirs):
+        if not dirs:
+            LOGGER.info(f"{colorstr(f'{name}:')} None")
+            return
+        for d in dirs:
+            prefix = f'{colorstr(f"{name}:")} {d}...'
+            if not d.exists():
+                LOGGER.warning(f"{prefix} directory does not exist ⚠️")
+                continue
+            files = [path for path in d.rglob("*.*") if path.suffix[1:].lower() in IMG_FORMATS]
+            nf = len(files)
+            # Count how many unique directories we have (i.e., classes)
+            nd = len({file.parent for file in files})
+            if name == "train" and nf == 0:
+                raise FileNotFoundError(emojis(f"{d} '{name}:' no training images found ❌ "))
+            elif nf == 0:
+                LOGGER.warning(f"{prefix} found {nf} images in {nd} classes: WARNING ⚠️ no images found")
             elif nd != nc:
-                LOGGER.warning(f"{prefix} found {nf} images in {nd} classes: ERROR ❌️ requires {nc} classes, not {nd}")
+                LOGGER.warning(f"{prefix} found {nf} images in {nd} classes: ERROR ❌ requires {nc} classes, not {nd}")
             else:
                 LOGGER.info(f"{prefix} found {nf} images in {nd} classes ✅ ")
 
-    return {"train": train_set, "val": val_set, "test": test_set, "nc": nc, "names": names}
+    log_dataset_info("train", train_dirs)
+    log_dataset_info("val", val_dirs)
+    log_dataset_info("test", test_dirs)
+
+    return {
+        "train": train_dirs,
+        "val": val_dirs,
+        "test": test_dirs,
+        "nc": nc,
+        "names": names
+    }
 
 
 class HUBDatasetStats:
@@ -436,10 +525,11 @@ class HUBDatasetStats:
         ```python
         from ultralytics.data.utils import HUBDatasetStats
 
-        stats = HUBDatasetStats('path/to/coco8.zip', task='detect')  # detect dataset
-        stats = HUBDatasetStats('path/to/coco8-seg.zip', task='segment')  # segment dataset
-        stats = HUBDatasetStats('path/to/coco8-pose.zip', task='pose')  # pose dataset
-        stats = HUBDatasetStats('path/to/imagenet10.zip', task='classify')  # classification dataset
+        stats = HUBDatasetStats("path/to/coco8.zip", task="detect")  # detect dataset
+        stats = HUBDatasetStats("path/to/coco8-seg.zip", task="segment")  # segment dataset
+        stats = HUBDatasetStats("path/to/coco8-pose.zip", task="pose")  # pose dataset
+        stats = HUBDatasetStats("path/to/dota8.zip", task="obb")  # OBB dataset
+        stats = HUBDatasetStats("path/to/imagenet10.zip", task="classify")  # classification dataset
 
         stats.get_json(save=True)
         stats.process_images()
@@ -451,12 +541,12 @@ class HUBDatasetStats:
         path = Path(path).resolve()
         LOGGER.info(f"Starting HUB dataset checks for {path}....")
 
-        self.task = task  # detect, segment, pose, classify
+        self.task = task  # detect, segment, pose, classify, obb
         if self.task == "classify":
             unzip_dir = unzip_file(path)
             data = check_cls_dataset(unzip_dir)
             data["path"] = unzip_dir
-        else:  # detect, segment, pose
+        else:  # detect, segment, pose, obb
             _, data_dir, yaml_path = self._unzip(Path(path))
             try:
                 # Load YAML with checks
@@ -495,13 +585,13 @@ class HUBDatasetStats:
             """Update labels to integer class and 4 decimal place floats."""
             if self.task == "detect":
                 coordinates = labels["bboxes"]
-            elif self.task == "segment":
+            elif self.task in {"segment", "obb"}:  # Segment and OBB use segments. OBB segments are normalized xyxyxyxy
                 coordinates = [x.flatten() for x in labels["segments"]]
             elif self.task == "pose":
-                n = labels["keypoints"].shape[0]
-                coordinates = np.concatenate((labels["bboxes"], labels["keypoints"].reshape(n, -1)), 1)
+                n, nk, nd = labels["keypoints"].shape
+                coordinates = np.concatenate((labels["bboxes"], labels["keypoints"].reshape(n, nk * nd)), 1)
             else:
-                raise ValueError("Undefined dataset task.")
+                raise ValueError(f"Undefined dataset task={self.task}.")
             zipped = zip(labels["cls"], coordinates)
             return [[int(c[0]), *(round(float(x), 4) for x in points)] for c, points in zipped]
 
@@ -595,11 +685,10 @@ def compress_one_image(f, f_new=None, max_dim=1920, quality=50):
         from pathlib import Path
         from ultralytics.data.utils import compress_one_image
 
-        for f in Path('path/to/dataset').rglob('*.jpg'):
+        for f in Path("path/to/dataset").rglob("*.jpg"):
             compress_one_image(f)
         ```
     """
-
     try:  # use PIL
         im = Image.open(f)
         r = max_dim / max(im.height, im.width)  # ratio
@@ -632,7 +721,6 @@ def autosplit(path=DATASETS_DIR / "coco8/images", weights=(0.9, 0.1, 0.0), annot
         autosplit()
         ```
     """
-
     path = Path(path)  # images dir
     files = sorted(x for x in path.rglob("*.*") if x.suffix[1:].lower() in IMG_FORMATS)  # image files only
     n = len(files)  # number of files
@@ -649,3 +737,26 @@ def autosplit(path=DATASETS_DIR / "coco8/images", weights=(0.9, 0.1, 0.0), annot
         if not annotated_only or Path(img2label_paths([str(img)])[0]).exists():  # check label
             with open(path.parent / txt[i], "a") as f:
                 f.write(f"./{img.relative_to(path.parent).as_posix()}" + "\n")  # add image to txt file
+
+
+def load_dataset_cache_file(path):
+    """Load an Ultralytics *.cache dictionary from path."""
+    import gc
+
+    gc.disable()  # reduce pickle load time https://github.com/ultralytics/ultralytics/pull/1585
+    cache = np.load(str(path), allow_pickle=True).item()  # load dict
+    gc.enable()
+    return cache
+
+
+def save_dataset_cache_file(prefix, path, x, version):
+    """Save an Ultralytics dataset *.cache dictionary x to path."""
+    x["version"] = version  # add cache version
+    if is_dir_writeable(path.parent):
+        if path.exists():
+            path.unlink()  # remove *.cache file if exists
+        np.save(str(path), x)  # save cache for next time
+        path.with_suffix(".cache.npy").rename(path)  # remove .npy suffix
+        LOGGER.info(f"{prefix}New cache created: {path}")
+    else:
+        LOGGER.warning(f"{prefix}WARNING ⚠️ Cache directory {path.parent} is not writeable, cache not saved.")
