@@ -88,7 +88,7 @@ class BaseDataset(Dataset):
         self.buffer = []  # buffer size = batch size
         self.max_buffer_length = min((self.ni, self.batch_size * 8, 1000)) if self.augment else 0
 
-        # Cache images (options are cache = True, False, None, "ram", "disk")
+        # Cache images (options are cache = True, False, None, "ram", "disk", "low-ram")
         self.ims, self.im_hw0, self.im_hw = [None] * self.ni, [None] * self.ni, [None] * self.ni
         self.npy_files = [Path(f).with_suffix(".npy") for f in self.im_files]
         self.cache = cache.lower() if isinstance(cache, str) else "ram" if cache is True else None
@@ -100,6 +100,8 @@ class BaseDataset(Dataset):
                 )
             self.cache_images()
         elif self.cache == "disk" and self.check_cache_disk():
+            self.cache_images()
+        elif self.cache == "low-ram": # кэшируем в виде JPEG
             self.cache_images()
 
         # Transforms
@@ -152,8 +154,15 @@ class BaseDataset(Dataset):
 
     def load_image(self, i, rect_mode=True):
         """Loads 1 image from dataset index 'i', returns (im, resized hw)."""
-        im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
-        if im is None:  # not cached in RAM
+        stored, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
+        if self.cache == "low-ram" and isinstance(stored, (bytes, bytearray)): # low-ram: если в self.ims байтовый JPEG-буфер, то декодируем «на лету»
+            arr = np.frombuffer(stored, dtype=np.uint8)
+            im = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if im is None:
+                raise RuntimeError(f"{self.prefix}Corrupt JPEG buffer for {f}")
+        elif stored is not None: # ram
+            im = stored
+        else: # disk или False
             if fn.exists():  # load npy
                 try:
                     im = np.load(fn)
@@ -191,16 +200,23 @@ class BaseDataset(Dataset):
     def cache_images(self):
         """Cache images to memory or disk."""
         b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
-        fcn, storage = (self.cache_images_to_disk, "Disk") if self.cache == "disk" else (self.load_image, "RAM")
+        if self.cache == "disk":
+            fcn, storage = self.cache_images_to_disk, "Disk"
+        elif self.cache == "low-ram":
+            fcn, storage = self.cache_images_to_buffer, "Low-RAM"
+        else:  # ram
+            fcn, storage = self.load_image, "RAM"
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(fcn, range(self.ni))
             pbar = TQDM(enumerate(results), total=self.ni, disable=LOCAL_RANK > 0)
             for i, x in pbar:
                 if self.cache == "disk":
                     b += self.npy_files[i].stat().st_size
-                else:  # 'ram'
+                elif self.cache == "ram":
                     self.ims[i], self.im_hw0[i], self.im_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
                     b += self.ims[i].nbytes
+                else:  # low-ram
+                    b += x
                 pbar.desc = f"{self.prefix}Caching images ({b / gb:.1f}GB {storage})"
             pbar.close()
 
@@ -238,6 +254,19 @@ class BaseDataset(Dataset):
             return False
         return True
 
+    def cache_images_to_buffer(self, i):
+        """Saves an image as JPEG bytes for low-ram on-the-fly decoding."""
+        im = cv2.imread(self.im_files[i])  # BGR
+        if im is None:
+            raise FileNotFoundError(f"{self.prefix}Image Not Found {self.im_files[i]}")
+        quality = int(DEFAULT_CFG.get("JPEG_QUALITY", 90))
+        success, buf = cv2.imencode(".jpg", im, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        if not success:
+            raise RuntimeError(f"{self.prefix}Failed to JPEG-encode {self.im_files[i]}")
+        data = buf.tobytes()
+        self.ims[i] = data
+        return len(data)
+    
     def check_cache_ram(self, safety_margin=0.5):
         """Check image caching requirements vs available memory."""
         b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
