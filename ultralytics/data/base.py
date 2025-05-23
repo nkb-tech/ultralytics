@@ -151,51 +151,66 @@ class BaseDataset(Dataset):
                     self.labels[i]["keypoints"] = keypoints[j]
             if self.single_cls:
                 self.labels[i]["cls"][:, 0] = 0
+    
+    def _resize(self, im, h0, w0, rect_mode):
+        if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
+            r = self.imgsz / max(h0, w0)  # ratio
+            if r != 1:  # if sizes are not equal
+                w = min(math.ceil(w0 * r), self.imgsz)
+                h = min(math.ceil(h0 * r), self.imgsz)
+                return cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+        elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
+            return cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+        return im
 
     def load_image(self, i, rect_mode=True):
-        """Loads 1 image from dataset index 'i', returns (im, resized hw)."""
         stored, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
-        if self.cache == "low-ram" and isinstance(stored, (bytes, bytearray)): # low-ram: если в self.ims байтовый JPEG-буфер, то декодируем «на лету»
+        if self.cache == "low-ram" and isinstance(stored, (bytes, bytearray)):  # low-ram: если в self.ims байтовый JPEG-буфер, то декодируем на лету
             arr = np.frombuffer(stored, dtype=np.uint8)
             im = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if im is None:
                 raise RuntimeError(f"{self.prefix}Corrupt JPEG buffer for {f}")
-        elif stored is not None: # ram
-            im = stored
-        else: # disk или False
-            if fn.exists():  # load npy
-                try:
-                    im = np.load(fn)
-                except Exception as e:
-                    LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
-                    Path(fn).unlink(missing_ok=True)
-                    im = cv2.imread(f)  # BGR
-            else:  # read image
-                im = cv2.imread(f)  # BGR
-            if im is None:
-                raise FileNotFoundError(f"Image Not Found {f}")
+            h0, w0 = im.shape[:2]
 
-            h0, w0 = im.shape[:2]  # orig hw
-            if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
-                r = self.imgsz / max(h0, w0)  # ratio
-                if r != 1:  # if sizes are not equal
-                    w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
-                    im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-            elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
-                im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+            im = self._resize(im, h0, w0, rect_mode)
 
-            # Add to buffer if training with augmentations
             if self.augment:
-                self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
+                self.im_hw0[i], self.im_hw[i] = (h0, w0), im.shape[:2]
                 self.buffer.append(i)
-                if 1 < len(self.buffer) >= self.max_buffer_length:  # prevent empty buffer
+                if len(self.buffer) >= self.max_buffer_length:
                     j = self.buffer.pop(0)
-                    if self.cache != "ram":
-                        self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
-
+                    self.im_hw0[j], self.im_hw[j] = None, None
             return im, (h0, w0), im.shape[:2]
 
-        return self.ims[i], self.im_hw0[i], self.im_hw[i]
+        if stored is not None:  # ram
+            return stored, self.im_hw0[i], self.im_hw[i]
+
+        # disk или False
+        if fn.exists():  # load npy
+            try:
+                im = np.load(fn)
+            except Exception as e:
+                LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
+                Path(fn).unlink(missing_ok=True)
+                im = cv2.imread(f)  # BGR
+        else:  # read image
+            im = cv2.imread(f)  # BGR
+        if im is None:
+            raise FileNotFoundError(f"Image Not Found {f}")
+
+        h0, w0 = im.shape[:2]  # orig hw
+        im = self._resize(im, h0, w0, rect_mode)
+
+        if self.augment:  # Add to buffer if training with augmentations
+            self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
+            self.buffer.append(i)
+            if len(self.buffer) >= self.max_buffer_length:
+                j = self.buffer.pop(0)
+                if self.cache != "ram":
+                    self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+
+        return im, (h0, w0), im.shape[:2]
+
 
     def cache_images(self):
         """Cache images to memory or disk."""
@@ -259,8 +274,7 @@ class BaseDataset(Dataset):
         im = cv2.imread(self.im_files[i])  # BGR
         if im is None:
             raise FileNotFoundError(f"{self.prefix}Image Not Found {self.im_files[i]}")
-        quality = int(DEFAULT_CFG.get("JPEG_QUALITY", 90))
-        success, buf = cv2.imencode(".jpg", im, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+        success, buf = cv2.imencode(".jpg", im, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
         if not success:
             raise RuntimeError(f"{self.prefix}Failed to JPEG-encode {self.im_files[i]}")
         data = buf.tobytes()
