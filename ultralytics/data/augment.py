@@ -11,6 +11,10 @@ import torch
 from PIL import Image
 from torch.nn import functional as F
 
+from enum import Enum
+from albumentations.core.transforms_interface import ImageOnlyTransform
+from scipy.spatial import ConvexHull
+
 from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils import LOGGER, colorstr
 from ultralytics.utils.checks import check_version
@@ -1838,6 +1842,212 @@ class CopyPaste(BaseMixTransform):
         return labels1
 
 
+class ShadowType(Enum):
+    RECTANGLE = 'rectangle'
+    POLYGON = 'polygon'
+    ELLIPSE = 'ellipse'
+
+
+class RandomShadows(ImageOnlyTransform):
+    """
+    Добавляет на изображение случайные тени (участки с пониженной яркостью) 
+    в форме прямоугольников, многоугольников или эллипсов.
+    
+    Args:
+        min_shadows (int): Минимальное количество теней.
+        max_shadows (int): Максимальное количество теней.
+        shadow_types (list): Список типов теней, которые могут быть применены.
+                            Возможные значения: ShadowType.RECTANGLE, ShadowType.POLYGON, ShadowType.ELLIPSE.
+        min_height_ratio (float): Минимальная высота тени (доля от высоты изображения).
+        max_height_ratio (float): Максимальная высота тени (доля от высоты изображения).
+        min_width_ratio (float): Минимальная ширина тени (доля от ширины изображения).
+        max_width_ratio (float): Максимальная ширина тени (доля от ширины изображения).
+        min_vertices (int): Минимальное количество вершин для многоугольника.
+        max_vertices (int): Максимальное количество вершин для многоугольника.
+        min_intensity (float): Минимальная интенсивность тени (0.0 - нет тени, 1.0 - полностью черная).
+        max_intensity (float): Максимальная интенсивность тени.
+        p (float): Вероятность применения аугментации.
+    """
+    
+    def __init__(
+        self,
+        min_shadows=1,
+        max_shadows=3,
+        shadow_types=None,
+        min_height_ratio=0.05,
+        max_height_ratio=0.3,
+        min_width_ratio=0.05,
+        max_width_ratio=0.3,
+        min_vertices=3,
+        max_vertices=8,
+        min_intensity=0.2,
+        max_intensity=0.7,
+        p=0.5
+    ):
+        super(RandomShadows, self).__init__(p)
+        self.min_shadows = min_shadows
+        self.max_shadows = max_shadows
+        self.shadow_types = shadow_types or [ShadowType.RECTANGLE, ShadowType.POLYGON, ShadowType.ELLIPSE]
+        self.min_height_ratio = min_height_ratio
+        self.max_height_ratio = max_height_ratio
+        self.min_width_ratio = min_width_ratio
+        self.max_width_ratio = max_width_ratio
+        self.min_vertices = min_vertices
+        self.max_vertices = max_vertices
+        self.min_intensity = min_intensity
+        self.max_intensity = max_intensity
+    
+    def _generate_rectangle_coords(self, height, width):
+        # Определяем размеры прямоугольника в относительных координатах
+        rect_height_ratio = random.uniform(self.min_height_ratio, self.max_height_ratio)
+        rect_width_ratio = random.uniform(self.min_width_ratio, self.max_width_ratio)
+        
+        # Переводим в абсолютные размеры
+        rect_height = int(height * rect_height_ratio)
+        rect_width = int(width * rect_width_ratio)
+        
+        # Определяем координаты верхнего левого угла прямоугольника
+        x1 = random.randint(0, width - rect_width)
+        y1 = random.randint(0, height - rect_height)
+        x2 = x1 + rect_width
+        y2 = y1 + rect_height
+        
+        return x1, y1, x2, y2
+    
+    def _generate_polygon_vertices(self, height, width):
+        # Генерируем прямоугольную область, внутри которой будет многоугольник
+        x1, y1, x2, y2 = self._generate_rectangle_coords(height, width)
+        
+        # Определяем число вершин
+        num_vertices = random.randint(self.min_vertices, self.max_vertices)
+        
+        # Метод для генерации выпуклого многоугольника
+        # Используем полярные координаты для обеспечения выпуклости
+        center_x = (x1 + x2) // 2
+        center_y = (y1 + y2) // 2
+        
+        # Находим максимально возможный радиус
+        max_radius = min(x2 - x1, y2 - y1) // 2
+        
+        # Генерируем случайные углы и сортируем их для создания выпуклого многоугольника
+        angles = sorted([random.uniform(0, 2 * np.pi) for _ in range(num_vertices)])
+        
+        # Создаем вершины многоугольника
+        vertices = []
+        for angle in angles:
+            # Используем случайный радиус для более интересной формы
+            radius = random.uniform(0.4 * max_radius, max_radius)
+            x = center_x + int(radius * np.cos(angle))
+            y = center_y + int(radius * np.sin(angle))
+            
+            # Убедимся, что вершины находятся в пределах изображения
+            x = max(0, min(width - 1, x))
+            y = max(0, min(height - 1, y))
+            
+            vertices.append([x, y])
+        
+        return np.array(vertices, dtype=np.int32)
+    
+    def _generate_ellipse_params(self, height, width):
+        # Генерируем прямоугольник, в который будет вписан эллипс
+        x1, y1, x2, y2 = self._generate_rectangle_coords(height, width)
+        
+        # Центр эллипса
+        center = ((x1 + x2) // 2, (y1 + y2) // 2)
+        
+        # Полуоси эллипса
+        axes = ((x2 - x1) // 2, (y2 - y1) // 2)
+        
+        return center, axes
+    
+    def apply(self, img, **params):
+        """
+        Args:
+            img (np.ndarray): Исходное изображение.
+            
+        Returns:
+            np.ndarray: Изображение с добавленными тенями.
+        """
+
+        height, width = img.shape[:2]
+        result = img.copy()
+        
+        # Создаем маску для теней
+        shadow_mask = np.zeros((height, width), dtype=np.uint8)
+        
+        # Определяем количество теней для добавления
+        num_shadows = random.randint(self.min_shadows, self.max_shadows)
+
+        # Определяем интенсивность тени
+        intensity = random.uniform(self.min_intensity, self.max_intensity)
+        
+        for _ in range(num_shadows):
+            # Выбираем случайный тип тени
+            shadow_type = random.choice(self.shadow_types)
+            
+            # Временная маска для текущей тени
+            temp_mask = np.zeros((height, width), dtype=np.uint8)
+            
+            if shadow_type == ShadowType.RECTANGLE:
+                # Создаем прямоугольную тень
+                x1, y1, x2, y2 = self._generate_rectangle_coords(height, width)
+                cv2.rectangle(temp_mask, (x1, y1), (x2, y2), 255, -1)
+                
+            elif shadow_type == ShadowType.POLYGON:
+                # Создаем многоугольную тень
+                vertices = self._generate_polygon_vertices(height, width)
+                cv2.fillPoly(temp_mask, [vertices], 255)
+                
+            elif shadow_type == ShadowType.ELLIPSE:
+                # Создаем эллиптическую тень
+                center, axes = self._generate_ellipse_params(height, width)
+                cv2.ellipse(temp_mask, center, axes, 0, 0, 360, 255, -1)
+            
+            # Объединяем с общей маской теней
+            shadow_mask = cv2.bitwise_or(shadow_mask, temp_mask)
+        
+        # Применяем тени к изображению
+        if len(img.shape) == 3:  # Цветное изображение (RGB или BGR)
+            # Создаем маску с тремя каналами
+            shadow_mask_3ch = cv2.merge([shadow_mask, shadow_mask, shadow_mask])
+            
+            # Создаем темное изображение (умноженное на (1 - интенсивность))
+            darkened = result * (1 - intensity)
+            
+            # Применяем тени только в областях, где маска не равна 0
+            result = np.where(
+                shadow_mask_3ch > 0,
+                darkened.astype(np.uint8),
+                result
+            )
+        else:  # Изображение в оттенках серого
+            # Создаем темное изображение
+            darkened = result * (1 - intensity)
+            
+            # Применяем тени
+            result = np.where(
+                shadow_mask > 0,
+                darkened.astype(np.uint8),
+                result
+            )
+            
+        return result
+
+    def __call__(self, data):
+        img = data.pop("img")
+        data["img"] = self.apply(img)
+        return data
+    
+    def get_transform_init_args_names(self):
+        return (
+            "min_shadows", "max_shadows", "shadow_types",
+            "min_height_ratio", "max_height_ratio", 
+            "min_width_ratio", "max_width_ratio",
+            "min_vertices", "max_vertices",
+            "min_intensity", "max_intensity",
+        )
+
+
 class Albumentations:
     """
     Albumentations transformations for image augmentation.
@@ -2506,6 +2716,19 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         >>> transforms = v8_transforms(dataset, imgsz=640, hyp=hyp)
         >>> augmented_data = transforms(dataset[0])
     """
+    shadow = RandomShadows(
+        min_shadows=2,
+        max_shadows=3,
+        min_height_ratio=0.1,
+        max_height_ratio=0.8,
+        min_width_ratio=0.1,
+        max_width_ratio=0.8,
+        min_vertices=3,
+        max_vertices=10,
+        min_intensity=0.5,
+        max_intensity=1.0,
+        p=0.5
+    )
     mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic)
     affine = RandomPerspective(
         degrees=hyp.degrees,
@@ -2516,7 +2739,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz)),
     )
 
-    pre_transform = Compose([mosaic, affine])
+    pre_transform = Compose([shadow, mosaic, affine])
     if hyp.copy_paste_mode == "flip":
         pre_transform.insert(1, CopyPaste(p=hyp.copy_paste, mode=hyp.copy_paste_mode))
     else:
