@@ -62,6 +62,7 @@ class BaseDataset(Dataset):
         classes=None,
         fraction=1.0,
         min_size=20,
+        pre_resize=False,
     ):
         """Initialize BaseDataset with given configuration and options."""
         super().__init__()
@@ -80,6 +81,7 @@ class BaseDataset(Dataset):
         self.batch_size = batch_size
         self.stride = stride
         self.pad = pad
+        self.pre_resize = pre_resize
         if self.rect:
             assert self.batch_size is not None
             self.set_rectangle()
@@ -172,7 +174,10 @@ class BaseDataset(Dataset):
                 raise RuntimeError(f"{self.prefix}Corrupt JPEG buffer for {f}")
             h0, w0 = im.shape[:2]
 
-            im = self._resize(im, h0, w0, rect_mode)
+            # print(f"[load_image] #{i:05d}  ORIG  {h0}x{w0}")
+            if self.pre_resize:
+                im = self._resize(im, h0, w0, rect_mode)
+            # print(f"[load_image] #{i:05d}  AFTER load_image() -> {im.shape[0]}x{im.shape[1]}")
 
             if self.augment:
                 self.im_hw0[i], self.im_hw[i] = (h0, w0), im.shape[:2]
@@ -199,7 +204,10 @@ class BaseDataset(Dataset):
             raise FileNotFoundError(f"Image Not Found {f}")
 
         h0, w0 = im.shape[:2]  # orig hw
-        im = self._resize(im, h0, w0, rect_mode)
+        # print(f"[load_image] #{i:05d}  ORIG  {h0}x{w0}")
+        if self.pre_resize:
+            im = self._resize(im, h0, w0, rect_mode)
+        # print(f"[load_image] #{i:05d}  AFTER load_image() -> {im.shape[0]}x{im.shape[1]}")
 
         if self.augment:  # Add to buffer if training with augmentations
             self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]

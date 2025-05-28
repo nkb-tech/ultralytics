@@ -118,6 +118,7 @@ fliplr: 0.5 # (float) image flip left-right (probability)
 bgr: 0.0 # (float) image channel BGR (probability)
 mosaic: 1.0 # (float) image mosaic (probability)
 mixup: 0.0 # (float) image mixup (probability)
+cutmix: 0.0 # (float) image cutmix (probability)
 copy_paste: 0.0 # (float) segment copy-paste (probability)
 copy_paste_mode: "flip" # (str) the method to do copy_paste augmentation (flip, mixup)
 auto_augment: randaugment # (str) auto augmentation policy for classification (randaugment, autoaugment, augmix)
@@ -132,6 +133,19 @@ albu_brightness: 0.3
 albu_contrast: 0.4 
 albu_saturation: 0.3 
 albu_hue: 0.3
+crop_size: 640
+pixel_dropout_prob: 0.02
+pixel_drop_value: 0
+fog_max: 0.8
+fog_alpha: 0.05
+snow_max: 0.25
+snow_bright: 2.0
+clahe_clip: 2.0
+bright_limit: 0.2
+contrast_limit: 0.2
+p_fog_snow: 0.3
+p_color: 0.2
+p_gray: 0.2
 
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg: # (str, optional) for overriding defaults.yaml
