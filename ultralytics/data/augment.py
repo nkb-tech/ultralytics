@@ -46,7 +46,6 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
         self,
         size: int = 640,
         erosion_factor: float = 0.0,
-        always_apply: bool = False,
         p: float = 1.0,
     ):
         super().__init__(
@@ -54,7 +53,6 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
             width=size,
             erosion_factor=erosion_factor,
             p=p,
-            always_apply=always_apply,
         )
 
     def get_params_dependent_on_data(
@@ -77,10 +75,9 @@ class RandomCropLarge(DualTransform):
         crop_size: int = 640,
         threshold: int = 1024,
         erosion_factor: float = 0.0,
-        always_apply: bool = False,
         p: float = 1.0
     ):
-        super().__init__(always_apply=always_apply, p=p)
+        super().__init__(p=p)
         self.crop_size = crop_size
         self.threshold = threshold
         self.random_crop = A.RandomCrop(height=crop_size, width=crop_size, p=1.0)
@@ -2283,7 +2280,7 @@ class Albumentations:
 
                     A.OneOf([
                         RandomCropLarge(
-                            size=self.hyp.crop_size,
+                            crop_size=self.hyp.crop_size,
                             threshold=1024,
                             p=0.1
                         ),
@@ -2325,7 +2322,7 @@ class Albumentations:
                     #     bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"], min_visibility=0.6),
                     #     keypoint_params=A.KeypointParams(format="xy", remove_invisible=True),
                     # )
-                    A.Compose(T, bbox_params=A.BboxParams(format="yolo", filter_lost_elements=True, label_fields=["class_labels"], min_visibility=0.5))
+                    A.Compose(T, bbox_params=A.BboxParams(format="yolo", filter_invalid_bboxes=True, label_fields=["class_labels"], min_visibility=0.7))
                     if self.contains_spatial
                     else A.Compose(T)
                 )
