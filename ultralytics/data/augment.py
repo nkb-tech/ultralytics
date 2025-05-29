@@ -41,7 +41,7 @@ except:
 class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
     """Гарантированный кроп size×size c хотя бы одним bbox внутри.
     Не применяется, если изображение меньше заданного размера."""
-
+    
     def __init__(
         self,
         size: int = 640,
@@ -63,12 +63,8 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
         data: dict[str, Any],
     ) -> dict[str, Any]:
         image_height, image_width = params["shape"][:2]
-
-        if image_height < self.height or image_width < self.width: # return full image
-            return {
-                "crop_coords": (0, 0, image_width, image_height),
-            }
-
+        if image_height < self.height or image_width < self.width:
+            return {"crop_coords": (0, 0, image_width, image_height)}
         return super().get_params_dependent_on_data(params, data)
 
 class RandomCropLarge(DualTransform):
@@ -79,7 +75,7 @@ class RandomCropLarge(DualTransform):
     def __init__(
         self,
         crop_size: int = 640,
-        threshold: int = 1024,  # what img we will crop with 
+        threshold: int = 1024,
         erosion_factor: float = 0.0,
         always_apply: bool = False,
         p: float = 1.0
@@ -93,7 +89,7 @@ class RandomCropLarge(DualTransform):
             erosion_factor=erosion_factor,
             p=1.0
         )
-
+        
     def apply(self, img, **params):
         height, width = img.shape[:2]
         if height > self.threshold or width > self.threshold:
@@ -101,11 +97,12 @@ class RandomCropLarge(DualTransform):
         else:
             return self.safe_fixed_crop.apply(img, **params)
 
-    def apply_to_bbox(self, bbox, **params):
-        if params['image'].shape[0] > self.threshold or params['image'].shape[1] > self.threshold:
-            return self.random_crop.apply_to_bbox(bbox, **params)
+    def apply_to_bboxes(self, bboxes: list[list[float]], **params) -> list[list[float]]:
+        image_shape = params["shape"]
+        if image_shape[0] > self.threshold or image_shape[1] > self.threshold:
+            return self.random_crop.apply_to_bboxes(bboxes, **params)
         else:
-            return self.safe_fixed_crop.apply_to_bbox(bbox, **params)
+            return self.safe_fixed_crop.apply_to_bboxes(bboxes, **params)
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         image_shape = params["shape"]
