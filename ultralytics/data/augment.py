@@ -3,7 +3,7 @@
 import math
 import random
 from copy import deepcopy
-from typing import Tuple, Union
+from typing import Tuple, Union, Any
 
 import cv2
 import numpy as np
@@ -38,50 +38,86 @@ try:
 except:
     ALBU_AVAILABLE = False
 
-class SafeFixedRandomCrop(DualTransform):
-    """Гарантированный кроп размером size×size c хотя бы одним bbox внутри."""
-    def __init__(self, size=640, p=1.0):
-        super().__init__(always_apply=False, p=p)
-        self.size = size
+class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
+    """Гарантированный кроп size×size c хотя бы одним bbox внутри.
+    Не применяется, если изображение меньше заданного размера."""
 
-    def apply(self, img, **params):           return img
-    def apply_to_mask(self, mask, **params):  return mask
-    def apply_to_bbox(self, bbox, **params):  return bbox
-    def get_transform_init_args_names(self):  return ("size",)
-
-    def __call__(self, force_apply=False, **data):
-        h, w = data["image"].shape[:2]
-        if h < self.size or w < self.size:
-            return data
-
-        crop = AtLeastOneBBoxRandomCrop(
-            height=self.size,
-            width=self.size,
-            always_apply=True,
-            p=1.0
+    def __init__(
+        self,
+        size: int = 640,
+        erosion_factor: float = 0.0,
+        always_apply: bool = False,
+        p: float = 1.0,
+    ):
+        super().__init__(
+            height=size,
+            width=size,
+            erosion_factor=erosion_factor,
+            p=p,
+            always_apply=always_apply,
         )
-        return crop(**data)
+
+    def get_params_dependent_on_data(
+        self,
+        params: dict[str, Any],
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        image_height, image_width = params["shape"][:2]
+
+        if image_height < self.height or image_width < self.width: # return full image
+            return {
+                "crop_coords": (0, 0, image_width, image_height),
+            }
+
+        return super().get_params_dependent_on_data(params, data)
 
 class RandomCropLarge(DualTransform):
     """
     Срабатывает с вероятностью p, НО только если картинка ≥ `threshold` по обеим осям.
     """
-    def __init__(self, size=640, threshold=1024, p=0.1):
-        super().__init__(always_apply=False, p=p)
-        self.size = size
+
+    def __init__(
+        self,
+        crop_size: int = 640,
+        threshold: int = 1024,  # what img we will crop with 
+        erosion_factor: float = 0.0,
+        always_apply: bool = False,
+        p: float = 1.0
+    ):
+        super().__init__(always_apply=always_apply, p=p)
+        self.crop_size = crop_size
         self.threshold = threshold
-        self._crop = A.RandomCrop(height=size, width=size, always_apply=True, p=1.0)
+        self.random_crop = A.RandomCrop(height=crop_size, width=crop_size, p=1.0)
+        self.safe_fixed_crop = SafeFixedRandomCrop(
+            size=crop_size,
+            erosion_factor=erosion_factor,
+            p=1.0
+        )
 
-    def apply(self, img, **params):          return img
-    def apply_to_mask(self, mask, **params): return mask
-    def apply_to_bbox(self, bbox, **params): return bbox
-    def get_transform_init_args_names(self): return ("size", "threshold")
+    def apply(self, img, **params):
+        height, width = img.shape[:2]
+        if height > self.threshold or width > self.threshold:
+            return self.random_crop.apply(img, **params)
+        else:
+            return self.safe_fixed_crop.apply(img, **params)
 
-    def __call__(self, force_apply=False, **data):
-        h, w = data["image"].shape[:2]
-        if h < self.threshold or w < self.threshold:
-            return data
-        return self._crop(**data)
+    def apply_to_bbox(self, bbox, **params):
+        if params['image'].shape[0] > self.threshold or params['image'].shape[1] > self.threshold:
+            return self.random_crop.apply_to_bbox(bbox, **params)
+        else:
+            return self.safe_fixed_crop.apply_to_bbox(bbox, **params)
+
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        image_shape = params["shape"]
+        height, width = image_shape[:2]
+
+        if height > self.threshold or width > self.threshold:
+            return self.random_crop.get_params_dependent_on_data(params, data)
+        else:
+            return self.safe_fixed_crop.get_params_dependent_on_data(params, data)
+
+    def get_transform_init_args_names(self):
+        return ("crop_size", "threshold")
 
 
 class BaseTransform:
@@ -2243,62 +2279,6 @@ class Albumentations:
                 self.augs_params = default_params
                 if args is not None:
                     self.aug_params = {args.get(k,None) if args.get(k,None) is not None else default_params[k] for k in default_params.keys()}
-
-                # T = [
-                #     A.OneOf([
-                #         # A.CoarseDropout(
-                #         #     num_holes_range=(3, 10),
-                #         #     hole_height_range=(10, 200),
-                #         #     hole_width_range=(10, 200),
-                #         #     fill_value="random",
-                #         #     p=0.3,
-                #         # ),
-                #         A.PixelDropout(dropout_prob=self.augs_params["dropout_prob"], p=0.5),
-                #         A.ImageCompression(quality_lower=self.augs_params["quality_lower"], p=0.3),
-                #         A.ZoomBlur(max_factor=self.augs_params["max_factor"], p=0.5),
-                #         A.PixelDropout(p=0.3),
-                #     ], p=0.4),
-                #     A.OneOf([
-                #         A.CLAHE(clip_limit=self.augs_params["clip_limit"], p=0.5),
-                #         A.RandomBrightnessContrast(p=0.2),
-                #         A.RandomGamma(p=0.1),
-                #         A.Emboss(p=0.2),
-                #         A.Sharpen(p=0.2),
-                #         A.ColorJitter(brightness=self.augs_params["brightness"],
-                #                       contrast=self.augs_params["contrast"],
-                #                       saturation=self.augs_params["saturation"],
-                #                       hue=self.augs_params["hue"],
-                #                       p=0.3),
-                #     ], p=0.3),
-                #     A.ToGray(p=0.3),
-                # ]
-
-                # T = [
-                #     SafeFixedRandomCrop(size=self.hyp.crop_size, p=1.0),
-                #
-                #     A.PixelDropout(
-                #         dropout_prob=self.hyp.pixel_dropout_prob,
-                #         drop_value=self.hyp.pixel_drop_value,
-                #         p=0.3
-                #     ),
-                #
-                #     A.OneOf([
-                #         A.RandomFog(fog_coef_range=(0.3, self.hyp.fog_max),
-                #                     alpha_coef=self.hyp.fog_alpha, p=1.0),
-                #         A.RandomSnow(snow_point_range=(0.1, self.hyp.snow_max),
-                #                      brightness_coeff=self.hyp.snow_bright, p=1.0),
-                #     ], p=self.hyp.p_fog_snow),
-                #
-                #     A.OneOf([
-                #         A.CLAHE(clip_limit=self.hyp.clahe_clip, p=0.5),
-                #         A.RandomBrightnessContrast(
-                #             brightness_limit=(-self.hyp.bright_limit, self.hyp.bright_limit),
-                #             contrast_limit=(-self.hyp.contrast_limit, self.hyp.contrast_limit),
-                #             p=0.5),
-                #     ], p=self.hyp.p_color),
-                #
-                #     A.ToGray(p=self.hyp.p_gray),
-                # ]
 
                 T = [
 
