@@ -25,7 +25,7 @@ class BaseDataset(Dataset):
     Args:
         img_path (str): Path to the folder containing images.
         imgsz (int, optional): Image size. Defaults to 640.
-        cache (bool, optional): Cache images to RAM or disk during training. Defaults to False.
+        cache (bool or str, optional): Cache images in RAM (`True`, `"ram"`), on disk (`"disk"`), or low-RAM mode (`"low-ram"`). Defaults to False.
         augment (bool, optional): If True, data augmentation is applied. Defaults to True.
         hyp (dict, optional): Hyperparameters to apply data augmentation. Defaults to None.
         prefix (str, optional): Prefix to print in log messages. Defaults to ''.
@@ -36,6 +36,9 @@ class BaseDataset(Dataset):
         single_cls (bool, optional): If True, single class training is used. Defaults to False.
         classes (list): List of included classes. Default is None.
         fraction (float): Fraction of dataset to utilize. Default is 1.0 (use all data).
+        min_size (int, optional): Minimum bbox size. Defaults to 20.
+        pre_resize (bool, optional): If True, images are resized before augmentation to speed up training. Defaults to False.
+
 
     Attributes:
         im_files (list): List of image file paths.
