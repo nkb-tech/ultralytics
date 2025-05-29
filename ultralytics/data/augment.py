@@ -2225,6 +2225,7 @@ class Albumentations:
                     "PixelDropout",
                     "RandomCrop",
                     "RandomCropFromBorders",
+                    "RandomCropLarge",
                     "RandomGridShuffle",
                     "RandomResizedCrop",
                     "RandomRotate90",
@@ -2234,6 +2235,7 @@ class Albumentations:
                     "Resize",
                     "Rotate",
                     "SafeRotate",
+                    "SafeFixedRandomCrop",
                     "ShiftScaleRotate",
                     "SmallestMaxSize",
                     "Transpose",
@@ -2323,7 +2325,7 @@ class Albumentations:
                     #     bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"], min_visibility=0.6),
                     #     keypoint_params=A.KeypointParams(format="xy", remove_invisible=True),
                     # )
-                    A.Compose(T, bbox_params=A.BboxParams(format="yolo", filter_lost_elements=True, label_fields=["class_labels"]))
+                    A.Compose(T, bbox_params=A.BboxParams(format="yolo", filter_lost_elements=True, label_fields=["class_labels"], min_visibility=0.5))
                     if self.contains_spatial
                     else A.Compose(T)
                 )
