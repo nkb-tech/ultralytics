@@ -31,7 +31,7 @@ __all__ = (
     "v11Detect",
     "PostDetectONNXNMS",
     "PostDetectONNXNMS",
-    "DetectTwoHeads"
+    "MultiAttributeDetect"
 )
 
 
@@ -930,72 +930,114 @@ class PostDetectONNXNMS(PostDetectTRTNMS):
         selected_scores = max_score[X, Y, None]
         X = X.unsqueeze(1).float()
         return torch.cat([X, selected_boxes, selected_scores, selected_categories], 1)
-
-class DetectTwoHeads(Detect):
+    
+class MultiAttributeDetect(nn.Module):
     """
-    Расширенная голова детекции YOLOv8, которая предсказывает:
-        - основной класс объекта (nc)
-        - статус повреждения (dc: damaged / undamaged)
+    YOLOv8 Detection head with additional attribute classification heads.
+    Supports multiple classification outputs (e.g. class + damage status)
     """
 
-    def __init__(self, args, ch=()):
+    dynamic = False  # force grid reconstruction
+    export = False   # export mode
+    end2end = False  # end2end
+    max_det = 300    # max detections
+    shape = None
+    anchors = torch.empty(0)  # init
+    strides = torch.empty(0)  # init
+
+    def __init__(self, nc=80, nc2=2, ch=()):
         """
         Args:
-            nc: число основных классов (например, car, truck, art...)
-            dc: число классов повреждений (damaged / undamaged)
-            ch: список числа каналов на каждом уровне P3, P4, P5
+            nc (int): Number of main classes (e.g., 'car', 'truck')
+            nc2 (int): Number of secondary attributes (e.g., 'damaged', 'undamaged')
+            ch (tuple): Input channels per detection layer
         """
-        nc = args[0]
-        dc = args[1]
-        super().__init__(nc=nc, ch=ch)
+        super().__init__()
         self.nc = nc
-        self.dc = dc
-        self.nl = len(ch)
+        self.nc2 = nc2
+        self.nl = len(ch)  # number of detection layers
+        self.reg_max = 16
+        self.no_base = self.reg_max * 4  # regression output size
+        self.no_main = self.nc           # primary classification
+        self.no_attr = self.nc2          # secondary classification
+        self.no_total = self.no_base + self.no_main + self.no_attr  # total output size
 
-        # Заменяем голову на две параллельные
+        self.stride = torch.zeros(self.nl)
+
+        c2, c3, c4 = (
+            max((16, ch[0] // 4, self.reg_max * 4)),
+            max(ch[0], min(self.nc, 100)),
+            max(ch[0], min(self.nc2, 100))
+        )
+
+        # Regression branch
         self.cv2 = nn.ModuleList(
-            nn.Sequential(
-                Conv(x, self.no_conv_base, 1, act=False),  # base head: bbox + conf + class
-            ) for x in ch
+            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
         )
 
-        # Дополнительная голова для damage classification
-        self.cv_damage = nn.ModuleList(
-            nn.Conv2d(x, dc, 1) for x in ch
+        # Main class branch
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch
         )
 
-    @property
-    def no_conv_base(self):
-        """Num in original head: 4 (bbox) + 1 (conf) + nc (classes)"""
-        return 4 + 1 + self.nc
+        # Attribute branch
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nc2, 1)) for x in ch
+        )
 
-    @property
-    def no_total(self):
-        """Total num outputs: base_head + damage_head"""
-        return self.no_conv_base + self.dc
+        self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+
+        # End-to-end support
+        if self.end2end:
+            self.one2one_cv2 = copy.deepcopy(self.cv2)
+            self.one2one_cv3 = copy.deepcopy(self.cv3)
+            self.one2one_cv4 = copy.deepcopy(self.cv4)
+
+    def pre_forward(self, x):
+        """Forward pass without inference logic."""
+        out = []
+        for i in range(self.nl):
+            reg = self.cv2[i](x[i])
+            cls = self.cv3[i](x[i])
+            attr = self.cv4[i](x[i])
+            out.append(torch.cat([reg, cls, attr], dim=1))
+        return out
 
     def forward(self, x):
-        z = []
-        for i in range(self.nl):
-            y_base = self.cv2[i](x[i])
-            y_damage = self.cv_damage[i](x[i])
-            y = torch.cat((y_base, y_damage), dim=1)
-            z.append(y)
+        """Main forward pass with optional training/inference paths."""
+        x = self.pre_forward(x)
         if self.training:
-            return z
+            return x  # Training path
+        y = self._inference(x)
+        return y if self.export else (y, x)
+
+    def _inference(self, x):
+        """Decode predicted bounding boxes and class probabilities."""
+        shape = x[0].shape  # BCHW
+        x_cat = torch.cat([xi.view(shape[0], self.no_total, -1) for xi in x], 2)
+
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
+            self.shape = shape
+
+        if self.export and self.format in {"tflite", "edgetpu"}:
+            box = x_cat[:, :self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 : self.reg_max * 4 + self.nc]
+            attr = x_cat[:, self.reg_max * 4 + self.nc :]
         else:
-            return torch.cat(z, 1)
+            box, cls, attr = x_cat.split((self.reg_max * 4, self.nc, self.nc2), 1)
 
+        dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+        return torch.cat((dbox, cls.sigmoid(), attr.sigmoid()), 1)
 
-    def inference(self, x):
-        """Return [boxes, scores]"""
-        outputs = self.forward(x)
-        results = []
-        for out in outputs:
-            bboxes, probs = out.split([4 + 1 + self.nc, self.dc], dim=1)
-            bboxes_xyxy = self.decode_boxes(bboxes)
-            results.append((bboxes_xyxy, probs))
-        return results
+    def decode_bboxes(self, bboxes, anchors):
+        """Decode bounding boxes."""
+        return dist2bbox(bboxes, anchors, xywh=True, dim=1)
 
-    def decode_boxes(self, x):
-        return x[:, :4]
+    def bias_init(self):
+        """Initialize biases."""
+        m = self
+        for a, b, c, s in zip(m.cv2, m.cv3, m.cv4, m.stride):
+            a[-1].bias.data[:] = 1.0  # box
+            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls
+            c[-1].bias.data[:m.nc2] = math.log(5 / m.nc2 / (640 / s) ** 2)  # attr

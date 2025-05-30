@@ -89,6 +89,7 @@ from .head import (
     v11Detect,
     PostDetectTRTNMS,
     PostDetectONNXNMS,
+    MultiAttributeDetect
 )
 from .transformer import (
     AIFI,
@@ -164,6 +165,7 @@ __all__ = (
     "v10Pose",
     "v10Segment",
     "v11Detect",
+    "MultiAttributeDetect",
     "PostDetectTRTNMS",
     "PostDetectONNXNMS",
     "ImagePoolingAttn",
