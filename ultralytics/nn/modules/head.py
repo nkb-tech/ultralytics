@@ -31,6 +31,7 @@ __all__ = (
     "v11Detect",
     "PostDetectONNXNMS",
     "PostDetectONNXNMS",
+    "DetectTwoHeads"
 )
 
 
@@ -929,3 +930,72 @@ class PostDetectONNXNMS(PostDetectTRTNMS):
         selected_scores = max_score[X, Y, None]
         X = X.unsqueeze(1).float()
         return torch.cat([X, selected_boxes, selected_scores, selected_categories], 1)
+
+class DetectTwoHeads(Detect):
+    """
+    Расширенная голова детекции YOLOv8, которая предсказывает:
+        - основной класс объекта (nc)
+        - статус повреждения (dc: damaged / undamaged)
+    """
+
+    def __init__(self, args, ch=()):
+        """
+        Args:
+            nc: число основных классов (например, car, truck, art...)
+            dc: число классов повреждений (damaged / undamaged)
+            ch: список числа каналов на каждом уровне P3, P4, P5
+        """
+        nc = args[0]
+        dc = args[1]
+        super().__init__(nc=nc, ch=ch)
+        self.nc = nc
+        self.dc = dc
+        self.nl = len(ch)
+
+        # Заменяем голову на две параллельные
+        self.cv2 = nn.ModuleList(
+            nn.Sequential(
+                Conv(x, self.no_conv_base, 1, act=False),  # base head: bbox + conf + class
+            ) for x in ch
+        )
+
+        # Дополнительная голова для damage classification
+        self.cv_damage = nn.ModuleList(
+            nn.Conv2d(x, dc, 1) for x in ch
+        )
+
+    @property
+    def no_conv_base(self):
+        """Num in original head: 4 (bbox) + 1 (conf) + nc (classes)"""
+        return 4 + 1 + self.nc
+
+    @property
+    def no_total(self):
+        """Total num outputs: base_head + damage_head"""
+        return self.no_conv_base + self.dc
+
+    def forward(self, x):
+        z = []
+        for i in range(self.nl):
+            y_base = self.cv2[i](x[i])
+            y_damage = self.cv_damage[i](x[i])
+            y = torch.cat((y_base, y_damage), dim=1)
+            z.append(y)
+        if self.training:
+            return z
+        else:
+            return torch.cat(z, 1)
+
+
+    def inference(self, x):
+        """Return [boxes, scores]"""
+        outputs = self.forward(x)
+        results = []
+        for out in outputs:
+            bboxes, probs = out.split([4 + 1 + self.nc, self.dc], dim=1)
+            bboxes_xyxy = self.decode_boxes(bboxes)
+            results.append((bboxes_xyxy, probs))
+        return results
+
+    def decode_boxes(self, x):
+        return x[:, :4]
