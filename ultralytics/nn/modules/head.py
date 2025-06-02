@@ -1005,11 +1005,39 @@ class MultiAttributeDetect(nn.Module):
 
     def forward(self, x):
         """Main forward pass with optional training/inference paths."""
+        if self.end2end:
+            return self.forward_end2end(x)
         x = self.pre_forward(x)
         if self.training:
-            return x  # Training path
+            return x
         y = self._inference(x)
         return y if self.export else (y, x)
+
+    def forward_end2end(self, x):
+        """
+        Forward pass для end2end режима.
+        Возвращает словарь с one2many и one2one.
+        """
+        x_detach = [xi.detach() for xi in x]
+        # one2one (copy)
+        one2one = [
+            torch.cat((self.one2one_cv2[i](x_detach[i]),
+                       self.one2one_cv3[i](x_detach[i]),
+                       self.one2one_cv4[i](x_detach[i])), dim=1)
+            for i in range(self.nl)
+        ]
+        # one2many (forward)
+        for i in range(self.nl):
+            x[i] = torch.cat((self.cv2[i](x[i]),
+                              self.cv3[i](x[i]),
+                              self.cv4[i](x[i])), dim=1)
+
+        if self.training:
+            return {"one2many": x, "one2one": one2one}
+
+        # inference one2one
+        y = self._inference(one2one)
+        return y if self.export else (y, {"one2many": x, "one2one": one2one})
 
     def _inference(self, x):
         """Decode predicted bounding boxes and class probabilities."""
@@ -1041,3 +1069,10 @@ class MultiAttributeDetect(nn.Module):
             a[-1].bias.data[:] = 1.0  # box
             b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls
             c[-1].bias.data[:m.nc2] = math.log(5 / m.nc2 / (640 / s) ** 2)  # attr
+
+        if self.end2end:
+            # Инициализируем one2one_ветки
+            for a, b, c, s in zip(m.one2one_cv2, m.one2one_cv3, m.one2one_cv4, m.stride):
+                a[-1].bias.data[:] = 1.0
+                b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)
+                c[-1].bias.data[:m.nc2] = math.log(5 / m.nc2 / (640 / s) ** 2)
