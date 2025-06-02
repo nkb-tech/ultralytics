@@ -307,7 +307,7 @@ class DetectionModel(BaseModel):
 
         # Build strides
         m = self.model[-1]  # Detect()
-        if isinstance(m, (Detect, v11Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
+        if isinstance(m, (Detect, v11Detect, MultiAttributeDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
                 Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM, Detect_DyHead_Prune, 
                 Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Pose, Pose_LSCD, Pose_TADDH, OBB, OBB_LSCD, OBB_TADDH,
                 Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH, Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetec
@@ -956,7 +956,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             m = getattr(torch.nn, m[3:]) if "nn." in m else globals()[m]  # get module
         except:
             pass
-
+        
+        nc2 = d.get("nc2", None)
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
