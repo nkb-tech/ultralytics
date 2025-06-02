@@ -1003,10 +1003,21 @@ class Boxes(BaseTensor):
         if boxes.ndim == 1:
             boxes = boxes[None, :]
         n = boxes.shape[-1]
-        assert n in {6, 7}, f"expected 6 or 7 values but got {n}"  # xyxy, track_id, conf, cls
-        super().__init__(boxes, orig_shape)
-        self.is_track = n == 7
-        self.orig_shape = orig_shape
+        
+      # Standard detection format
+        if n in {6, 7}:
+            super().__init__(boxes, orig_shape)
+            self.is_track = n == 7
+            self.orig_shape = orig_shape
+
+        # Dual-class detection format
+        elif n in {8, 9}:
+            super().__init__(boxes, orig_shape)
+            self.is_track = n == 9
+            self.orig_shape = orig_shape
+
+        else:
+            raise AssertionError(f"Expected box data to have 6, 7, 8, or 9 columns. Got {n}")
 
     @property
     def xyxy(self):
@@ -1040,7 +1051,7 @@ class Boxes(BaseTensor):
             >>> print(conf_scores)
             tensor([0.9000])
         """
-        return self.data[:, -2]
+        return self.data[:, 4]
 
     @property
     def cls(self):
@@ -1057,8 +1068,24 @@ class Boxes(BaseTensor):
             >>> class_ids = boxes.cls
             >>> print(class_ids)  # tensor([0., 2., 1.])
         """
-        return self.data[:, -1]
+        return self.data[:, 5]
 
+    @property
+    def conf2(self):
+        """Returns secondary confidence scores (if available)."""
+        n = self.data.shape[-1]
+        if n >= 8:
+            return self.data[:, 6]
+        return None
+
+    @property
+    def cls2(self):
+        """Returns secondary class labels (if available)."""
+        n = self.data.shape[-1]
+        if n >= 8:
+            return self.data[:, 7]
+        return None
+    
     @property
     def id(self):
         """
@@ -1082,7 +1109,12 @@ class Boxes(BaseTensor):
             - This property is only available when tracking is enabled (i.e., when `is_track` is True).
             - The tracking IDs are typically used to associate detections across multiple frames in video analysis.
         """
-        return self.data[:, -3] if self.is_track else None
+        n = self.data.shape[-1]
+        if n == 9 and self.is_track:
+            return self.data[:, 8]
+        if n == 7 and self.is_track:
+            return self.data[:, 6]
+        return None
 
     @property
     @lru_cache(maxsize=2)  # maxsize 1 should suffice
