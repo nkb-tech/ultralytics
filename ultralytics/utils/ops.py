@@ -172,6 +172,7 @@ def non_max_suppression(
     labels=(),
     max_det=300,
     nc=0,  # number of classes (optional)
+    nc2=0,  # number of extra classes (optional)
     max_time_img=0.05,
     max_nms=30000,
     max_wh=7680,
@@ -198,6 +199,7 @@ def non_max_suppression(
             output by a dataloader, with each label being a tuple of (class_index, x1, y1, x2, y2).
         max_det (int): The maximum number of boxes to keep after NMS.
         nc (int, optional): The number of classes output by the model. Any indices after this will be considered masks.
+        nc2 (int, optional): Additional number of classes after 'nc' (e.g., for models with two classification heads).
         max_time_img (float): The maximum time (seconds) for processing one image.
         max_nms (int): The maximum number of boxes into torchvision.ops.nms().
         max_wh (int): The maximum box width and height in pixels.
@@ -230,11 +232,10 @@ def non_max_suppression(
         #     for pred in output
         # ]
         return output
-
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
     nc = nc or (prediction.shape[1] - 4)  # number of classes
-    nm = prediction.shape[1] - nc - 4  # number of masks
-    mi = 4 + nc  # mask start index
+    nm = prediction.shape[1] - nc - nc2 - 4  # number of masks
+    mi = 4 + nc + nc2  # mask start index now includes nc2
     xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
 
     # Settings
@@ -259,7 +260,7 @@ def non_max_suppression(
         # Cat apriori labels if autolabelling
         if labels and len(labels[xi]) and not rotated:
             lb = labels[xi]
-            v = torch.zeros((len(lb), nc + nm + 4), device=x.device)
+            v = torch.zeros((len(lb), nc + nc2 + nm + 4), device=x.device)
             v[:, :4] = xywh2xyxy(lb[:, 1:5])  # box
             v[range(len(lb)), lb[:, 0].long() + 4] = 1.0  # cls
             x = torch.cat((x, v), 0)
@@ -268,13 +269,17 @@ def non_max_suppression(
         if not x.shape[0]:
             continue
 
-        # Detections matrix nx6 (xyxy, conf, cls)
-        box, cls, mask = x.split((4, nc, nm), 1)
-
         if multi_label:
-            i, j = torch.where(cls > conf_thres)
-            x = torch.cat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
-        else:  # best class only
+            raise NotImplementedError("multi_label=True is not implemented yet.") # for dual-class models
+        
+        # Detections matrix nx6+ (xyxy, conf, cls, cls2, mask...)
+        if nc2 > 0:
+            box, cls, cls2, mask = x.split((4, nc, nc2, nm), 1)
+            conf, j = cls.max(1, keepdim=True)
+            conf2, j2 = cls2.max(1, keepdim=True)
+            x = torch.cat((box, conf, j.float(), conf2.float(), j2.float(), mask), 1)[conf.view(-1) > conf_thres]
+        else:
+            box, cls, mask = x.split((4, nc, nm), 1)
             conf, j = cls.max(1, keepdim=True)
             x = torch.cat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]
 

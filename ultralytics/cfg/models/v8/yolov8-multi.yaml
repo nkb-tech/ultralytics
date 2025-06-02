@@ -2,7 +2,7 @@
 # YOLOv8 object detection model with P3-P5 outputs. For Usage examples see https://docs.ultralytics.com/tasks/detect
 
 # Parameters
-nc: 5 # number of classes
+nc: 1 # number of classes
 nc2: 2
 
 scales: # model compound scaling constants, i.e. 'model=yolov8n.yaml' will call yolov8.yaml with scale 'n'
