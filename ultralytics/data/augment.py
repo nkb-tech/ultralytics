@@ -2033,9 +2033,10 @@ class RandomShadows(ImageOnlyTransform):
             
         return result
 
-    def __call__(self, data):
-        img = data.pop("img")
-        data["img"] = self.apply(img)
+    def __call__(self, data, force_apply=False):
+        if self.should_apply(force_apply=force_apply):
+            img = data.pop("img")
+            data["img"] = self.apply(img)
         return data
     
     def get_transform_init_args_names(self):
@@ -2726,7 +2727,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         max_width_ratio=1.0,
         min_intensity=0.5,
         max_intensity=1.0,
-        p=0.5
+        p=hyp.shadow,
     )
     mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic)
     affine = RandomPerspective(
