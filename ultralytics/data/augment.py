@@ -72,40 +72,46 @@ class RandomCropLarge(DualTransform):
 
     def __init__(
         self,
-        crop_size: int = 640,
-        threshold: int = 1024,
+        crop_size: int = 1024,
+        threshold: int = 1024, # определяем с насколько больших изображений мы будем делать случайный кроп 
         erosion_factor: float = 0.0,
         p: float = 1.0
     ):
         super().__init__(p=p)
         self.crop_size = crop_size
         self.threshold = threshold
-        self.random_crop = A.RandomCrop(height=crop_size, width=crop_size, p=1.0)
+        self.random_crop = A.RandomCrop(height=crop_size, width=crop_size, p=1.0) # используется для получения background 
         self.safe_fixed_crop = SafeFixedRandomCrop(
             size=crop_size,
             erosion_factor=erosion_factor,
             p=1.0
         )
+
+    def _use_random_crop(self, height: int, width: int) -> bool:
+        """решает, можно ли брать жесткий RandomCrop(640×640)"""
+        return (
+                height >= self.crop_size and width >= self.crop_size  # кроп поместится
+        ) and (
+                height > self.threshold or width > self.threshold  # картинка достаточно «большая»
+        )
         
     def apply(self, img, **params):
         height, width = img.shape[:2]
-        if height > self.threshold or width > self.threshold:
+        if self._use_random(height, width):
             return self.random_crop.apply(img, **params)
         else:
             return self.safe_fixed_crop.apply(img, **params)
 
     def apply_to_bboxes(self, bboxes: list[list[float]], **params) -> list[list[float]]:
-        image_shape = params["shape"]
-        if image_shape[0] > self.threshold or image_shape[1] > self.threshold:
+        height, width = params["shape"][:2]
+        if self._use_random(height, width):
             return self.random_crop.apply_to_bboxes(bboxes, **params)
         else:
             return self.safe_fixed_crop.apply_to_bboxes(bboxes, **params)
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
-        image_shape = params["shape"]
-        height, width = image_shape[:2]
-
-        if height > self.threshold or width > self.threshold:
+        height, width = params["shape"][:2]
+        if self._use_random(height, width):
             return self.random_crop.get_params_dependent_on_data(params, data)
         else:
             return self.safe_fixed_crop.get_params_dependent_on_data(params, data)
@@ -2276,6 +2282,39 @@ class Albumentations:
                 if args is not None:
                     self.aug_params = {args.get(k,None) if args.get(k,None) is not None else default_params[k] for k in default_params.keys()}
 
+                # T = [
+                #
+                #     A.OneOf([
+                #         RandomCropLarge(
+                #             crop_size=self.hyp.crop_size,
+                #             threshold=1024,
+                #             p=0.1
+                #         ),
+                #         SafeFixedRandomCrop(
+                #             size=self.hyp.crop_size,
+                #             p=0.9
+                #         ),
+                #     ], p=1.0),
+                #
+                #     A.PixelDropout(
+                #         dropout_prob=self.hyp.pixel_dropout_prob,
+                #         drop_value=self.hyp.pixel_drop_value,
+                #         p=self.hyp.p_pixeldrop
+                #     ),
+                #     A.RandomRain(),
+                #     A.RandomSnow(),
+                #     A.PlasmaBrightnessContrast(),
+                #
+                #     A.CLAHE(clip_limit=self.hyp.clahe_clip, p=self.hyp.p_clahe),
+                #     A.RandomBrightnessContrast(
+                #             brightness_limit=self.hyp.bright_limit,
+                #             contrast_limit=self.hyp.contrast_limit,
+                #             p=self.hyp.p_bricon
+                #     ),
+                #     A.Sharpen(p=self.hyp.p_sharpen),
+                #     A.ToGray(p=self.hyp.p_gray),
+                # ]
+
                 T = [
 
                     A.OneOf([
@@ -2293,24 +2332,18 @@ class Albumentations:
                     A.PixelDropout(
                         dropout_prob=self.hyp.pixel_dropout_prob,
                         drop_value=self.hyp.pixel_drop_value,
-                        p=0.3
+                        p=self.hyp.p_pixeldrop
                     ),
-
-                    A.RandomSnow(
-                        snow_point_range=(0.1, self.hyp.snow_max),
-                        brightness_coeff=self.hyp.snow_bright,
-                        p=self.hyp.p_fog_snow,
-                    ),
-
                     A.OneOf([
-                        A.CLAHE(clip_limit=self.hyp.clahe_clip, p=1.0),
-                        A.RandomBrightnessContrast(
-                            brightness_limit=(-self.hyp.bright_limit, self.hyp.bright_limit),
-                            contrast_limit=(-self.hyp.contrast_limit, self.hyp.contrast_limit),
-                            p=1.0,
-                        ),
-                    ], p=self.hyp.p_color),
-
+                        A.RandomRain(p=self.hyp.p_rain),
+                        A.RandomSnow(p=self.hyp.p_snow),
+                    ], p=0.1),
+                    A.RandomBrightnessContrast(
+                        brightness_limit=self.hyp.bright_limit,
+                        contrast_limit=self.hyp.contrast_limit,
+                        p=self.hyp.p_bricon
+                    ),
+                    A.Sharpen(p=self.hyp.p_sharpen),
                     A.ToGray(p=self.hyp.p_gray),
                 ]
 

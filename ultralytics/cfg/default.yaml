@@ -133,7 +133,7 @@ albu_brightness: 0.3
 albu_contrast: 0.4 
 albu_saturation: 0.3 
 albu_hue: 0.3
-crop_size: 640
+crop_size: 1024
 pixel_dropout_prob: 0.02
 pixel_drop_value: 0
 fog_max: 0.8
@@ -141,11 +141,18 @@ fog_alpha: 0.05
 snow_max: 0.25
 snow_bright: 2.0
 clahe_clip: 2.0
+p_clahe: 0.0
 bright_limit: 0.2
+p_sharpen: 0.0
 contrast_limit: 0.2
+p_bricon: 0.0
 p_fog_snow: 0.3
+p_pixeldrop: 0.0
 p_color: 0.2
 p_gray: 0.2
+p_rain: 0.0
+p_snow: 0.0
+p_BrightnessContrast: 0.0
 
 # Custom config.yaml ---------------------------------------------------------------------------------------------------
 cfg: # (str, optional) for overriding defaults.yaml
