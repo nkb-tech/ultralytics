@@ -15,6 +15,11 @@ from ultralytics.data.dataset import (
     YOLOWeightedDataset,
     YOLOMultiModalDataset,
 )
+
+from ultralytics.data.sahi_dataset import (
+    YOLOSAHIDataset,
+)
+
 from ultralytics.data.loaders import (
     LOADERS,
     LoadImagesAndVideos,
@@ -92,6 +97,8 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         dataset = YOLOMultiModalDataset
     elif cfg.weighted and mode == "train":
         dataset = YOLOWeightedDataset
+    elif cfg.sahi:
+        dataset = YOLOSAHIDataset
     else:
         dataset = YOLODataset
 
@@ -100,6 +107,9 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         imgsz=cfg.imgsz,
         min_size=cfg.min_size,
         batch_size=batch,
+        cut_strategy=cfg.cut_strategy,
+        slice_size=cfg.slice_size,
+        overlap_ratio=cfg.overlap_ratio,
         augment=mode == "train",  # augmentation
         hyp=cfg,  # TODO: probably add a get_hyps_from_cfg function
         rect=cfg.rect or rect,  # rectangular batches
