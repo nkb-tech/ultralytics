@@ -37,7 +37,7 @@ class BaseDataset(Dataset):
         classes (list): List of included classes. Default is None.
         fraction (float): Fraction of dataset to utilize. Default is 1.0 (use all data).
         min_size (int, optional): Minimum bbox size. Defaults to 20.
-        pre_resize (bool, optional): If True, images are resized before augmentation to speed up training. Defaults to False.
+        sahi (bool, optional): If False, images are resized before augmentation to speed up training. Defaults to False.
 
 
     Attributes:
@@ -65,7 +65,7 @@ class BaseDataset(Dataset):
         classes=None,
         fraction=1.0,
         min_size=20,
-        pre_resize=False,
+        sahi=False,
     ):
         """Initialize BaseDataset with given configuration and options."""
         super().__init__()
@@ -84,7 +84,7 @@ class BaseDataset(Dataset):
         self.batch_size = batch_size
         self.stride = stride
         self.pad = pad
-        self.pre_resize = pre_resize
+        self.sahi = sahi
         if self.rect:
             assert self.batch_size is not None
             self.set_rectangle()
@@ -178,7 +178,7 @@ class BaseDataset(Dataset):
             h0, w0 = im.shape[:2]
 
             # print(f"[load_image] #{i:05d}  ORIG  {h0}x{w0}")
-            if self.pre_resize:
+            if not self.sahi:
                 im = self._resize(im, h0, w0, rect_mode)
             # print(f"[load_image] #{i:05d}  AFTER load_image() -> {im.shape[0]}x{im.shape[1]}")
 
@@ -208,7 +208,7 @@ class BaseDataset(Dataset):
 
         h0, w0 = im.shape[:2]  # orig hw
         # print(f"[load_image] #{i:05d}  ORIG  {h0}x{w0}")
-        if self.pre_resize:
+        if not self.sahi:
             im = self._resize(im, h0, w0, rect_mode)
         # print(f"[load_image] #{i:05d}  AFTER load_image() -> {im.shape[0]}x{im.shape[1]}")
 

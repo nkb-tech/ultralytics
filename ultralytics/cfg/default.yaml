@@ -183,3 +183,9 @@ reg_decay: 0.1
 reg_decay_step: 10
 do_prune: True
 do_finetune: True
+
+# SAHI settings -------------------------------------------------------------------------------------------------
+sahi: False #  if True,  
+cut_strategy: grid # grid or single-crop
+slice_size: 640 # let be equal to imgsz param
+overlap_ratio: 0.2
