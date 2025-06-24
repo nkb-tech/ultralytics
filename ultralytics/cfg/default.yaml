@@ -189,3 +189,5 @@ sahi: False #  if True,
 cut_strategy: grid # grid or single-crop
 slice_size: 640 # let be equal to imgsz param
 overlap_ratio: 0.2
+crop_threshold: 1024  # минимальная площадь изображения для RandomCropLarge
+bg_crop_prob: 0.1       # вероятность применения RandomCropLarge (увеличение background)

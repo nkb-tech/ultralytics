@@ -12,7 +12,7 @@ from .dataset import (
     YOLOWeightedDataset,
 )
 from .sahi_dataset import (
-    YOLOSAHIDataset,
+    SAHIDataset,
 )
 
 __all__ = (
@@ -24,7 +24,7 @@ __all__ = (
     "YOLOConcatDataset",
     "YOLOWeightedDataset",
     "GroundingDataset",
-    "YOLOSAHIDataset",
+    "SAHIDataset",
     "build_yolo_dataset",
     "build_grounding",
     "build_dataloader",

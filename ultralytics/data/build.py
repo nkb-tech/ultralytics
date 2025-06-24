@@ -17,7 +17,7 @@ from ultralytics.data.dataset import (
 )
 
 from ultralytics.data.sahi_dataset import (
-    YOLOSAHIDataset,
+    SAHIDataset,
 )
 
 from ultralytics.data.loaders import (
@@ -98,7 +98,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
     elif cfg.weighted and mode == "train":
         dataset = YOLOWeightedDataset
     elif cfg.sahi:
-        dataset = YOLOSAHIDataset
+        dataset = SAHIDataset
     else:
         dataset = YOLODataset
 
