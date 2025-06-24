@@ -66,6 +66,7 @@ class BaseDataset(Dataset):
         fraction=1.0,
         min_size=20,
         sahi=False,
+        **args,
     ):
         """Initialize BaseDataset with given configuration and options."""
         super().__init__()

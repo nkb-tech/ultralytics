@@ -10,7 +10,6 @@ import numpy as np
 import torch
 from PIL import Image
 
-from numba import njit
 from ultralytics.utils import LOGGER, colorstr
 from ultralytics.utils.checks import check_version
 from ultralytics.utils.instance import Instances
@@ -2710,7 +2709,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         [
             pre_transform,
             MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
-            Albumentations(p=1.0, args=albu_args),
+            Albumentations(p=1.0, hyp = hyp, args=albu_args),
             #RandomGlitche(p=0.6),
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
             RandomFlip(direction="vertical", p=hyp.flipud),
