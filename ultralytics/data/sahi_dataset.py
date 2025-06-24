@@ -5,7 +5,19 @@ import cv2
 from copy import deepcopy
 from .dataset import YOLODataset
 
-class YOLOSAHIDataset(YOLODataset):
+from .augment import (
+    Compose,
+    Format,
+    Instances,
+    LetterBox,
+    RandomLoadText,
+    classify_augmentations,
+    classify_transforms,
+    v8_transforms,
+    crop_transforms,
+)
+
+class SAHIDataset(YOLODataset):
     def __init__(
         self,
         img_path,
@@ -130,3 +142,19 @@ class YOLOSAHIDataset(YOLODataset):
         slice_labels["cls"] = np.array(slice_labels["cls"], dtype=np.float32)
         slice_labels["bboxes"] = np.array(slice_labels["bboxes"], dtype=np.float32)
         return slice_labels
+    
+    def build_transforms(self, hyp=None):
+        """Builds and appends transforms based on cut_strategy."""
+        if self.cut_strategy == "grid":
+            transforms = v8_transforms(
+                dataset=self,
+                imgsz=self.slice_size,
+                hyp=hyp,
+                stretch=False
+            )
+        elif self.cut_strategy == "random_crop":
+            transforms = crop_transforms(imgsz=self.slice_size, hyp = hyp)
+        else:
+            raise ValueError(f"Unknown cut strategy: {self.cut_strategy}")
+
+        return transforms
