@@ -22,17 +22,19 @@ class SAHIDataset(YOLODataset):
         self,
         img_path,
         cut_strategy="grid",
-        slice_size=640,
+        crop_size=640,
         overlap_ratio=0.2,
         *args,
         **kwargs
     ):
         """Initialize SAHI-aware dataset."""
-        super().__init__(img_path=img_path, *args, **kwargs)
         self.cut_strategy = cut_strategy
-        self.slice_size = slice_size
+        self.crop_size = crop_size
         self.overlap_ratio = overlap_ratio
-        self.slice_indices = self._precompute_slices()  # Список (img_idx, slice_idx)
+        self.use_slicing = cut_strategy == "grid"
+        super().__init__(img_path=img_path, *args, **kwargs)
+        if self.use_slicing:
+            self.slice_indices = self._precompute_slices()  # Список (img_idx, slice_idx)
 
     def _precompute_slices(self):
         """Предвычисляем количество слайсов на каждое изображение для grid стратегии."""
@@ -40,24 +42,24 @@ class SAHIDataset(YOLODataset):
         for idx in range(self.ni):
             # Загружаем изображение (без resize)
             im, (h0, w0), _ = self.load_image(idx)
-            num_slices_h = int(np.ceil(h0 / (self.slice_size * (1 - self.overlap_ratio))))
-            num_slices_w = int(np.ceil(w0 / (self.slice_size * (1 - self.overlap_ratio))))
+            num_slices_h = int(np.ceil(h0 / (self.crop_size * (1 - self.overlap_ratio))))
+            num_slices_w = int(np.ceil(w0 / (self.crop_size * (1 - self.overlap_ratio))))
             total_slices = num_slices_h * num_slices_w
             slice_indices.extend([(idx, s) for s in range(total_slices)])
         return slice_indices
 
     def __len__(self):
-        """Возвращаем общее количество слайсов."""
-        return len(self.slice_indices)
+        if self.use_slicing:
+            return len(self.slice_indices)
+        else:
+            return super().__len__()
 
     def get_image_and_label(self, index):
-        """Возвращает кроп изображения и соответствующие ему аннотации."""
-        if self.cut_strategy == "grid":
+        """Возвращает изображения и соответствующие ему аннотации."""
+        if self.use_slicing:
             return self._get_grid_slice(index)
-        elif self.cut_strategy == "random_crop":
-            return self._get_random_crop(index)
         else:
-            raise ValueError(f"Unknown cut strategy: {self.cut_strategy}")
+            return super().get_image_and_label(index)
 
     def _get_grid_slice(self, index):
         """Генерирует слайс по сетке и фильтрует аннотации."""
@@ -68,8 +70,8 @@ class SAHIDataset(YOLODataset):
         # Генерация слайсов через SAHI
         sliced_image = slice_image(
             image=im,
-            slice_height=self.slice_size,
-            slice_width=self.slice_size,
+            slice_height=self.crop_size,
+            slice_width=self.crop_size,
             overlap_height_ratio=self.overlap_ratio,
             overlap_width_ratio=self.overlap_ratio,
         )
@@ -127,14 +129,14 @@ class SAHIDataset(YOLODataset):
             # Обрезаем бокс под слайс
             new_x1 = max(x1 - x_min, 0)
             new_y1 = max(y1 - y_min, 0)
-            new_x2 = min(x2 - x_min, self.slice_size)
-            new_y2 = min(y2 - y_min, self.slice_size)
+            new_x2 = min(x2 - x_min, self.crop_size)
+            new_y2 = min(y2 - y_min, self.crop_size)
 
             # Переводим в нормализованные координаты относительно слайса
-            cx_new = (new_x1 + new_x2) / 2 / self.slice_size
-            cy_new = (new_y1 + new_y2) / 2 / self.slice_size
-            w_new = (new_x2 - new_x1) / self.slice_size
-            h_new = (new_y2 - new_y1) / self.slice_size
+            cx_new = (new_x1 + new_x2) / 2 / self.crop_size
+            cy_new = (new_y1 + new_y2) / 2 / self.crop_size
+            w_new = (new_x2 - new_x1) / self.crop_size
+            h_new = (new_y2 - new_y1) / self.crop_size
 
             slice_labels["cls"].append(cls)
             slice_labels["bboxes"].append([cx_new, cy_new, w_new, h_new])
@@ -148,13 +150,30 @@ class SAHIDataset(YOLODataset):
         if self.cut_strategy == "grid":
             transforms = v8_transforms(
                 dataset=self,
-                imgsz=self.slice_size,
+                imgsz=self.crop_size,
                 hyp=hyp,
                 stretch=False
             )
         elif self.cut_strategy == "random_crop":
-            transforms = crop_transforms(imgsz=self.slice_size, hyp = hyp)
+            transforms = crop_transforms(
+                dataset=self, 
+                imgsz=self.crop_size, 
+                hyp = hyp,)
         else:
             raise ValueError(f"Unknown cut strategy: {self.cut_strategy}")
+        
+        transforms.append(
+            Format(
+                bbox_format="xywh",
+                normalize=True,
+                return_mask=self.use_segments,
+                return_keypoint=self.use_keypoints,
+                return_obb=self.use_obb,
+                batch_idx=True,
+                mask_ratio=hyp.mask_ratio,
+                mask_overlap=hyp.overlap_mask,
+                bgr=hyp.bgr if self.augment else 0.0,  # only affect training.
+            )
+        )
 
         return transforms

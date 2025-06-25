@@ -108,7 +108,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         min_size=cfg.min_size,
         batch_size=batch,
         cut_strategy=cfg.cut_strategy,
-        slice_size=cfg.slice_size,
+        crop_size=cfg.crop_size,
         overlap_ratio=cfg.overlap_ratio,
         augment=mode == "train",  # augmentation
         hyp=cfg,  # TODO: probably add a get_hyps_from_cfg function
