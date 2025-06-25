@@ -1,6 +1,4 @@
-from typing import Any, Dict, List, Tuple, Union
-import numpy as np
-
+from typing import Any
 ALBU_AVAILABLE = False
 
 try:
@@ -8,8 +6,7 @@ try:
     ALBU_AVAILABLE = True
     from albumentations import AtLeastOneBBoxRandomCrop
     from albumentations.core.transforms_interface import DualTransform
-    from albumentations.augmentations.crops.transforms import CropSizeError
-    import random
+
 except:
     ALBU_AVAILABLE = False
 
@@ -62,7 +59,7 @@ class RandomCropLarge(DualTransform):
             p=1.0
         )
 
-    def _use_random_crop(self, height: int, width: int) -> bool:
+    def _use_random(self, height: int, width: int) -> bool:
         """решает, можно ли брать жесткий RandomCrop(640×640)"""
         return (
                 height >= self.crop_size and width >= self.crop_size  # кроп поместится
@@ -94,76 +91,4 @@ class RandomCropLarge(DualTransform):
     def get_transform_init_args_names(self):
         return ("crop_size", "threshold")
 
-class SahiCropsTransform(DualTransform):
-    def __init__(
-        self,
-        crop_size: int = 640,
-        threshold: int = 1024,
-        erosion_factor: float = 0.0,
-        p: float = 1.0,
-        bg_crop_prob: float = 0.1,  # Вероятность использовать RandomCropLarge для background'а
-        always_apply: bool = False
-    ):
-        super().__init__(p=p, always_apply=always_apply)
-        self.crop_size = crop_size
-        self.threshold = threshold
-        self.erosion_factor = erosion_factor
-        self.bg_crop_prob = bg_crop_prob
-        
-        # Создаем базовые трансформы
-        self.random_crop = RandomCropLarge(height=crop_size, width=crop_size, p=1.0)
-        self.safe_fixed_crop = SafeFixedRandomCrop(
-            size=crop_size,
-            erosion_factor=erosion_factor,
-            p=1.0
-        )
-
-    def _use_random(self, height: int, width: int, has_boxes: bool) -> bool:
-        """
-        Решает, использовать ли RandomCropLarge.
-        Возвращает True только если:
-        1. Изображение достаточно большое (height > threshold или width > threshold)
-        2. Есть боксы, но мы хотим получить background (случайный выбор по bg_crop_prob)
-        """
-        if not has_boxes:
-            return False  # Если нет боксов, не используем SafeFixedRandomCrop
-            
-        return (
-            height >= self.crop_size and width >= self.crop_size and
-            (height > self.threshold or width > self.threshold) and
-            random.random() < self.bg_crop_prob
-        )
-
-    def apply(self, img: np.ndarray, **params) -> np.ndarray:
-        """Применяет кроп к изображению."""
-        height, width = img.shape[:2]
-        has_boxes = len(params.get('bboxes', [])) > 0
-        
-        if self._use_random(height, width, has_boxes):
-            return self.random_crop.apply(img, **params)
-        else:
-            return self.safe_fixed_crop.apply(img, **params)
-
-    def apply_to_bboxes(self, bboxes: List[List[float]], **params) -> List[List[float]]:
-        """Применяет кроп к bounding box'ам."""
-        height, width = params["shape"][:2]
-        has_boxes = len(bboxes) > 0
-        
-        if self._use_random(height, width, has_boxes):
-            return self.random_crop.apply_to_bboxes(bboxes, **params)
-        else:
-            return self.safe_fixed_crop.apply_to_bboxes(bboxes, **params)
-
-    def get_params_dependent_on_data(self, params: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
-        """Возвращает параметры кропа, зависящие от данных."""
-        height, width = params["shape"][:2]
-        bboxes = data.get("bboxes", [])
-        has_boxes = len(bboxes) > 0
-        
-        if self._use_random(height, width, has_boxes):
-            return self.random_crop.get_params_dependent_on_data(params, data)
-        else:
-            return self.safe_fixed_crop.get_params_dependent_on_data(params, data)
-
-    def get_transform_init_args_names(self) -> Tuple[str, ...]:
-        return ("crop_size", "threshold", "erosion_factor", "bg_crop_prob")
+         

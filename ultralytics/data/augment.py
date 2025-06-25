@@ -31,7 +31,7 @@ ALBU_AVAILABLE = False
 try:
     import albumentations as A
     ALBU_AVAILABLE = True
-    from ultralytics.data.sahi_augment import SahiCropsTransform
+    from ultralytics.data.sahi_augment import SafeFixedRandomCrop, RandomCropLarge
 except:
     ALBU_AVAILABLE = False
 
@@ -1230,7 +1230,7 @@ class RandomPerspective:
         """
         if self.pre_transform and "mosaic_border" not in labels:
             labels = self.pre_transform(labels)
-        labels.pop("ratio_pad", None)  # do not need ratio pad
+        #labels.pop("ratio_pad", None)  # do not need ratio pad
 
         img = labels["img"]
         cls = labels["cls"]
@@ -2100,7 +2100,7 @@ class Albumentations:
     compression.
     """
 
-    def __init__(self, hyp, p=1.0, task='detect', args=None):
+    def __init__(self, hyp, p=1.0, task='detect', args=None, transforms = None):
         """Initialize the transform object for YOLO bbox formatted params."""
         self.p = p
         self.hyp = hyp
@@ -2196,24 +2196,27 @@ class Albumentations:
                 self.augs_params = default_params
                 if args is not None:
                     self.aug_params = {args.get(k,None) if args.get(k,None) is not None else default_params[k] for k in default_params.keys()}
-                T = [
-                    A.PixelDropout(
-                        dropout_prob=self.hyp.pixel_dropout_prob,
-                        drop_value=self.hyp.pixel_drop_value,
-                        p=self.hyp.p_pixeldrop
-                    ),
-                    A.OneOf([
-                        A.RandomRain(p=self.hyp.p_rain),
-                        A.RandomSnow(p=self.hyp.p_snow),
-                    ], p=0.1),
-                    A.RandomBrightnessContrast(
-                        brightness_limit=self.hyp.bright_limit,
-                        contrast_limit=self.hyp.contrast_limit,
-                        p=self.hyp.p_bricon
-                    ),
-                    A.Sharpen(p=self.hyp.p_sharpen),
-                    A.ToGray(p=self.hyp.p_gray),
-                ]
+                if transforms is not None: 
+                    T = transforms
+                else:
+                    T = [
+                        A.PixelDropout(
+                            dropout_prob=self.hyp.pixel_dropout_prob,
+                            drop_value=self.hyp.pixel_drop_value,
+                            p=self.hyp.p_pixeldrop
+                        ),
+                        A.OneOf([
+                            A.RandomRain(p=self.hyp.p_rain),
+                            A.RandomSnow(p=self.hyp.p_snow),
+                        ], p=0.1),
+                        A.RandomBrightnessContrast(
+                            brightness_limit=self.hyp.bright_limit,
+                            contrast_limit=self.hyp.contrast_limit,
+                            p=self.hyp.p_bricon
+                        ),
+                        A.Sharpen(p=self.hyp.p_sharpen),
+                        A.ToGray(p=self.hyp.p_gray),
+                    ]
 
                 # Compose transforms
                 self.contains_spatial = False if task == 'classify' else check_contains_spatial(T)
@@ -2721,22 +2724,44 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
     """
     Compose из кастомных SAHI-кропов + стандартных аугментаций.
     """
+    albu_args = {
+            "dropout_prob":hyp.albu_dropout_prob if hasattr(hyp, 'albu_dropout_prob') else None,
+            "quality_lower":hyp.albu_quality_lower if hasattr(hyp, 'albu_quality_lower') else None,
+            "max_factor":hyp.albu_max_factor if hasattr(hyp, 'albu_max_factor') else None,
+            "clip_limit":hyp.albu_clip_limit if hasattr(hyp, 'albu_clip_limit') else None,
+            "brightness":hyp.albu_brightness if hasattr(hyp, 'albu_brightness') else None,
+            "contrast":hyp.albu_contrast if hasattr(hyp, 'albu_contrast') else None,
+            "saturation":hyp.albu_saturation if hasattr(hyp, 'albu_saturation') else None,
+            "hue":hyp.albu_hue if hasattr(hyp, 'albu_hue') else None,
+        }
+        
     transforms = []
-
-    transforms.append(
-        SahiCropsTransform(
-            crop_size=hyp.crop_size,
+    
+    crop_transform =  A.OneOf([
+        RandomCropLarge(
+            crop_size=imgsz,
             threshold=hyp.crop_threshold,
             erosion_factor=hyp.erosion_factor,
-            p=hyp.p_sahi_crop,
-            bg_crop_prob=hyp.bg_crop_prob
+            p=hyp.p_sahi_crop
+        ),
+        SafeFixedRandomCrop(
+            size=imgsz,
+            erosion_factor=hyp.erosion_factor,
+            p=hyp.bg_crop_prob
         )
+    ], p=1.0)
+    
+    crop_albu = Albumentations(hyp, transforms = crop_transform)
+    alb = Albumentations(p=1.0, hyp = hyp, args=albu_args)
+    affine = RandomPerspective(
+        degrees=hyp.degrees,
+        translate=hyp.translate,
+        scale=hyp.scale,
+        shear=hyp.shear,
+        perspective=hyp.perspective,
+        pre_transform = LetterBox(new_shape=(imgsz, imgsz)),
     )
-
-    alb = Albumentations(hyp=hyp, p=1.0)
-    resize = LetterBox(new_shape=(imgsz, imgsz), auto=False, scaleFill=False, scaleup=True)
-    rp = RandomPerspective(degrees=hyp.degrees, translate=hyp.translate, scale=hyp.scale,
-                          shear=hyp.shear, perspective=hyp.perspective, border=(0, 0))
+        
     misc = Compose([
         MixUp(dataset, p=hyp.mixup),
         # CutMix(dataset, p=hyp.cutmix),
@@ -2746,7 +2771,7 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
                    flip_idx=dataset.data.get("flip_idx", [])),
     ])
 
-    transforms.extend([resize, alb, rp, misc])
+    transforms.extend([crop_albu, affine, alb, misc])
     return Compose(transforms)
 
 
