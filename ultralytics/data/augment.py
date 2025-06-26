@@ -1230,7 +1230,7 @@ class RandomPerspective:
         """
         if self.pre_transform and "mosaic_border" not in labels:
             labels = self.pre_transform(labels)
-        #labels.pop("ratio_pad", None)  # do not need ratio pad
+        labels.pop("ratio_pad", None)  # do not need ratio pad
 
         img = labels["img"]
         cls = labels["cls"]
@@ -2197,7 +2197,7 @@ class Albumentations:
                 if args is not None:
                     self.aug_params = {args.get(k,None) if args.get(k,None) is not None else default_params[k] for k in default_params.keys()}
                 if transforms is not None: 
-                    T = transforms
+                    T = [transforms] if not isinstance(transforms, list) else transforms
                 else:
                     T = [
                         A.PixelDropout(
@@ -2288,7 +2288,6 @@ class Albumentations:
                 labels = Image.fromarray(self.transform(image=np.asarray(labels))["image"])
             else:
                 raise TypeError(type(labels))
-
         return labels
 
     
@@ -2742,12 +2741,12 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
             crop_size=imgsz,
             threshold=hyp.crop_threshold,
             erosion_factor=hyp.erosion_factor,
-            p=hyp.p_sahi_crop
+            p=hyp.bg_crop_prob
         ),
         SafeFixedRandomCrop(
-            size=imgsz,
+            crop_size=imgsz,
             erosion_factor=hyp.erosion_factor,
-            p=hyp.bg_crop_prob
+            p= 1 - hyp.bg_crop_prob
         )
     ], p=1.0)
     
@@ -2772,6 +2771,34 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
     ])
 
     transforms.extend([crop_albu, affine, alb, misc])
+    return Compose(transforms)
+
+def crop_val_transforms(dataset, imgsz, hyp, stretch=False):
+    """
+    Compose из кастомных SAHI-кропов + стандартных аугментаций.
+    """
+        
+    transforms = []
+    
+    crop_transform =  A.OneOf([
+        RandomCropLarge(
+            crop_size=imgsz,
+            threshold=hyp.crop_threshold,
+            erosion_factor=hyp.erosion_factor,
+            p= hyp.bg_crop_prob
+        ),
+        SafeFixedRandomCrop(
+            crop_size=imgsz,
+            erosion_factor=hyp.erosion_factor,
+            p= 1 - hyp.bg_crop_prob  
+        )
+    ], p=1.0)
+    
+    crop_albu = Albumentations(hyp, transforms = crop_transform)
+        
+    misc = Compose([LetterBox(new_shape=(imgsz, imgsz), scaleup=False)])
+
+    transforms.extend([crop_albu, misc])
     return Compose(transforms)
 
 

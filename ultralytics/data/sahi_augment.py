@@ -16,13 +16,13 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
     
     def __init__(
         self,
-        size: int = 640,
+        crop_size: int = 640,
         erosion_factor: float = 0.0,
         p: float = 1.0,
     ):
         super().__init__(
-            height=size,
-            width=size,
+            height=crop_size,
+            width=crop_size,
             erosion_factor=erosion_factor,
             p=p,
         )
@@ -54,7 +54,7 @@ class RandomCropLarge(DualTransform):
         self.threshold = threshold
         self.random_crop = A.RandomCrop(height=crop_size, width=crop_size, p=1.0) # используется для получения background 
         self.safe_fixed_crop = SafeFixedRandomCrop(
-            size=crop_size,
+            crop_size=crop_size,
             erosion_factor=erosion_factor,
             p=1.0
         )
