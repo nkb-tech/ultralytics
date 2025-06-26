@@ -2100,11 +2100,12 @@ class Albumentations:
     compression.
     """
 
-    def __init__(self, hyp, p=1.0, task='detect', args=None, transforms = None):
+    def __init__(self, hyp, p=1.0, task='detect', args=None, transforms = None, crop_bg: bool = False):
         """Initialize the transform object for YOLO bbox formatted params."""
         self.p = p
         self.hyp = hyp
         self.transform = None
+        self.crop_bg = crop_bg
         assert task in ('detect', 'classify', 'segment', 'pose'), f'Got {task}, expected yolo-like tasks.'
         prefix = colorstr(f"albumentations for {task}: ")
 
@@ -2269,14 +2270,14 @@ class Albumentations:
 
         if self.contains_spatial:
             cls = labels["cls"]
-            if len(cls):
+            if len(cls) or self.crop_bg:
                 im = labels["img"]
                 labels["instances"].convert_bbox("xywh")
                 labels["instances"].normalize(*im.shape[:2][::-1])
                 bboxes = labels["instances"].bboxes
                 # TODO: add supports of segments and keypoints
                 new = self.transform(image=im, bboxes=bboxes, class_labels=cls)  # transformed
-                if len(new["class_labels"]) > 0:  # skip update if no bbox in new im
+                if len(new["class_labels"]) > 0 or self.crop_bg:  # skip update if no bbox in new im
                     labels["img"] = new["image"]
                     labels["cls"] = np.array(new["class_labels"])
                     bboxes = np.array(new["bboxes"], dtype=np.float32)
@@ -2750,7 +2751,7 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
         )
     ], p=1.0)
     
-    crop_albu = Albumentations(hyp, transforms = crop_transform)
+    crop_albu = Albumentations(hyp, transforms = crop_transform, crop_bg=True)
     alb = Albumentations(p=1.0, hyp = hyp, args=albu_args)
     affine = RandomPerspective(
         degrees=hyp.degrees,
@@ -2794,7 +2795,7 @@ def crop_val_transforms(dataset, imgsz, hyp, stretch=False):
         )
     ], p=1.0)
     
-    crop_albu = Albumentations(hyp, transforms = crop_transform)
+    crop_albu = Albumentations(hyp, transforms = crop_transform, crop_bg= True)
         
     misc = LetterBox(new_shape=(imgsz, imgsz), scaleup=False)
 
