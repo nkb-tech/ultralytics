@@ -51,7 +51,7 @@ class Bboxes:
         assert format in _formats, f"Invalid bounding box format: {format}, format must be one of {_formats}"
         bboxes = bboxes[None, :] if bboxes.ndim == 1 else bboxes
         assert bboxes.ndim == 2
-        assert bboxes.shape[1] == 4
+        assert bboxes.shape[1] == 4, f"Invalid bboxes shape: {bboxes.shape[1]}, it should be equal 4. {bboxes}"
         self.bboxes = bboxes
         self.format = format
         # self.normalized = normalized

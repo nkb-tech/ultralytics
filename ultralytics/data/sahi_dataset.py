@@ -24,7 +24,7 @@ class SAHIDataset(YOLODataset):
         img_path,
         cut_strategy="grid",
         crop_size=640,
-        overlap_ratio=0.2,
+        overlap_ratio=0,
         *args,
         **kwargs
     ):
@@ -37,15 +37,32 @@ class SAHIDataset(YOLODataset):
         if self.use_slicing:
             self.slice_indices = self._precompute_slices()  # Список (img_idx, slice_idx)
 
+    # def _precompute_slices(self):
+    #     """Предвычисляем количество слайсов на каждое изображение для grid стратегии."""
+    #     slice_indices = []
+    #     for idx in range(self.ni):
+    #         # Загружаем изображение (без resize)
+    #         im, (h0, w0), _ = self.load_image(idx)
+    #         num_slices_h = int(np.ceil(h0 / (self.crop_size * (1 - self.overlap_ratio))))
+    #         num_slices_w = int(np.ceil(w0 / (self.crop_size * (1 - self.overlap_ratio))))
+    #         total_slices = num_slices_h * num_slices_w
+    #         slice_indices.extend([(idx, s) for s in range(total_slices)])
+    #     return slice_indices
     def _precompute_slices(self):
-        """Предвычисляем количество слайсов на каждое изображение для grid стратегии."""
+        """Предвычисляем (img_idx, slice_idx) только для существующих слайсов."""
         slice_indices = []
         for idx in range(self.ni):
-            # Загружаем изображение (без resize)
             im, (h0, w0), _ = self.load_image(idx)
-            num_slices_h = int(np.ceil(h0 / (self.crop_size * (1 - self.overlap_ratio))))
-            num_slices_w = int(np.ceil(w0 / (self.crop_size * (1 - self.overlap_ratio))))
-            total_slices = num_slices_h * num_slices_w
+
+            sliced_image = slice_image(
+                image=im,
+                slice_height=self.crop_size,
+                slice_width=self.crop_size,
+                overlap_height_ratio=self.overlap_ratio,
+                overlap_width_ratio=self.overlap_ratio,
+            )
+
+            total_slices = len(sliced_image)
             slice_indices.extend([(idx, s) for s in range(total_slices)])
         return slice_indices
 
@@ -73,7 +90,7 @@ class SAHIDataset(YOLODataset):
         """Генерирует слайс по сетке и фильтрует аннотации."""
         img_idx, slice_idx = self.slice_indices[index]
         im, (h0, w0), _ = self.load_image(img_idx)
-        labels = deepcopy(self.labels[img_idx])
+        labels = deepcopy(self.labels[img_idx])  # Копируем оригинальные метаданные
 
         # Генерация слайсов через SAHI
         sliced_image = slice_image(
@@ -83,30 +100,38 @@ class SAHIDataset(YOLODataset):
             overlap_height_ratio=self.overlap_ratio,
             overlap_width_ratio=self.overlap_ratio,
         )
-
-        # Выбираем нужный слайс
         slice_obj = sliced_image[slice_idx]
-        slice_im = slice_obj.image
-        slice_bbox = slice_obj.bbox  # (x_min, y_min, x_max, y_max)
+        slice_im = slice_obj['image']
+        start_x, start_y = slice_obj['starting_pixel']
+        slice_bbox = [start_x, start_y, start_x + self.crop_size, start_y + self.crop_size]
 
-        # Преобразуем аннотации под координаты слайса
+        # Фильтруем и преобразуем аннотации под координаты слайса
         slice_labels = self._filter_and_transform_annotations(labels, slice_bbox, h0, w0)
 
-        # Обновляем метаданные
-        label = {
-            "im_file": labels["im_file"],
-            "shape": slice_im.shape[:2],
-            "cls": slice_labels["cls"],
-            "bboxes": slice_labels["bboxes"],
-            "segments": slice_labels.get("segments", []),
-            "keypoints": slice_labels.get("keypoints", None),
-        }
+        # Обновляем копию labels вместо создания новых метаданных
+        bboxes = slice_labels["bboxes"]
+        if bboxes.shape != (0, 4):
+            bboxes = np.empty((0, 4), dtype=np.float32)
+        labels["bboxes"] = bboxes
+        assert labels["bboxes"].shape[1] == 4 
+        
+        labels["cls"] = slice_labels["cls"]
 
-        # Добавляем оригинальный размер и коэффициенты масштабирования
-        label["ori_shape"] = (h0, w0)
-        label["resized_shape"] = slice_im.shape[:2]
-        label["ratio_pad"] = (1.0, 1.0)  # Нет ресайза
-        return label
+        if "segments" in labels:
+            labels["segments"] = slice_labels.get("segments", [])
+        if "keypoints" in labels:
+            labels["keypoints"] = slice_labels.get("keypoints", None)
+
+        # Обновляем shape на размер слайса
+        labels["shape"] = slice_im.shape[:2]
+
+        # Добавляем/обновляем информацию о размерах
+        labels["ori_shape"] = (h0, w0)
+        labels["resized_shape"] = slice_im.shape[:2]
+        labels["ratio_pad"] = (1.0, 1.0)  # Нет ресайза
+        labels["img"] = slice_im
+
+        return self.update_labels_info(labels)
 
     def _filter_and_transform_annotations(self, labels, slice_bbox, h0, w0):
         """Фильтрует и трансформирует аннотации под координаты слайса."""
