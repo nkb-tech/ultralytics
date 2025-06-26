@@ -111,6 +111,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         crop_size=cfg.crop_size,
         overlap_ratio=cfg.overlap_ratio,
         augment=mode == "train",  # augmentation
+        sahi = cfg.sahi,
         hyp=cfg,  # TODO: probably add a get_hyps_from_cfg function
         rect=cfg.rect or rect,  # rectangular batches
         cache=cfg.cache or None,

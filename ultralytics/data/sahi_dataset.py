@@ -15,6 +15,7 @@ from .augment import (
     classify_transforms,
     v8_transforms,
     crop_transforms,
+    crop_val_transforms,
 )
 
 class SAHIDataset(YOLODataset):
@@ -147,18 +148,25 @@ class SAHIDataset(YOLODataset):
     
     def build_transforms(self, hyp=None):
         """Builds and appends transforms based on cut_strategy."""
-        if self.cut_strategy == "grid":
+        if self.cut_strategy == "grid" and self.augment:
             transforms = v8_transforms(
                 dataset=self,
                 imgsz=self.crop_size,
                 hyp=hyp,
                 stretch=False
             )
-        elif self.cut_strategy == "random_crop":
+        elif self.cut_strategy == "random_crop" and self.augment:
             transforms = crop_transforms(
                 dataset=self, 
                 imgsz=self.crop_size, 
-                hyp = hyp,)
+                hyp = hyp,
+                )
+        elif not self.augment:
+            transforms = crop_val_transforms(
+                dataset=self, 
+                imgsz=self.crop_size, 
+                hyp = hyp,
+                )
         else:
             raise ValueError(f"Unknown cut strategy: {self.cut_strategy}")
         
