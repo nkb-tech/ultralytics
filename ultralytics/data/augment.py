@@ -2423,7 +2423,7 @@ class Format:
                 )
             labels["masks"] = masks
         labels["img"] = self._format_img(img)
-        labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl)
+        labels["cls"] = torch.from_numpy(cls).view(-1, 1) if nl else torch.zeros(nl)
         labels["bboxes"] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
         if self.return_keypoint:
             labels["keypoints"] = torch.from_numpy(instances.keypoints)
@@ -2796,7 +2796,7 @@ def crop_val_transforms(dataset, imgsz, hyp, stretch=False):
     
     crop_albu = Albumentations(hyp, transforms = crop_transform)
         
-    misc = Compose([LetterBox(new_shape=(imgsz, imgsz), scaleup=False)])
+    misc = LetterBox(new_shape=(imgsz, imgsz), scaleup=False)
 
     transforms.extend([crop_albu, misc])
     return Compose(transforms)

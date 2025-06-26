@@ -60,7 +60,14 @@ class SAHIDataset(YOLODataset):
         if self.use_slicing:
             return self._get_grid_slice(index)
         else:
-            return super().get_image_and_label(index)
+            label = deepcopy(self.labels[index])
+            label.pop("shape", None)
+            label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(index)
+            label["ratio_pad"] = (
+                label["resized_shape"][0] / label["ori_shape"][0],
+                label["resized_shape"][1] / label["ori_shape"][1],
+            ) 
+            return self.update_labels_info(label)
 
     def _get_grid_slice(self, index):
         """Генерирует слайс по сетке и фильтрует аннотации."""

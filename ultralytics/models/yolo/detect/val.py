@@ -105,9 +105,7 @@ class DetectionValidator(BaseValidator):
         """Prepares a batch of images and annotations for validation."""
         idx = batch["batch_idx"] == si
         
-        cls = batch["cls"][idx]
-        if cls.ndim > 1 and cls.shape[-1] == 1:
-            cls = cls.squeeze(-1)
+        cls = batch["cls"][idx].squeeze(-1)
             
         bbox = batch["bboxes"][idx]
         ori_shape = batch["ori_shape"][si]
