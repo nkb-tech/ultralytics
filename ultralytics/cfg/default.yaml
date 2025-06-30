@@ -193,4 +193,5 @@ overlap_ratio: 0.2  # (float) overlap between neighboring crops (range: 0 to 1);
 sampling_rate: 0.3  # (float) portion of random crops taken from an image relative to the number of grid crops
 crop_threshold: 1024  # (int) minimum image area (in pixels) to apply RandomCropLarge (i.e., enables background cropping for images larger than this size)
 bg_crop_prob: 0.4  # (float) probability of applying RandomCropLarge (increases background-focused crops)
+scale_range: (0.7, 1.3)  # (tuple) range in which the height and width of the crop can vary during augmentation
 erosion_factor: 0.0 # (float) 0 means crop must fully contain the reference box.
