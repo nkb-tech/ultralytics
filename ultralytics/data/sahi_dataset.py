@@ -1,33 +1,13 @@
-from sahi.slicing import slice_image
-from sahi.utils.coco import Coco
-import numpy as np
-import cv2
 from copy import deepcopy
+
+import numpy as np
+
+from .augment import Format, crop_transforms, crop_val_transforms, v8_transforms
 from .dataset import YOLODataset
 
-from .augment import (
-    Compose,
-    Format,
-    Instances,
-    LetterBox,
-    RandomLoadText,
-    classify_augmentations,
-    classify_transforms,
-    v8_transforms,
-    crop_transforms,
-    crop_val_transforms,
-)
 
 class SAHIDataset(YOLODataset):
-    def __init__(
-        self,
-        img_path,
-        cut_strategy="grid",
-        crop_size=640,
-        overlap_ratio=0,
-        *args,
-        **kwargs
-    ):
+    def __init__(self, img_path, cut_strategy="grid", crop_size=640, overlap_ratio=0, *args, **kwargs):
         """Initialize SAHI-aware dataset."""
         self.cut_strategy = cut_strategy
         self.crop_size = crop_size
@@ -37,32 +17,20 @@ class SAHIDataset(YOLODataset):
         if self.use_slicing:
             self.slice_indices = self._precompute_slices()  # Список (img_idx, slice_idx)
 
-    # def _precompute_slices(self):
-    #     """Предвычисляем количество слайсов на каждое изображение для grid стратегии."""
-    #     slice_indices = []
-    #     for idx in range(self.ni):
-    #         # Загружаем изображение (без resize)
-    #         im, (h0, w0), _ = self.load_image(idx)
-    #         num_slices_h = int(np.ceil(h0 / (self.crop_size * (1 - self.overlap_ratio))))
-    #         num_slices_w = int(np.ceil(w0 / (self.crop_size * (1 - self.overlap_ratio))))
-    #         total_slices = num_slices_h * num_slices_w
-    #         slice_indices.extend([(idx, s) for s in range(total_slices)])
-    #     return slice_indices
     def _precompute_slices(self):
-        """Предвычисляем (img_idx, slice_idx) только для существующих слайсов."""
+        """Предвычисляем (img_idx, slice_idx) без использования slice_image."""
         slice_indices = []
         for idx in range(self.ni):
             im, (h0, w0), _ = self.load_image(idx)
 
-            sliced_image = slice_image(
-                image=im,
-                slice_height=self.crop_size,
-                slice_width=self.crop_size,
-                overlap_height_ratio=self.overlap_ratio,
-                overlap_width_ratio=self.overlap_ratio,
-            )
+            # Расчет количества слайсов по горизонтали и вертикали
+            step_x = int(self.crop_size * (1 - self.overlap_ratio))
+            step_y = int(self.crop_size * (1 - self.overlap_ratio))
 
-            total_slices = len(sliced_image)
+            cols = max(1, (w0 - self.crop_size) // step_x + 1)
+            rows = max(1, (h0 - self.crop_size) // step_y + 1)
+
+            total_slices = cols * rows
             slice_indices.extend([(idx, s) for s in range(total_slices)])
         return slice_indices
 
@@ -83,60 +51,66 @@ class SAHIDataset(YOLODataset):
             label["ratio_pad"] = (
                 label["resized_shape"][0] / label["ori_shape"][0],
                 label["resized_shape"][1] / label["ori_shape"][1],
-            ) 
+            )
             return self.update_labels_info(label)
 
     def _get_grid_slice(self, index):
-        """Генерирует слайс по сетке и фильтрует аннотации."""
+        """Генерирует один слайс по координатам"""
         img_idx, slice_idx = self.slice_indices[index]
         im, (h0, w0), _ = self.load_image(img_idx)
-        labels = deepcopy(self.labels[img_idx])  # Копируем оригинальные метаданные
+        labels = deepcopy(self.labels[img_idx])
 
-        # Генерация слайсов через SAHI
-        sliced_image = slice_image(
-            image=im,
-            slice_height=self.crop_size,
-            slice_width=self.crop_size,
-            overlap_height_ratio=self.overlap_ratio,
-            overlap_width_ratio=self.overlap_ratio,
-        )
-        slice_obj = sliced_image[slice_idx]
-        slice_im = slice_obj['image']
-        start_x, start_y = slice_obj['starting_pixel']
-        slice_bbox = [start_x, start_y, start_x + self.crop_size, start_y + self.crop_size]
+        # Расчет количества столбцов и строк
+        step_x = int(self.crop_size * (1 - self.overlap_ratio))
+        step_y = int(self.crop_size * (1 - self.overlap_ratio))
+        cols = max(1, (w0 - self.crop_size) // step_x + 1)
 
-        # Фильтруем и преобразуем аннотации под координаты слайса
+        # Определение координат текущего слайса
+        row = slice_idx // cols
+        col = slice_idx % cols
+
+        start_x = col * step_x
+        start_y = row * step_y
+
+        # Обрезка изображения
+        end_x = min(start_x + self.crop_size, w0)
+        end_y = min(start_y + self.crop_size, h0)
+        slice_im = im[start_y:end_y, start_x:end_x]
+        slice_bbox = [start_x, start_y, end_x, end_y]
+
+        # Фильтрация аннотаций
         slice_labels = self._filter_and_transform_annotations(labels, slice_bbox, h0, w0)
 
-        # Обновляем копию labels вместо создания новых метаданных
-        bboxes = slice_labels["bboxes"]
-        if bboxes.shape != (0, 4):
-            bboxes = np.empty((0, 4), dtype=np.float32)
-        labels["bboxes"] = bboxes
-        assert labels["bboxes"].shape[1] == 4 
-        
-        labels["cls"] = slice_labels["cls"]
+        # Обновление метаданных
+        labels.update(
+            {
+                "img": slice_im,
+                "ori_shape": (h0, w0),
+                "resized_shape": slice_im.shape[:2],
+                "ratio_pad": (1.0, 1.0),
+                "cls": slice_labels["cls"],
+            }
+        )
+
+        if slice_labels["bboxes"].size == 0:  # Если список пуст
+            labels["bboxes"] = np.empty((0, 4), dtype=np.float32)  # Форма (0, 4)
+        else:
+            # Преобразуем список в массив и проверяем форму
+            bboxes = np.array(slice_labels["bboxes"], dtype=np.float32)
+            if bboxes.ndim != 2 or bboxes.shape[1] != 4:
+                raise ValueError(f"Ожидаемая форма (N, 4), получена {bboxes.shape}")
+            labels["bboxes"] = bboxes
 
         if "segments" in labels:
             labels["segments"] = slice_labels.get("segments", [])
         if "keypoints" in labels:
             labels["keypoints"] = slice_labels.get("keypoints", None)
 
-        # Обновляем shape на размер слайса
-        labels["shape"] = slice_im.shape[:2]
-
-        # Добавляем/обновляем информацию о размерах
-        labels["ori_shape"] = (h0, w0)
-        labels["resized_shape"] = slice_im.shape[:2]
-        labels["ratio_pad"] = (1.0, 1.0)  # Нет ресайза
-        labels["img"] = slice_im
-
         return self.update_labels_info(labels)
 
     def _filter_and_transform_annotations(self, labels, slice_bbox, h0, w0):
         """Фильтрует и трансформирует аннотации под координаты слайса."""
         x_min, y_min, x_max, y_max = slice_bbox
-        img_area = h0 * w0
         slice_labels = {"cls": [], "bboxes": [], "segments": []}
 
         for i in range(len(labels["bboxes"])):
@@ -177,31 +151,26 @@ class SAHIDataset(YOLODataset):
         slice_labels["cls"] = np.array(slice_labels["cls"], dtype=np.float32)
         slice_labels["bboxes"] = np.array(slice_labels["bboxes"], dtype=np.float32)
         return slice_labels
-    
+
     def build_transforms(self, hyp=None):
         """Builds and appends transforms based on cut_strategy."""
         if self.cut_strategy == "grid" and self.augment:
-            transforms = v8_transforms(
+            transforms = v8_transforms(dataset=self, imgsz=self.crop_size, hyp=hyp, stretch=False)
+        elif self.cut_strategy == "random_crop" and self.augment:
+            transforms = crop_transforms(
                 dataset=self,
                 imgsz=self.crop_size,
                 hyp=hyp,
-                stretch=False
             )
-        elif self.cut_strategy == "random_crop" and self.augment:
-            transforms = crop_transforms(
-                dataset=self, 
-                imgsz=self.crop_size, 
-                hyp = hyp,
-                )
         elif not self.augment:
             transforms = crop_val_transforms(
-                dataset=self, 
-                imgsz=self.crop_size, 
-                hyp = hyp,
-                )
+                dataset=self,
+                imgsz=self.crop_size,
+                hyp=hyp,
+            )
         else:
             raise ValueError(f"Unknown cut strategy: {self.cut_strategy}")
-        
+
         transforms.append(
             Format(
                 bbox_format="xywh",
