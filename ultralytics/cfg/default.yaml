@@ -15,7 +15,7 @@ imgsz: 640 # (int | list) input images size as int for train and val modes, or l
 min_size: 20 # (int) min size of original image for clf task / min size of original bbox for detect task
 save: True # (bool) save train checkpoints and predict results
 save_period: -1 # (int) Save checkpoint every x epochs (disabled if < 1)
-cache: False # (bool) True/ram, low-ram, disc or False. Use cache for data loading. Use low-ram if you have unsufficient ram memory, but want better speed than False variant
+cache: False # (bool) True/ram, low-ram, disc or False. Use cache for data loading. Use low-ram if you have insufficient ram memory, but want better speed than False variant
 device: # (int | str | list, optional) device to run on, i.e. cuda device=0 or device=0,1,2,3 or device=cpu
 workers: 8 # (int) number of worker threads for data loading (per RANK if DDP)
 project: # (str, optional) project name
@@ -127,14 +127,13 @@ crop_fraction: 1.0 # (float) image crop fraction for classification (0.1-1), 1.0
 
 # Albumentations
 albu_dropout_prob: 0.1
-albu_quality_lower: 75 
+albu_quality_lower: 75
 albu_max_factor: 1.1
 albu_clip_limit: 2
 albu_brightness: 0.3
-albu_contrast: 0.4 
-albu_saturation: 0.3 
+albu_contrast: 0.4
+albu_saturation: 0.3
 albu_hue: 0.3
-crop_size: 1024
 pixel_dropout_prob: 0.01
 pixel_drop_value: 0
 fog_max: 0.8
@@ -169,7 +168,7 @@ alpha: 0.5 # (float) weight for distillation loss
 
 
 # Prune settings
-prune_method: 
+prune_method:
 speed_up: 2.0
 global_pruning: False
 max_sparsity: 1.0
@@ -186,10 +185,11 @@ do_prune: True
 do_finetune: True
 
 # SAHI settings -------------------------------------------------------------------------------------------------
-sahi: False #  if True,  
-cut_strategy: grid # grid or random_crop
-crop_size: 640 #
-overlap_ratio: 0.2
+sahi: False #  if True,
+train_cut_strategy: random_crop # grid or random_crop
+val_cut_strategy: grid
+crop_size: 640 # crop size both for grid and random crop strategy
+overlap_ratio: 0.2 # grid strategy param | overlap between neighbour crops (from 0 to 1)
 crop_threshold: 1024  # минимальная площадь изображения для RandomCropLarge (то есть с каких изображений будем брать bg)
 bg_crop_prob: 0.1       # вероятность применения RandomCropLarge (увеличение background)
 erosion_factor: 0
