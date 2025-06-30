@@ -189,8 +189,9 @@ sahi: False #  if True,
 train_cut_strategy: random_crop # grid or random_crop
 val_cut_strategy: grid
 crop_size: 640 # crop size both for grid and random crop strategy
-overlap_ratio: 0.2 # grid strategy param | overlap between neighbour crops (from 0 to 1)
+overlap_ratio: 0.2 # param for grid strtegy | overlap between neighbour crops (from 0 to 1)
+sampling_rate: 0.3 # param for random_crop strategy | num random crops taken from an image comparing with grid strategy
 crop_threshold: 1024  # минимальная площадь изображения для RandomCropLarge (то есть с каких изображений будем брать bg)
-bg_crop_prob: 0.1       # вероятность применения RandomCropLarge (увеличение background)
+bg_crop_prob: 0.4       # вероятность применения RandomCropLarge (увеличение background)
 erosion_factor: 0
 p_sahi_crop: 1
