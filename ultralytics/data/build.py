@@ -96,6 +96,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         min_size=cfg.min_size,
         batch_size=batch,
         cut_strategy=cut_strategy,
+        sampling_rate=cfg.sampling_rate,
         crop_size=cfg.crop_size,
         overlap_ratio=cfg.overlap_ratio,
         augment=mode == "train",  # augmentation

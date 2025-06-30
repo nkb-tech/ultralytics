@@ -16,16 +16,17 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
     A dataset class that supports Slicing Aided Hyper Inference (SAHI) strategies for training and validation.
 
     This class extends the standard YOLODataset to allow slicing of images into smaller crops using configurable cutting
-    strategies such as grid-based slicing or random cropping. It is useful for training  for improving detection performance
-    on inference with SAHI.
+    strategies such as grid-based slicing or random cropping. It is useful for training models whose performance during
+    inference with SAHI should be improved by exposing them to similar crop-based training samples.
 
     Attributes:
         cut_strategy (str): Strategy used to crop images. Options are:
             - 'grid': Slice image into a grid of fixed-size crops with optional overlap (similar to SAHI).
-            - 'random_crop': Random crops from the image. RandomCrop class used for background slicing, AtLeastOneBboxRandomCrop
-            used for most images.
+            - 'random_crop': Random crops from the image. The number of crops per image is determined by sampling_rate.
         crop_size (int): Size (width and height) of each crop in pixels.
         overlap_ratio (float): Overlap ratio between adjacent slices when using 'grid' strategy (0 to 1).
+        sampling_rate (float): For 'random_crop' strategy, determines how many random crops to generate relative to the
+                               number of grid slices an image would produce. E.g., 0.3 means 30% of the number of grid slices.
         use_slicing (bool): Whether slicing is being used (True if cut_strategy is 'grid').
         slice_indices (List[Tuple[int, int]]): Precomputed list of (image_index, slice_index) pairs for all slices.
         avg_slices (float): Average number of slices per image.
@@ -41,7 +42,16 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         build_transforms: Builds data augmentation and preprocessing transformations based on the slicing strategy.
     """
 
-    def __init__(self, img_path, cut_strategy="grid", crop_size=640, overlap_ratio=0, *args, **kwargs):
+    def __init__(
+        self,
+        img_path: str,
+        cut_strategy: str = "grid",
+        crop_size: int = 640,
+        overlap_ratio: float = 0,
+        sampling_rate: float = 1.0,
+        *args,
+        **kwargs,
+    ):
         """
         Initializes the SAHIDataset instance.
 
@@ -50,11 +60,14 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
             cut_strategy (str): Strategy for slicing images ('grid' or 'random_crop'). Default is 'grid'.
             crop_size (int): Size of each crop (square). Default is 640.
             overlap_ratio (float): Fraction of overlap between adjacent slices (only for 'grid'). Default is 0.
+            sampling_rate (float): When using 'random_crop', this defines the ratio of random crops per image compared to
+                                   how many slices that image would generate under the 'grid' strategy. Default is 1.0.
             *args, **kwargs: Additional arguments passed to the parent YOLODataset class.
         """
         self.cut_strategy = cut_strategy
         self.crop_size = crop_size
         self.overlap_ratio = overlap_ratio
+        self.sampling_rate = sampling_rate
         self.use_slicing = cut_strategy == "grid"
         super().__init__(img_path=img_path, *args, **kwargs)
 
@@ -69,21 +82,18 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         info.append(f"\n  total_images: {self.ni}")
         LOGGER.info(prefix + "".join(info))
 
-        if self.use_slicing:
-            self.slice_indices = self._precompute_slices()  # Список (img_idx, slice_idx)
-            crop_info = (
-                f"  Total crops: {len(self.slice_indices)}\n"
-                f"  Avg crops/image: {self.avg_slices:.1f}\n"
-                f"  Min/Max crops/image: {self.min_slices}/{self.max_slices}"
-            )
-            LOGGER.info(crop_info)
+        self.slice_indices = self._precompute_slices()  # Список (img_idx, slice_idx)
+        crop_info = (
+            f"  Total crops: {len(self.slice_indices)}\n"
+            f"  Avg crops/image: {self.avg_slices:.1f}\n"
+            f"  Min/Max crops/image: {self.min_slices}/{self.max_slices}"
+        )
+        LOGGER.info(crop_info)
 
     def _precompute_slices(self) -> List[Tuple[int, int]]:
         """
         Precompute (img_idx, slice_idx) pairs and collect statistics.
-
-        Returns:
-            List[Tuple[int, int]]: List of tuples representing (image index, slice index).
+        If cut_strategy is 'random_crop', returns fewer slices per image based on sampling_rate.
         """
 
         def process_single_image(
@@ -113,8 +123,13 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         slices_per_image: List[int] = []
 
         for idx, total_slices in results:
-            slice_indices.extend([(idx, s) for s in range(total_slices)])
-            slices_per_image.append(total_slices)
+            if self.cut_strategy == "random_crop":
+                sampled_slices = max(1, round(total_slices * self.sampling_rate))
+                slice_indices.extend([(idx, s) for s in range(sampled_slices)])
+                slices_per_image.append(sampled_slices)
+            else:  # grid
+                slice_indices.extend([(idx, s) for s in range(total_slices)])
+                slices_per_image.append(total_slices)
 
         # Store statistics
         self.avg_slices = sum(slices_per_image) / len(slices_per_image)
@@ -124,18 +139,16 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         return slice_indices
 
     def __len__(self):
-        if self.use_slicing:
-            return len(self.slice_indices)
-        else:
-            return super().__len__()
+        return len(self.slice_indices)
 
     def get_image_and_label(self, index: int) -> Dict[str, Any]:
         if self.use_slicing:
             return self._get_grid_slice(index)
         else:
-            label = deepcopy(self.labels[index])
+            img_idx, _ = self.slice_indices[index]
+            label = deepcopy(self.labels[img_idx])
             label.pop("shape", None)
-            label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(index)
+            label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(img_idx)
             label["ratio_pad"] = (
                 label["resized_shape"][0] / label["ori_shape"][0],
                 label["resized_shape"][1] / label["ori_shape"][1],
