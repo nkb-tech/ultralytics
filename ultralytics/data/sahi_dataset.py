@@ -1,8 +1,12 @@
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
+from functools import partial
 
 import numpy as np
 
-from .augment import Format, crop_transforms, crop_val_transforms, v8_transforms
+from ultralytics.utils import LOGGER, colorstr
+
+from .augment import Compose, Format, LetterBox, crop_transforms, crop_val_transforms, v8_transforms
 from .dataset import YOLODataset
 
 
@@ -14,24 +18,65 @@ class SAHIDataset(YOLODataset):
         self.overlap_ratio = overlap_ratio
         self.use_slicing = cut_strategy == "grid"
         super().__init__(img_path=img_path, *args, **kwargs)
+
+        # logging
+        task = "train" if self.augment else "val"
+        prefix = colorstr(f"SAHIDataset for {task}")
+        info = [f":\n  cut_strategy: {self.cut_strategy}", f"\n  crop_size: {self.crop_size}"]
+        # overlap_ratio only for grid
+        if self.cut_strategy == "grid":
+            info.append(f"\n  overlap_ratio: {self.overlap_ratio}")
+
+        info.append(f"\n  total_images: {self.ni}")
+        LOGGER.info(prefix + "".join(info))
+
         if self.use_slicing:
             self.slice_indices = self._precompute_slices()  # Список (img_idx, slice_idx)
+            crop_info = (
+                f"  Total crops: {len(self.slice_indices)}\n"
+                f"  Avg crops/image: {self.avg_slices:.1f}\n"
+                f"  Min/Max crops/image: {self.min_slices}/{self.max_slices}"
+            )
+            LOGGER.info(crop_info)
 
     def _precompute_slices(self):
-        """Предвычисляем (img_idx, slice_idx) без использования slice_image."""
-        slice_indices = []
-        for idx in range(self.ni):
-            im, (h0, w0), _ = self.load_image(idx)
+        """Предвычисляем (img_idx, slice_idx) параллельно и собираем статистику."""
 
-            # Расчет количества слайсов по горизонтали и вертикали
-            step_x = int(self.crop_size * (1 - self.overlap_ratio))
-            step_y = int(self.crop_size * (1 - self.overlap_ratio))
+        def process_single_image(idx, crop_size, overlap_ratio, load_image_func):
+            im, (h0, w0), _ = load_image_func(idx)
 
-            cols = max(1, (w0 - self.crop_size) // step_x + 1)
-            rows = max(1, (h0 - self.crop_size) // step_y + 1)
+            step_x = int(crop_size * (1 - overlap_ratio))
+            step_y = int(crop_size * (1 - overlap_ratio))
+
+            cols = max(1, (w0 - crop_size) // step_x + 1)
+            rows = max(1, (h0 - crop_size) // step_y + 1)
 
             total_slices = cols * rows
+            return idx, total_slices
+
+        # Параллельная обработка
+        with ThreadPoolExecutor() as executor:
+            process_fn = partial(
+                process_single_image,
+                crop_size=self.crop_size,
+                overlap_ratio=self.overlap_ratio,
+                load_image_func=self.load_image,
+            )
+            results = list(executor.map(process_fn, range(self.ni)))
+
+        # Разбираем результаты
+        slice_indices = []
+        slices_per_image = []
+
+        for idx, total_slices in results:
             slice_indices.extend([(idx, s) for s in range(total_slices)])
+            slices_per_image.append(total_slices)
+
+        # Сохраняем статистику
+        self.avg_slices = sum(slices_per_image) / len(slices_per_image)
+        self.min_slices = min(slices_per_image)
+        self.max_slices = max(slices_per_image)
+
         return slice_indices
 
     def __len__(self):
@@ -154,20 +199,24 @@ class SAHIDataset(YOLODataset):
 
     def build_transforms(self, hyp=None):
         """Builds and appends transforms based on cut_strategy."""
-        if self.cut_strategy == "grid" and self.augment:
-            transforms = v8_transforms(dataset=self, imgsz=self.crop_size, hyp=hyp, stretch=False)
-        elif self.cut_strategy == "random_crop" and self.augment:
-            transforms = crop_transforms(
-                dataset=self,
-                imgsz=self.crop_size,
-                hyp=hyp,
-            )
-        elif not self.augment:
-            transforms = crop_val_transforms(
-                dataset=self,
-                imgsz=self.crop_size,
-                hyp=hyp,
-            )
+        if self.cut_strategy == "grid":
+            if self.augment:
+                transforms = v8_transforms(dataset=self, imgsz=self.crop_size, hyp=hyp, stretch=False)
+            else:
+                transforms = Compose([LetterBox(new_shape=(self.crop_size, self.crop_size), scaleup=False)])
+        elif self.cut_strategy == "random_crop":
+            if self.augment:
+                transforms = crop_transforms(
+                    dataset=self,
+                    imgsz=self.crop_size,
+                    hyp=hyp,
+                )
+            else:
+                transforms = crop_val_transforms(
+                    dataset=self,
+                    imgsz=self.crop_size,
+                    hyp=hyp,
+                )
         else:
             raise ValueError(f"Unknown cut strategy: {self.cut_strategy}")
 
