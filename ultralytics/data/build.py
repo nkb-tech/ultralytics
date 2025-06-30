@@ -9,27 +9,10 @@ import torch
 from PIL import Image
 from torch.utils.data import dataloader, distributed
 
-from ultralytics.data.dataset import (
-    GroundingDataset,
-    YOLODataset,
-    YOLOWeightedDataset,
-    YOLOMultiModalDataset,
-)
-
-from ultralytics.data.sahi_dataset import (
-    SAHIDataset,
-)
-
-from ultralytics.data.loaders import (
-    LOADERS,
-    LoadImagesAndVideos,
-    LoadPilAndNumpy,
-    LoadScreenshots,
-    LoadStreams,
-    LoadTensor,
-    SourceTypes,
-    autocast_list,
-)
+from ultralytics.data.dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset, YOLOWeightedDataset
+from ultralytics.data.loaders import (LOADERS, LoadImagesAndVideos, LoadPilAndNumpy, LoadScreenshots, LoadStreams,
+                                      LoadTensor, SourceTypes, autocast_list,)
+from ultralytics.data.sahi_dataset import SAHIDataset
 from ultralytics.data.utils import IMG_FORMATS, PIN_MEMORY, VID_FORMATS
 from ultralytics.utils import RANK, colorstr
 from ultralytics.utils.checks import check_file
@@ -102,16 +85,21 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
     else:
         dataset = YOLODataset
 
+    if cfg.sahi:
+        cut_strategy = cfg.train_cut_strategy if mode == "train" else cfg.val_cut_strategy
+    else:
+        cut_strategy = None
+
     return dataset(
         img_path=img_path,
         imgsz=cfg.imgsz,
         min_size=cfg.min_size,
         batch_size=batch,
-        cut_strategy=cfg.cut_strategy,
+        cut_strategy=cut_strategy,
         crop_size=cfg.crop_size,
         overlap_ratio=cfg.overlap_ratio,
         augment=mode == "train",  # augmentation
-        sahi = cfg.sahi,
+        sahi=cfg.sahi,
         hyp=cfg,  # TODO: probably add a get_hyps_from_cfg function
         rect=cfg.rect or rect,  # rectangular batches
         cache=cfg.cache or None,

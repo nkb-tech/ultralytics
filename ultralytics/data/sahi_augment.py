@@ -1,3 +1,4 @@
+import random
 from typing import Any
 
 try:
@@ -19,6 +20,9 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
 
     Args:
         crop_size (int): The size of the square crop in pixels (height and width). Default: 640.
+         scale_range (Tuple[float, float]): Range to randomly scale the crop size.
+                                           The final size will be crop_size * random_scale.
+                                           Default: (1.0, 1.0), i.e., fixed size.
         erosion_factor (float): Erosion factor applied to bounding boxes before computing the crop. Helps avoid too tight crops. Default: 0.0.
         p (float): Probability of applying the transform. Default: 1.0.
     """
@@ -27,11 +31,16 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
         self,
         crop_size: int = 640,
         erosion_factor: float = 0.0,
+        scale_range: tuple[float, float] = (0.7, 1.3),
         p: float = 1.0,
     ):
+        self.crop_size = crop_size
+        self.scale_range = scale_range
+        self.random_crop_height = crop_size
+        self.random_crop_wigth = crop_size
         super().__init__(
-            height=crop_size,
-            width=crop_size,
+            height=self.random_crop_height,
+            width=self.random_crop_wigth,
             erosion_factor=erosion_factor,
             p=p,
         )
@@ -42,6 +51,14 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
         data: dict[str, Any],
     ) -> dict[str, Any]:
         image_height, image_width = params["shape"][:2]
+
+        # scaled h and w
+        h_scale_range = self.scale_range
+        w_scale_range = self.scale_range
+        h_scale = random.uniform(*h_scale_range)
+        w_scale = random.uniform(*w_scale_range)
+        self.height = int(round(self.crop_size * h_scale))
+        self.wigth = int(round(self.crop_size * w_scale))
         if image_height < self.height or image_width < self.width:
             return {"crop_coords": (0, 0, image_width, image_height)}
         return super().get_params_dependent_on_data(params, data)
