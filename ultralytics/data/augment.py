@@ -1,5 +1,4 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
-import ast
 import math
 import random
 from copy import deepcopy
@@ -2732,7 +2731,7 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
     """
     Compose из кастомных SAHI-кропов + стандартных аугментаций.
     """
-    hyp.scale_range = tuple(map(float, ast.literal_eval(hyp.scale_range)))
+
     albu_args = {
         "dropout_prob": hyp.albu_dropout_prob if hasattr(hyp, "albu_dropout_prob") else None,
         "quality_lower": hyp.albu_quality_lower if hasattr(hyp, "albu_quality_lower") else None,
@@ -2791,7 +2790,6 @@ def crop_val_transforms(dataset, imgsz, hyp, stretch=False):
     """
     Compose из кастомных SAHI-кропов + стандартных аугментаций.
     """
-    hyp.scale_range = tuple(map(float, ast.literal_eval(hyp.scale_range)))
     transforms = []
 
     crop_transform = A.OneOf(

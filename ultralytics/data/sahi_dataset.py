@@ -265,6 +265,10 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         return slice_labels
 
     def build_transforms(self, hyp: Optional[Dict[str, Any]] = None) -> Compose:
+        if isinstance(hyp.scale_range, str):
+            hyp.scale_range = hyp.scale_range.strip("()")
+            x, y = hyp.scale_range.split(",")
+            hyp.scale_range = (float(x), float(y))
         if self.cut_strategy == "grid":
             if self.augment:
                 transforms = v8_transforms(
