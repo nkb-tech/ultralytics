@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from functools import partial
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 
@@ -10,9 +11,47 @@ from .augment import Compose, Format, LetterBox, crop_transforms, crop_val_trans
 from .dataset import YOLODataset
 
 
-class SAHIDataset(YOLODataset):
+class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
+    """
+    A dataset class that supports Slicing Aided Hyper Inference (SAHI) strategies for training and validation.
+
+    This class extends the standard YOLODataset to allow slicing of images into smaller crops using configurable cutting
+    strategies such as grid-based slicing or random cropping. It is useful for training  for improving detection performance
+    on inference with SAHI.
+
+    Attributes:
+        cut_strategy (str): Strategy used to crop images. Options are:
+            - 'grid': Slice image into a grid of fixed-size crops with optional overlap (similar to SAHI).
+            - 'random_crop': Random crops from the image. RandomCrop class used for background slicing, AtLeastOneBboxRandomCrop
+            used for most images.
+        crop_size (int): Size (width and height) of each crop in pixels.
+        overlap_ratio (float): Overlap ratio between adjacent slices when using 'grid' strategy (0 to 1).
+        use_slicing (bool): Whether slicing is being used (True if cut_strategy is 'grid').
+        slice_indices (List[Tuple[int, int]]): Precomputed list of (image_index, slice_index) pairs for all slices.
+        avg_slices (float): Average number of slices per image.
+        min_slices (int): Minimum number of slices across all images.
+        max_slices (int): Maximum number of slices across all images.
+
+    Methods:
+        _precompute_slices: Precomputes slice indices for all images using parallel processing.
+        __len__: Returns the total number of slices if slicing is used, otherwise returns the number of original images.
+        get_image_and_label: Retrieves a single processed image and its corresponding label.
+        _get_grid_slice: Generates a single slice from an image using grid slicing.
+        _filter_and_transform_annotations: Filters and transforms annotations to match the current slice.
+        build_transforms: Builds data augmentation and preprocessing transformations based on the slicing strategy.
+    """
+
     def __init__(self, img_path, cut_strategy="grid", crop_size=640, overlap_ratio=0, *args, **kwargs):
-        """Initialize SAHI-aware dataset."""
+        """
+        Initializes the SAHIDataset instance.
+
+        Args:
+            img_path (str): Path/paths to the directory containing images.
+            cut_strategy (str): Strategy for slicing images ('grid' or 'random_crop'). Default is 'grid'.
+            crop_size (int): Size of each crop (square). Default is 640.
+            overlap_ratio (float): Fraction of overlap between adjacent slices (only for 'grid'). Default is 0.
+            *args, **kwargs: Additional arguments passed to the parent YOLODataset class.
+        """
         self.cut_strategy = cut_strategy
         self.crop_size = crop_size
         self.overlap_ratio = overlap_ratio
@@ -39,10 +78,17 @@ class SAHIDataset(YOLODataset):
             )
             LOGGER.info(crop_info)
 
-    def _precompute_slices(self):
-        """Предвычисляем (img_idx, slice_idx) параллельно и собираем статистику."""
+    def _precompute_slices(self) -> List[Tuple[int, int]]:
+        """
+        Precompute (img_idx, slice_idx) pairs and collect statistics.
 
-        def process_single_image(idx, crop_size, overlap_ratio, load_image_func):
+        Returns:
+            List[Tuple[int, int]]: List of tuples representing (image index, slice index).
+        """
+
+        def process_single_image(
+            idx: int, crop_size: int, overlap_ratio: float, load_image_func: callable
+        ) -> Tuple[int, int]:
             im, (h0, w0), _ = load_image_func(idx)
 
             step_x = int(crop_size * (1 - overlap_ratio))
@@ -54,7 +100,6 @@ class SAHIDataset(YOLODataset):
             total_slices = cols * rows
             return idx, total_slices
 
-        # Параллельная обработка
         with ThreadPoolExecutor() as executor:
             process_fn = partial(
                 process_single_image,
@@ -64,15 +109,14 @@ class SAHIDataset(YOLODataset):
             )
             results = list(executor.map(process_fn, range(self.ni)))
 
-        # Разбираем результаты
-        slice_indices = []
-        slices_per_image = []
+        slice_indices: List[Tuple[int, int]] = []
+        slices_per_image: List[int] = []
 
         for idx, total_slices in results:
             slice_indices.extend([(idx, s) for s in range(total_slices)])
             slices_per_image.append(total_slices)
 
-        # Сохраняем статистику
+        # Store statistics
         self.avg_slices = sum(slices_per_image) / len(slices_per_image)
         self.min_slices = min(slices_per_image)
         self.max_slices = max(slices_per_image)
@@ -85,8 +129,7 @@ class SAHIDataset(YOLODataset):
         else:
             return super().__len__()
 
-    def get_image_and_label(self, index):
-        """Возвращает изображения и соответствующие ему аннотации."""
+    def get_image_and_label(self, index: int) -> Dict[str, Any]:
         if self.use_slicing:
             return self._get_grid_slice(index)
         else:
@@ -99,34 +142,37 @@ class SAHIDataset(YOLODataset):
             )
             return self.update_labels_info(label)
 
-    def _get_grid_slice(self, index):
-        """Генерирует один слайс по координатам"""
+    def _get_grid_slice(self, index: int) -> Dict[str, Any]:
+        """
+        Generate a single slice based on coordinates.
+
+        Args:
+            index (int): Index of the slice in `self.slice_indices`.
+
+        Returns:
+            Dict[str, Any]: Dictionary containing sliced image and filtered labels.
+        """
         img_idx, slice_idx = self.slice_indices[index]
         im, (h0, w0), _ = self.load_image(img_idx)
         labels = deepcopy(self.labels[img_idx])
 
-        # Расчет количества столбцов и строк
         step_x = int(self.crop_size * (1 - self.overlap_ratio))
         step_y = int(self.crop_size * (1 - self.overlap_ratio))
         cols = max(1, (w0 - self.crop_size) // step_x + 1)
 
-        # Определение координат текущего слайса
         row = slice_idx // cols
         col = slice_idx % cols
 
         start_x = col * step_x
         start_y = row * step_y
 
-        # Обрезка изображения
         end_x = min(start_x + self.crop_size, w0)
         end_y = min(start_y + self.crop_size, h0)
         slice_im = im[start_y:end_y, start_x:end_x]
         slice_bbox = [start_x, start_y, end_x, end_y]
 
-        # Фильтрация аннотаций
         slice_labels = self._filter_and_transform_annotations(labels, slice_bbox, h0, w0)
 
-        # Обновление метаданных
         labels.update(
             {
                 "img": slice_im,
@@ -137,13 +183,12 @@ class SAHIDataset(YOLODataset):
             }
         )
 
-        if slice_labels["bboxes"].size == 0:  # Если список пуст
-            labels["bboxes"] = np.empty((0, 4), dtype=np.float32)  # Форма (0, 4)
+        if slice_labels["bboxes"].size == 0:
+            labels["bboxes"] = np.empty((0, 4), dtype=np.float32)
         else:
-            # Преобразуем список в массив и проверяем форму
             bboxes = np.array(slice_labels["bboxes"], dtype=np.float32)
             if bboxes.ndim != 2 or bboxes.shape[1] != 4:
-                raise ValueError(f"Ожидаемая форма (N, 4), получена {bboxes.shape}")
+                raise ValueError(f"Expected shape (N, 4), got {bboxes.shape}")
             labels["bboxes"] = bboxes
 
         if "segments" in labels:
@@ -153,38 +198,47 @@ class SAHIDataset(YOLODataset):
 
         return self.update_labels_info(labels)
 
-    def _filter_and_transform_annotations(self, labels, slice_bbox, h0, w0):
-        """Фильтрует и трансформирует аннотации под координаты слайса."""
+    def _filter_and_transform_annotations(
+        self, labels: Dict[str, Any], slice_bbox: List[int], h0: int, w0: int
+    ) -> Dict[str, Union[np.ndarray, List]]:
+        """
+        Filter and transform annotations to match current slice coordinates.
+
+        Args:
+            labels (Dict[str, Any]): Original labels dictionary.
+            slice_bbox (List[int]): Bounding box of the slice in pixel coordinates [x_min, y_min, x_max, y_max].
+            h0 (int): Original image height.
+            w0 (int): Original image width.
+
+        Returns:
+            Dict[str, Union[np.ndarray, List]]: Transformed labels within the slice.
+        """
         x_min, y_min, x_max, y_max = slice_bbox
-        slice_labels = {"cls": [], "bboxes": [], "segments": []}
+        slice_labels = {"cls": [], "bboxes": []}
 
         for i in range(len(labels["bboxes"])):
             cls = labels["cls"][i]
-            bbox = labels["bboxes"][i]  # (cx, cy, w, h) в нормализованных координатах
+            bbox = labels["bboxes"][i]  # (cx, cy, w, h) normalized
 
-            # Переводим в пиксельные координаты
             cx, cy, w, h = bbox
             x1 = (cx - w / 2) * w0
             y1 = (cy - h / 2) * h0
             x2 = (cx + w / 2) * w0
             y2 = (cy + h / 2) * h0
 
-            # Проверяем, пересекается ли бокс со слайсом
             inter_x1 = max(x1, x_min)
             inter_y1 = max(y1, y_min)
             inter_x2 = min(x2, x_max)
             inter_y2 = min(y2, y_max)
 
             if inter_x1 >= inter_x2 or inter_y1 >= inter_y2:
-                continue  # Нет пересечения
+                continue  # No intersection
 
-            # Обрезаем бокс под слайс
             new_x1 = max(x1 - x_min, 0)
             new_y1 = max(y1 - y_min, 0)
             new_x2 = min(x2 - x_min, self.crop_size)
             new_y2 = min(y2 - y_min, self.crop_size)
 
-            # Переводим в нормализованные координаты относительно слайса
             cx_new = (new_x1 + new_x2) / 2 / self.crop_size
             cy_new = (new_y1 + new_y2) / 2 / self.crop_size
             w_new = (new_x2 - new_x1) / self.crop_size
@@ -197,11 +251,15 @@ class SAHIDataset(YOLODataset):
         slice_labels["bboxes"] = np.array(slice_labels["bboxes"], dtype=np.float32)
         return slice_labels
 
-    def build_transforms(self, hyp=None):
-        """Builds and appends transforms based on cut_strategy."""
+    def build_transforms(self, hyp: Optional[Dict[str, Any]] = None) -> Compose:
         if self.cut_strategy == "grid":
             if self.augment:
-                transforms = v8_transforms(dataset=self, imgsz=self.crop_size, hyp=hyp, stretch=False)
+                transforms = v8_transforms(
+                    dataset=self,
+                    imgsz=self.crop_size,
+                    hyp=hyp,
+                    stretch=False,
+                )
             else:
                 transforms = Compose([LetterBox(new_shape=(self.crop_size, self.crop_size), scaleup=False)])
         elif self.cut_strategy == "random_crop":
@@ -228,9 +286,9 @@ class SAHIDataset(YOLODataset):
                 return_keypoint=self.use_keypoints,
                 return_obb=self.use_obb,
                 batch_idx=True,
-                mask_ratio=hyp.mask_ratio,
-                mask_overlap=hyp.overlap_mask,
-                bgr=hyp.bgr if self.augment else 0.0,  # only affect training.
+                mask_ratio=hyp.mask_ratio if hyp else 0.5,
+                mask_overlap=hyp.overlap_mask if hyp else False,
+                bgr=hyp.bgr if hyp and self.augment else 0.0,
             )
         )
 
