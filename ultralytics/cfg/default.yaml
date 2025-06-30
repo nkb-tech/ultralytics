@@ -185,13 +185,12 @@ do_prune: True
 do_finetune: True
 
 # SAHI settings -------------------------------------------------------------------------------------------------
-sahi: False #  if True,
-train_cut_strategy: random_crop # grid or random_crop
+sahi: False
+train_cut_strategy: random_crop  # 'grid' or 'random_crop'; grid - like SAHI; random_crop - takes several different crops from an image
 val_cut_strategy: grid
-crop_size: 640 # crop size both for grid and random crop strategy
-overlap_ratio: 0.2 # param for grid strtegy | overlap between neighbour crops (from 0 to 1)
-sampling_rate: 0.3 # param for random_crop strategy | num random crops taken from an image comparing with grid strategy
-crop_threshold: 1024  # минимальная площадь изображения для RandomCropLarge (то есть с каких изображений будем брать bg)
-bg_crop_prob: 0.4       # вероятность применения RandomCropLarge (увеличение background)
-erosion_factor: 0
-p_sahi_crop: 1
+crop_size: 640  # (int) crop size used in both grid and random crop strategies
+overlap_ratio: 0.2  # (float) overlap between neighboring crops (range: 0 to 1); affects total_crops_num on the image -> in "random_crop" num_crops = total_crops_num * sampling_rate
+sampling_rate: 0.3  # (float) portion of random crops taken from an image relative to the number of grid crops
+crop_threshold: 1024  # (int) minimum image area (in pixels) to apply RandomCropLarge (i.e., enables background cropping for images larger than this size)
+bg_crop_prob: 0.4  # (float) probability of applying RandomCropLarge (increases background-focused crops)
+erosion_factor: 0.0 # (float) 0 means crop must fully contain the reference box.
