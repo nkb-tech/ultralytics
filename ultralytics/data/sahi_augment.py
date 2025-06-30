@@ -78,10 +78,18 @@ class RandomCropLarge(DualTransform):
         p (float): Probability of applying the transform. Default: 1.0.
     """
 
-    def __init__(self, crop_size: int = 1024, threshold: int = 1024, erosion_factor: float = 0.0, p: float = 1.0):
+    def __init__(
+        self,
+        crop_size: int = 1024,
+        scale_range: tuple[float, float] = (0.7, 1.3),
+        threshold: int = 1024,
+        erosion_factor: float = 0.0,
+        p: float = 1.0,
+    ):
         super().__init__(p=p)
         self.crop_size = crop_size
         self.threshold = threshold
+        self.scale_range = scale_range
         self.random_crop = A.RandomCrop(height=crop_size, width=crop_size, p=1.0)  # for background crops
         self.safe_fixed_crop = SafeFixedRandomCrop(crop_size=crop_size, erosion_factor=erosion_factor, p=1.0)
 
@@ -119,6 +127,15 @@ class RandomCropLarge(DualTransform):
         data: dict[str, Any],
     ) -> dict[str, Any]:
         height, width = params["shape"][:2]
+
+        # scaled h and w
+        h_scale_range = self.scale_range
+        w_scale_range = self.scale_range
+        h_scale = random.uniform(*h_scale_range)
+        w_scale = random.uniform(*w_scale_range)
+        self.height = int(round(self.crop_size * h_scale))
+        self.wigth = int(round(self.crop_size * w_scale))
+
         if self._use_random(height, width):
             return self.random_crop.get_params_dependent_on_data(params, data)
         else:
