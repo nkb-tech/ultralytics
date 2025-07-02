@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """
 Export a YOLOv8 PyTorch model to other formats. TensorFlow exports authored by https://github.com/zldrobit.
 
@@ -59,8 +59,8 @@ import time
 import warnings
 from copy import deepcopy
 from datetime import datetime
-from pathlib import Path
 from functools import partial
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -69,8 +69,10 @@ from ultralytics.cfg import TASK2DATA, get_cfg
 from ultralytics.data import build_dataloader
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
+from ultralytics.engine.validator import BaseValidator as Validator
+from ultralytics.models import yolo
 from ultralytics.nn.autobackend import check_class_names, default_class_names
-from ultralytics.nn.modules import C2f, Detect, RTDETRDecoder, PostDetectTRTNMS, PostDetectONNXNMS
+from ultralytics.nn.modules import C2f, Detect, PostDetectONNXNMS, PostDetectTRTNMS, RTDETRDecoder
 from ultralytics.nn.tasks import ClassificationModel, DetectionModel, OBBModel, PoseModel, SegmentationModel, WorldModel
 from ultralytics.utils import (
     ARM64,
@@ -91,12 +93,9 @@ from ultralytics.utils import (
 from ultralytics.utils.checks import check_imgsz, check_is_path_safe, check_requirements, check_version
 from ultralytics.utils.downloads import attempt_download_asset, get_github_assets, safe_download
 from ultralytics.utils.files import file_size, spaces_in_path
+from ultralytics.utils.metrics import ConfusionMatrix
 from ultralytics.utils.ops import Profile
 from ultralytics.utils.torch_utils import TORCH_1_13, get_latest_opset, select_device, smart_inference_mode
-from ultralytics.engine.validator import BaseValidator as Validator
-from ultralytics.models import yolo
-from ultralytics.utils.metrics import ConfusionMatrix
-
 
 
 def export_formats():
@@ -262,15 +261,11 @@ class Exporter:
                 m.format = self.args.format
                 m.max_det = self.args.max_det
                 if self.args.nms and m.end2end:
-                    LOGGER.warning(
-                        "WARNING ⚠️ Your model is already end2end, no need to include nms inside the graph."
-                    )
+                    LOGGER.warning("WARNING ⚠️ Your model is already end2end, no need to include nms inside the graph.")
                     self.args.nms = False
                 if not isinstance(m, RTDETRDecoder) and self.args.nms and (onnx or engine):
                     if not self.args.conf:
-                        LOGGER.warning(
-                            "WARNING ⚠️ You should set conf for NMS for export."
-                        )
+                        LOGGER.warning("WARNING ⚠️ You should set conf for NMS for export.")
                         self.args.conf = 0.25
 
                     post_detect_class = PostDetectTRTNMS if engine else PostDetectONNXNMS
@@ -281,9 +276,7 @@ class Exporter:
                     post_detect_class.dynamic = self.args.dynamic
                     setattr(m, "__class__", post_detect_class)
                 elif isinstance(m, RTDETRDecoder) and self.args.nms:
-                    LOGGER.warning(
-                        "WARNING ⚠️ RT-DETR model with `nms=True` is not supported now."
-                    )
+                    LOGGER.warning("WARNING ⚠️ RT-DETR model with `nms=True` is not supported now.")
                     self.args.nms = False
 
             elif isinstance(m, C2f) and not is_tf_format:
@@ -312,7 +305,7 @@ class Exporter:
         )
         self.pretty_name = Path(self.model.yaml.get("yaml_file", self.file)).stem.replace("yolo", "YOLO")
         data = model.args["data"] if hasattr(model, "args") and isinstance(model.args, dict) else ""
-        description = f'Ultralytics {self.pretty_name} model {f"trained on {data}" if data else ""}'
+        description = f"Ultralytics {self.pretty_name} model {f'trained on {data}' if data else ''}"
         self.metadata = {
             "description": description,
             "author": "Ultralytics",
@@ -334,7 +327,7 @@ class Exporter:
 
         LOGGER.info(
             f"\n{colorstr('PyTorch:')} starting from '{file}' with input shape {tuple(im.shape)} BCHW and "
-            f'output shape(s) {self.output_shape} ({file_size(file):.1f} MB)'
+            f"output shape(s) {self.output_shape} ({file_size(file):.1f} MB)"
         )
 
         # Exports
@@ -381,11 +374,11 @@ class Exporter:
             predict_data = f"data={data}" if model.task == "segment" and fmt == "pb" else ""
             q = "int8" if self.args.int8 else "half" if self.args.half else ""  # quantization
             LOGGER.info(
-                f'\nExport complete ({time.time() - t:.1f}s)'
+                f"\nExport complete ({time.time() - t:.1f}s)"
                 f"\nResults saved to {colorstr('bold', file.parent.resolve())}"
-                f'\nPredict:         yolo predict task={model.task} model={f} imgsz={imgsz} {q} {predict_data}'
-                f'\nValidate:        yolo val task={model.task} model={f} imgsz={imgsz} data={data} {q} {s}'
-                f'\nVisualize:       https://netron.app'
+                f"\nPredict:         yolo predict task={model.task} model={f} imgsz={imgsz} {q} {predict_data}"
+                f"\nValidate:        yolo val task={model.task} model={f} imgsz={imgsz} data={data} {q} {s}"
+                f"\nVisualize:       https://netron.app"
             )
 
         self.run_callbacks("on_export_end")
@@ -546,7 +539,7 @@ class Exporter:
         for k, v in self.metadata.items():
             meta = model_onnx.metadata_props.add()
             meta.key, meta.value = k, str(v)
-        
+
         if self.args.int8:
             check_requirements("nncf>=2.8.0")
             import nncf
@@ -572,13 +565,13 @@ class Exporter:
                 validator.stats = dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
                 validator.batch_i = 1
                 validator.confusion_matrix = ConfusionMatrix(nc=validator.nc)
-        
+
                 rt_session_options = {"providers": ["CPUExecutionProvider"]}
                 serialized_model = val_model.SerializeToString()
                 session = onnxruntime.InferenceSession(serialized_model, **rt_session_options)
                 output_names = [output.name for output in session.get_outputs()]
                 num_outputs = len(output_names)
-        
+
                 counter = 0
                 for batch_i, batch in enumerate(validation_loader):
                     if num_samples is not None and batch_i == num_samples:
@@ -586,7 +579,7 @@ class Exporter:
                     batch = validator.preprocess(batch)
                     input_feed = {input_name: batch["img"].numpy()}
                     results = session.run(output_names, input_feed=input_feed)
-        
+
                     if num_outputs == 1:
                         preds = torch.from_numpy(results[0])
                     else:
@@ -612,7 +605,7 @@ class Exporter:
                     types=["Mul", "Sub", "Sigmoid"],  # ignore operations
                     names=[
                         "/model.22/dfl/conv/Conv",  # in the post-processing subgraph
-                    ]
+                    ],
                 )
 
             def get_task_map():
@@ -651,7 +644,7 @@ class Exporter:
 
             validator = get_task_map()[self.model.task]["validator"](args=self.args)
             validator.nc = self.model.model[-1].nc
-            
+
             validation_fn = partial(
                 validation_ac,
                 validator=validator,
@@ -671,17 +664,17 @@ class Exporter:
                 target_device=nncf.TargetDevice.GPU,
                 fast_bias_correction=False,
             )
-            
+
             model_onnx = onnx_int8_model
 
         onnx.save(model_onnx, f)
-            
+
         return f, model_onnx
 
     @try_export
     def export_openvino(self, prefix=colorstr("OpenVINO:")):
         """YOLOv8 OpenVINO export."""
-        check_requirements(f'openvino{"<=2024.0.0" if ARM64 else ">=2024.0.0"}')  # fix OpenVINO issue on ARM64
+        check_requirements(f"openvino{'<=2024.0.0' if ARM64 else '>=2024.0.0'}")  # fix OpenVINO issue on ARM64
         import openvino as ov
 
         LOGGER.info(f"\n{prefix} starting export with openvino {ov.__version__}...")
@@ -799,16 +792,16 @@ class Exporter:
                 shutil.rmtree(unzip_dir)  # delete unzip dir
 
         ncnn_args = [
-            f'ncnnparam={f / "model.ncnn.param"}',
-            f'ncnnbin={f / "model.ncnn.bin"}',
-            f'ncnnpy={f / "model_ncnn.py"}',
+            f"ncnnparam={f / 'model.ncnn.param'}",
+            f"ncnnbin={f / 'model.ncnn.bin'}",
+            f"ncnnpy={f / 'model_ncnn.py'}",
         ]
 
         pnnx_args = [
-            f'pnnxparam={f / "model.pnnx.param"}',
-            f'pnnxbin={f / "model.pnnx.bin"}',
-            f'pnnxpy={f / "model_pnnx.py"}',
-            f'pnnxonnx={f / "model.pnnx.onnx"}',
+            f"pnnxparam={f / 'model.pnnx.param'}",
+            f"pnnxbin={f / 'model.pnnx.bin'}",
+            f"pnnxpy={f / 'model_pnnx.py'}",
+            f"pnnxonnx={f / 'model.pnnx.onnx'}",
         ]
 
         cmd = [
@@ -964,7 +957,7 @@ class Exporter:
                 LOGGER.warning(f"{prefix} WARNING ⚠️ 'dynamic=True' model requires max batch size, i.e. 'batch=16'")
             profile = builder.create_optimization_profile()
             min_shape = (1, *shape[1:])  # minimum input shape
-            max_shape = (2*shape[0], *shape[1:])  # max input shape
+            max_shape = (2 * shape[0], *shape[1:])  # max input shape
             for inp in inputs:
                 profile.set_shape(inp.name, min=min_shape, opt=shape, max=max_shape)
             config.add_optimization_profile(profile)

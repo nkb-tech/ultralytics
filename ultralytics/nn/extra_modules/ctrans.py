@@ -1,21 +1,20 @@
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 import copy
-import logging
 import math
+
+import numpy as np
 import torch
 import torch.nn as nn
-import numpy as np
-from torch.nn import Dropout, Softmax, Conv2d, LayerNorm
+from torch.nn import Conv2d, Dropout, LayerNorm, Softmax
 from torch.nn.modules.utils import _pair
 
-__all__ = ['ChannelTransformer', 'GetIndexOutput']
+__all__ = ["ChannelTransformer", "GetIndexOutput"]
 
 
 class Channel_Embeddings(nn.Module):
-    """Construct the embeddings from patch, position embeddings.
-    """
+    """Construct the embeddings from patch, position embeddings."""
+
     def __init__(self, patchsize, img_size, in_channels):
         super().__init__()
         img_size = _pair(img_size)
@@ -23,10 +22,9 @@ class Channel_Embeddings(nn.Module):
         n_patches = (img_size[0] // patch_size[0]) * (img_size[1] // patch_size[1])
         self.patch_embeddings = nn.Sequential(
             nn.MaxPool2d(kernel_size=5, stride=5),
-            Conv2d(in_channels=in_channels,
-                    out_channels=in_channels,
-                    kernel_size=patchsize // 5,
-                    stride=patchsize // 5)
+            Conv2d(
+                in_channels=in_channels, out_channels=in_channels, kernel_size=patchsize // 5, stride=patchsize // 5
+            ),
         )
 
         self.position_embeddings = nn.Parameter(torch.zeros(1, n_patches, in_channels))
@@ -42,14 +40,15 @@ class Channel_Embeddings(nn.Module):
         embeddings = self.dropout(embeddings)
         return embeddings
 
+
 class Reconstruct(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, scale_factor):
-        super(Reconstruct, self).__init__()
+        super().__init__()
         if kernel_size == 3:
             padding = 1
         else:
             padding = 0
-        self.conv = nn.Conv2d(in_channels, out_channels,kernel_size=kernel_size, padding=padding)
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
         self.norm = nn.BatchNorm2d(out_channels)
         self.activation = nn.ReLU(inplace=True)
         self.scale_factor = scale_factor
@@ -69,9 +68,10 @@ class Reconstruct(nn.Module):
         out = self.activation(out)
         return out
 
+
 class Attention_org(nn.Module):
-    def __init__(self, vis,channel_num):
-        super(Attention_org, self).__init__()
+    def __init__(self, vis, channel_num):
+        super().__init__()
         self.vis = vis
         self.KV_size = sum(channel_num)
         self.channel_num = channel_num
@@ -89,7 +89,7 @@ class Attention_org(nn.Module):
             query2 = nn.Linear(channel_num[1], channel_num[1], bias=False)
             query3 = nn.Linear(channel_num[2], channel_num[2], bias=False)
             query4 = nn.Linear(channel_num[3], channel_num[3], bias=False) if len(channel_num) == 4 else nn.Identity()
-            key = nn.Linear( self.KV_size, self.KV_size, bias=False)
+            key = nn.Linear(self.KV_size, self.KV_size, bias=False)
             value = nn.Linear(self.KV_size, self.KV_size, bias=False)
             self.query1.append(copy.deepcopy(query1))
             self.query2.append(copy.deepcopy(query2))
@@ -106,9 +106,7 @@ class Attention_org(nn.Module):
         self.attn_dropout = Dropout(0.1)
         self.proj_dropout = Dropout(0.1)
 
-
-
-    def forward(self, emb1,emb2,emb3,emb4, emb_all):
+    def forward(self, emb1, emb2, emb3, emb4, emb_all):
         multi_head_Q1_list = []
         multi_head_Q2_list = []
         multi_head_Q3_list = []
@@ -168,12 +166,13 @@ class Attention_org(nn.Module):
         # print(attention_probs4.size())
 
         if self.vis:
-            weights =  []
+            weights = []
             weights.append(attention_probs1.mean(1))
             weights.append(attention_probs2.mean(1))
             weights.append(attention_probs3.mean(1))
             weights.append(attention_probs4.mean(1))
-        else: weights=None
+        else:
+            weights = None
 
         attention_probs1 = self.attn_dropout(attention_probs1) if emb1 is not None else None
         attention_probs2 = self.attn_dropout(attention_probs2) if emb2 is not None else None
@@ -203,14 +202,12 @@ class Attention_org(nn.Module):
         O2 = self.proj_dropout(O2) if emb2 is not None else None
         O3 = self.proj_dropout(O3) if emb3 is not None else None
         O4 = self.proj_dropout(O4) if emb4 is not None else None
-        return O1,O2,O3,O4, weights
-
-
+        return O1, O2, O3, O4, weights
 
 
 class Mlp(nn.Module):
     def __init__(self, in_channel, mlp_channel):
-        super(Mlp, self).__init__()
+        super().__init__()
         self.fc1 = nn.Linear(in_channel, mlp_channel)
         self.fc2 = nn.Linear(mlp_channel, in_channel)
         self.act_fn = nn.GELU()
@@ -231,46 +228,46 @@ class Mlp(nn.Module):
         x = self.dropout(x)
         return x
 
+
 class Block_ViT(nn.Module):
     def __init__(self, vis, channel_num):
-        super(Block_ViT, self).__init__()
+        super().__init__()
         expand_ratio = 4
-        self.attn_norm1 = LayerNorm(channel_num[0],eps=1e-6)
-        self.attn_norm2 = LayerNorm(channel_num[1],eps=1e-6)
-        self.attn_norm3 = LayerNorm(channel_num[2],eps=1e-6)
-        self.attn_norm4 = LayerNorm(channel_num[3],eps=1e-6) if len(channel_num) == 4 else nn.Identity()
-        self.attn_norm =  LayerNorm(sum(channel_num),eps=1e-6)
+        self.attn_norm1 = LayerNorm(channel_num[0], eps=1e-6)
+        self.attn_norm2 = LayerNorm(channel_num[1], eps=1e-6)
+        self.attn_norm3 = LayerNorm(channel_num[2], eps=1e-6)
+        self.attn_norm4 = LayerNorm(channel_num[3], eps=1e-6) if len(channel_num) == 4 else nn.Identity()
+        self.attn_norm = LayerNorm(sum(channel_num), eps=1e-6)
         self.channel_attn = Attention_org(vis, channel_num)
 
-        self.ffn_norm1 = LayerNorm(channel_num[0],eps=1e-6)
-        self.ffn_norm2 = LayerNorm(channel_num[1],eps=1e-6)
-        self.ffn_norm3 = LayerNorm(channel_num[2],eps=1e-6)
-        self.ffn_norm4 = LayerNorm(channel_num[3],eps=1e-6) if len(channel_num) == 4 else nn.Identity()
-        self.ffn1 = Mlp(channel_num[0],channel_num[0]*expand_ratio)
-        self.ffn2 = Mlp(channel_num[1],channel_num[1]*expand_ratio)
-        self.ffn3 = Mlp(channel_num[2],channel_num[2]*expand_ratio)
-        self.ffn4 = Mlp(channel_num[3],channel_num[3]*expand_ratio) if len(channel_num) == 4 else nn.Identity()
+        self.ffn_norm1 = LayerNorm(channel_num[0], eps=1e-6)
+        self.ffn_norm2 = LayerNorm(channel_num[1], eps=1e-6)
+        self.ffn_norm3 = LayerNorm(channel_num[2], eps=1e-6)
+        self.ffn_norm4 = LayerNorm(channel_num[3], eps=1e-6) if len(channel_num) == 4 else nn.Identity()
+        self.ffn1 = Mlp(channel_num[0], channel_num[0] * expand_ratio)
+        self.ffn2 = Mlp(channel_num[1], channel_num[1] * expand_ratio)
+        self.ffn3 = Mlp(channel_num[2], channel_num[2] * expand_ratio)
+        self.ffn4 = Mlp(channel_num[3], channel_num[3] * expand_ratio) if len(channel_num) == 4 else nn.Identity()
 
-
-    def forward(self, emb1,emb2,emb3,emb4):
+    def forward(self, emb1, emb2, emb3, emb4):
         embcat = []
         org1 = emb1
         org2 = emb2
         org3 = emb3
         org4 = emb4
         for i in range(4):
-            var_name = "emb"+str(i+1)
+            var_name = "emb" + str(i + 1)
             tmp_var = locals()[var_name]
             if tmp_var is not None:
                 embcat.append(tmp_var)
 
-        emb_all = torch.cat(embcat,dim=2)
+        emb_all = torch.cat(embcat, dim=2)
         cx1 = self.attn_norm1(emb1) if emb1 is not None else None
         cx2 = self.attn_norm2(emb2) if emb2 is not None else None
         cx3 = self.attn_norm3(emb3) if emb3 is not None else None
         cx4 = self.attn_norm4(emb4) if emb4 is not None else None
         emb_all = self.attn_norm(emb_all)
-        cx1,cx2,cx3,cx4, weights = self.channel_attn(cx1,cx2,cx3,cx4,emb_all)
+        cx1, cx2, cx3, cx4, weights = self.channel_attn(cx1, cx2, cx3, cx4, emb_all)
         cx1 = org1 + cx1 if emb1 is not None else None
         cx2 = org2 + cx2 if emb2 is not None else None
         cx3 = org3 + cx3 if emb3 is not None else None
@@ -298,28 +295,28 @@ class Block_ViT(nn.Module):
 
 class Encoder(nn.Module):
     def __init__(self, vis, channel_num):
-        super(Encoder, self).__init__()
+        super().__init__()
         self.vis = vis
         self.layer = nn.ModuleList()
-        self.encoder_norm1 = LayerNorm(channel_num[0],eps=1e-6)
-        self.encoder_norm2 = LayerNorm(channel_num[1],eps=1e-6)
-        self.encoder_norm3 = LayerNorm(channel_num[2],eps=1e-6)
-        self.encoder_norm4 = LayerNorm(channel_num[3],eps=1e-6) if len(channel_num) == 4 else nn.Identity()
+        self.encoder_norm1 = LayerNorm(channel_num[0], eps=1e-6)
+        self.encoder_norm2 = LayerNorm(channel_num[1], eps=1e-6)
+        self.encoder_norm3 = LayerNorm(channel_num[2], eps=1e-6)
+        self.encoder_norm4 = LayerNorm(channel_num[3], eps=1e-6) if len(channel_num) == 4 else nn.Identity()
         for _ in range(1):
             layer = Block_ViT(vis, channel_num)
             self.layer.append(copy.deepcopy(layer))
 
-    def forward(self, emb1,emb2,emb3,emb4):
+    def forward(self, emb1, emb2, emb3, emb4):
         attn_weights = []
         for layer_block in self.layer:
-            emb1,emb2,emb3,emb4, weights = layer_block(emb1,emb2,emb3,emb4)
+            emb1, emb2, emb3, emb4, weights = layer_block(emb1, emb2, emb3, emb4)
             if self.vis:
                 attn_weights.append(weights)
         emb1 = self.encoder_norm1(emb1) if emb1 is not None else None
         emb2 = self.encoder_norm2(emb2) if emb2 is not None else None
         emb3 = self.encoder_norm3(emb3) if emb3 is not None else None
         emb4 = self.encoder_norm4(emb4) if emb4 is not None else None
-        return emb1,emb2,emb3,emb4, attn_weights
+        return emb1, emb2, emb3, emb4, attn_weights
 
 
 class ChannelTransformer(nn.Module):
@@ -330,46 +327,65 @@ class ChannelTransformer(nn.Module):
         self.patchSize_2 = patchSize[1]
         self.patchSize_3 = patchSize[2]
         self.patchSize_4 = patchSize[3]
-        self.embeddings_1 = Channel_Embeddings(self.patchSize_1, img_size=img_size // 8,  in_channels=channel_num[0])
+        self.embeddings_1 = Channel_Embeddings(self.patchSize_1, img_size=img_size // 8, in_channels=channel_num[0])
         self.embeddings_2 = Channel_Embeddings(self.patchSize_2, img_size=img_size // 16, in_channels=channel_num[1])
         self.embeddings_3 = Channel_Embeddings(self.patchSize_3, img_size=img_size // 32, in_channels=channel_num[2])
-        self.embeddings_4 = Channel_Embeddings(self.patchSize_4, img_size=img_size // 64, in_channels=channel_num[3]) if len(channel_num) == 4 else nn.Identity()
+        self.embeddings_4 = (
+            Channel_Embeddings(self.patchSize_4, img_size=img_size // 64, in_channels=channel_num[3])
+            if len(channel_num) == 4
+            else nn.Identity()
+        )
         self.encoder = Encoder(vis, channel_num)
 
-        self.reconstruct_1 = Reconstruct(channel_num[0], channel_num[0], kernel_size=1,scale_factor=(self.patchSize_1,self.patchSize_1))
-        self.reconstruct_2 = Reconstruct(channel_num[1], channel_num[1], kernel_size=1,scale_factor=(self.patchSize_2,self.patchSize_2))
-        self.reconstruct_3 = Reconstruct(channel_num[2], channel_num[2], kernel_size=1,scale_factor=(self.patchSize_3,self.patchSize_3))
-        self.reconstruct_4 = Reconstruct(channel_num[3], channel_num[3], kernel_size=1,scale_factor=(self.patchSize_4,self.patchSize_4)) if len(channel_num) == 4 else nn.Identity()
+        self.reconstruct_1 = Reconstruct(
+            channel_num[0], channel_num[0], kernel_size=1, scale_factor=(self.patchSize_1, self.patchSize_1)
+        )
+        self.reconstruct_2 = Reconstruct(
+            channel_num[1], channel_num[1], kernel_size=1, scale_factor=(self.patchSize_2, self.patchSize_2)
+        )
+        self.reconstruct_3 = Reconstruct(
+            channel_num[2], channel_num[2], kernel_size=1, scale_factor=(self.patchSize_3, self.patchSize_3)
+        )
+        self.reconstruct_4 = (
+            Reconstruct(
+                channel_num[3], channel_num[3], kernel_size=1, scale_factor=(self.patchSize_4, self.patchSize_4)
+            )
+            if len(channel_num) == 4
+            else nn.Identity()
+        )
 
     def forward(self, en):
         if len(en) == 3:
-            en1,en2,en3 = en
+            en1, en2, en3 = en
             en4 = None
         elif len(en) == 4:
-            en1,en2,en3,en4 = en
-        
+            en1, en2, en3, en4 = en
+
         emb1 = self.embeddings_1(en1) if en1 is not None else None
         emb2 = self.embeddings_2(en2) if en2 is not None else None
         emb3 = self.embeddings_3(en3) if en3 is not None else None
         emb4 = self.embeddings_4(en4) if en4 is not None else None
 
-        encoded1, encoded2, encoded3, encoded4, attn_weights = self.encoder(emb1,emb2,emb3,emb4)  # (B, n_patch, hidden)
+        encoded1, encoded2, encoded3, encoded4, attn_weights = self.encoder(
+            emb1, emb2, emb3, emb4
+        )  # (B, n_patch, hidden)
         x1 = self.reconstruct_1(encoded1) if en1 is not None else None
         x2 = self.reconstruct_2(encoded2) if en2 is not None else None
         x3 = self.reconstruct_3(encoded3) if en3 is not None else None
         x4 = self.reconstruct_4(encoded4) if en4 is not None else None
 
-        x1 = x1 + en1  if en1 is not None else None
-        x2 = x2 + en2  if en2 is not None else None
-        x3 = x3 + en3  if en3 is not None else None
-        x4 = x4 + en4  if en4 is not None else None
+        x1 = x1 + en1 if en1 is not None else None
+        x2 = x2 + en2 if en2 is not None else None
+        x3 = x3 + en3 if en3 is not None else None
+        x4 = x4 + en4 if en4 is not None else None
 
         return [x1, x2, x3, x4]
+
 
 class GetIndexOutput(nn.Module):
     def __init__(self, index) -> None:
         super().__init__()
         self.index = index
-    
+
     def forward(self, x):
         return x[self.index]

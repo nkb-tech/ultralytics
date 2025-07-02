@@ -1,24 +1,57 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.init import constant_, xavier_uniform_
 
-from ..modules import Conv, DFL, C2f, RepConv, Proto, Segment, Pose, OBB, DSConv
+from ultralytics.utils.tal import dist2bbox, dist2rbox, make_anchors
+
+from ..modules import DFL, Conv, DSConv, Proto
 from ..modules.conv import autopad
+from .afpn import AFPN_P345, AFPN_P2345, AFPN_P345_Custom, AFPN_P2345_Custom
 from .block import *
-from .rep_block import *
-from .afpn import AFPN_P345, AFPN_P345_Custom, AFPN_P2345, AFPN_P2345_Custom
-from .dyhead_prune import DyHeadBlock_Prune
 from .block import DyDCNv2
-from ultralytics.utils.tal import dist2bbox, make_anchors, dist2rbox
+from .dyhead_prune import DyHeadBlock_Prune
+from .rep_block import *
 
-__all__ = ['Detect_DyHead', 'Detect_DyHeadWithDCNV3', 'Detect_DyHeadWithDCNV4', 'Detect_AFPN_P345', 'Detect_AFPN_P345_Custom', 'Detect_AFPN_P2345', 'Detect_AFPN_P2345_Custom', 'Detect_Efficient', 'DetectAux',
-           'Segment_Efficient', 'Detect_SEAM', 'Detect_MultiSEAM', 'Detect_DyHead_Prune', 'Detect_LSCD', 'Segment_LSCD', 'Pose_LSCD', 'OBB_LSCD', 'Detect_TADDH', 'Segment_TADDH', 'Pose_TADDH', 'OBB_TADDH',
-           'Detect_LADH', 'Segment_LADH', 'Pose_LADH', 'OBB_LADH', 'Detect_LSCSBD', 'Segment_LSCSBD', 'Pose_LSCSBD', 'OBB_LSCSBD']
+__all__ = [
+    "Detect_DyHead",
+    "Detect_DyHeadWithDCNV3",
+    "Detect_DyHeadWithDCNV4",
+    "Detect_AFPN_P345",
+    "Detect_AFPN_P345_Custom",
+    "Detect_AFPN_P2345",
+    "Detect_AFPN_P2345_Custom",
+    "Detect_Efficient",
+    "DetectAux",
+    "Segment_Efficient",
+    "Detect_SEAM",
+    "Detect_MultiSEAM",
+    "Detect_DyHead_Prune",
+    "Detect_LSCD",
+    "Segment_LSCD",
+    "Pose_LSCD",
+    "OBB_LSCD",
+    "Detect_TADDH",
+    "Segment_TADDH",
+    "Pose_TADDH",
+    "OBB_TADDH",
+    "Detect_LADH",
+    "Segment_LADH",
+    "Pose_LADH",
+    "OBB_LADH",
+    "Detect_LSCSBD",
+    "Segment_LSCSBD",
+    "Pose_LSCSBD",
+    "OBB_LSCSBD",
+]
+
 
 class Detect_DyHead(nn.Module):
     """YOLOv8 Detect head with DyHead for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -36,8 +69,11 @@ class Detect_DyHead(nn.Module):
         self.conv = nn.ModuleList(nn.Sequential(Conv(x, hidc, 1)) for x in ch)
         self.dyhead = nn.Sequential(*[DyHeadBlock(hidc) for i in range(block_num)])
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch)
+            nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch
+        )
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch
+        )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def forward(self, x):
@@ -55,9 +91,9 @@ class Detect_DyHead(nn.Module):
             self.shape = shape
 
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
-        if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
-            box = x_cat[:, :self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+        if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
@@ -71,20 +107,24 @@ class Detect_DyHead(nn.Module):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
 
 class Detect_DyHeadWithDCNV3(Detect_DyHead):
     def __init__(self, nc=80, hidc=256, block_num=2, ch=()):
         super().__init__(nc, hidc, block_num, ch)
         self.dyhead = nn.Sequential(*[DyHeadBlockWithDCNV3(hidc) for i in range(block_num)])
 
+
 class Detect_DyHeadWithDCNV4(Detect_DyHead):
     def __init__(self, nc=80, hidc=256, block_num=2, ch=()):
         super().__init__(nc, hidc, block_num, ch)
         self.dyhead = nn.Sequential(*[DyHeadBlockWithDCNV4(hidc) for i in range(block_num)])
 
+
 class Detect_AFPN_P345(nn.Module):
     """YOLOv8 Detect head with AFPN for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -101,8 +141,11 @@ class Detect_AFPN_P345(nn.Module):
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], self.nc)  # channels
         self.afpn = AFPN_P345(ch, hidc)
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch)
+            nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch
+        )
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch
+        )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def forward(self, x):
@@ -118,9 +161,9 @@ class Detect_AFPN_P345(nn.Module):
             self.shape = shape
 
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
-        if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
-            box = x_cat[:, :self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+        if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
@@ -134,22 +177,26 @@ class Detect_AFPN_P345(nn.Module):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
 
 class Detect_AFPN_P345_Custom(Detect_AFPN_P345):
     """YOLOv8 Detect head with AFPN for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, hidc=256, block_type='C2f', ch=()):  # detection layer
+    def __init__(self, nc=80, hidc=256, block_type="C2f", ch=()):  # detection layer
         super().__init__(nc, hidc, ch)
         self.afpn = AFPN_P345_Custom(ch, hidc, block_type, 4)
 
+
 class Detect_AFPN_P2345(Detect_AFPN_P345):
     """YOLOv8 Detect head with AFPN for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -160,20 +207,24 @@ class Detect_AFPN_P2345(Detect_AFPN_P345):
         super().__init__(nc, hidc, ch)
         self.afpn = AFPN_P2345(ch, hidc)
 
+
 class Detect_AFPN_P2345_Custom(Detect_AFPN_P345):
     """YOLOv8 Detect head with AFPN for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, hidc=256, block_type='C2f', ch=()):  # detection layer
+    def __init__(self, nc=80, hidc=256, block_type="C2f", ch=()):  # detection layer
         super().__init__(nc, hidc, ch)
         self.afpn = AFPN_P2345_Custom(ch, hidc, block_type)
 
+
 class Detect_Efficient(nn.Module):
     """YOLOv8 Detect Efficient head for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -187,7 +238,7 @@ class Detect_Efficient(nn.Module):
         self.reg_max = 16  # DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
-        self.stem = nn.ModuleList(nn.Sequential(Conv(x, x, 3), Conv(x, x, 3)) for x in ch) # two 3x3 Conv
+        self.stem = nn.ModuleList(nn.Sequential(Conv(x, x, 3), Conv(x, x, 3)) for x in ch)  # two 3x3 Conv
         # self.stem = nn.ModuleList(nn.Sequential(Conv(x, x, 3, g=x // 16), Conv(x, x, 3, g=x // 16)) for x in ch) # two 3x3 Group Conv
         # self.stem = nn.ModuleList(nn.Sequential(Conv(x, x, 1), Conv(x, x, 3)) for x in ch) # one 1x1 Conv, one 3x3 Conv
         # self.stem = nn.ModuleList(nn.Sequential(EMSConv(x), Conv(x, x, 1)) for x in ch) # one EMSConv, one 1x1 Conv
@@ -214,9 +265,9 @@ class Detect_Efficient(nn.Module):
             self.shape = shape
 
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
-        if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
-            box = x_cat[:, :self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+        if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
@@ -230,10 +281,12 @@ class Detect_Efficient(nn.Module):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a.bias.data[:] = 1.0  # box
-            b.bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+            b.bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
 
 class DetectAux(nn.Module):
     """YOLOv8 Detect head with Aux Head for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -249,13 +302,19 @@ class DetectAux(nn.Module):
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], self.nc)  # channels
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch[:self.nl])
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch[:self.nl])
+            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch[: self.nl]
+        )
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch[: self.nl]
+        )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
-        
+
         self.cv4 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch[self.nl:])
-        self.cv5 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch[self.nl:])
+            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch[self.nl :]
+        )
+        self.cv5 = nn.ModuleList(
+            nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch[self.nl :]
+        )
         self.dfl_aux = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def forward(self, x):
@@ -268,22 +327,22 @@ class DetectAux(nn.Module):
                 x[i] = torch.cat((self.cv4[i - self.nl](x[i]), self.cv5[i - self.nl](x[i])), 1)
             return x
         elif self.dynamic or self.shape != shape:
-            if hasattr(self, 'dfl_aux'):
+            if hasattr(self, "dfl_aux"):
                 for i in range(self.nl, 2 * self.nl):
                     x[i] = torch.cat((self.cv4[i - self.nl](x[i]), self.cv5[i - self.nl](x[i])), 1)
-            
-            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x[:self.nl], self.stride, 0.5))
+
+            self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x[: self.nl], self.stride, 0.5))
             self.shape = shape
 
-        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x[:self.nl]], 2)
-        if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
-            box = x_cat[:, :self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+        x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x[: self.nl]], 2)
+        if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
         y = torch.cat((dbox, cls.sigmoid()), 1)
-        return y if self.export else (y, x[:self.nl])
+        return y if self.export else (y, x[: self.nl])
 
     def bias_init(self):
         """Initialize Detect() biases, WARNING: requires stride availability."""
@@ -292,17 +351,19 @@ class DetectAux(nn.Module):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
-        
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
         for a, b, s in zip(m.cv4, m.cv5, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
-    
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
     def switch_to_deploy(self):
         del self.cv4, self.cv5, self.dfl_aux
 
+
 class Detect_SEAM(nn.Module):
     """YOLOv8 Detect head for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -319,8 +380,11 @@ class Detect_SEAM(nn.Module):
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), SEAM(c2, c2, 1, 16), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), SEAM(c3, c3, 1, 16), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+            nn.Sequential(Conv(x, c2, 3), SEAM(c2, c2, 1, 16), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
+        )
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(x, c3, 3), SEAM(c3, c3, 1, 16), nn.Conv2d(c3, self.nc, 1)) for x in ch
+        )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def forward(self, x):
@@ -335,14 +399,14 @@ class Detect_SEAM(nn.Module):
             self.shape = shape
 
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
-        if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
-            box = x_cat[:, :self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+        if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
 
-        if self.export and self.format in ('tflite', 'edgetpu'):
+        if self.export and self.format in ("tflite", "edgetpu"):
             # Normalize xywh with image size to mitigate quantization error of TFLite integer models as done in YOLOv5:
             # https://github.com/ultralytics/yolov5/blob/0c8de3fca4a702f8ff5c435e67f378d1fce70243/models/tf.py#L307-L309
             # See this PR for details: https://github.com/ultralytics/ultralytics/pull/1695
@@ -361,7 +425,8 @@ class Detect_SEAM(nn.Module):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
 
 class Detect_MultiSEAM(Detect_SEAM):
     def __init__(self, nc=80, ch=()):
@@ -373,12 +438,17 @@ class Detect_MultiSEAM(Detect_SEAM):
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), MultiSEAM(c2, c2, 1), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), MultiSEAM(c3, c3, 1), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+            nn.Sequential(Conv(x, c2, 3), MultiSEAM(c2, c2, 1), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
+        )
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(x, c3, 3), MultiSEAM(c3, c3, 1), nn.Conv2d(c3, self.nc, 1)) for x in ch
+        )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
+
 
 class Detect_DyHead_Prune(nn.Module):
     """YOLOv8 Detect head with DyHead for detection models."""
+
     dynamic = False  # force grid reconstruction
     export = False  # export mode
     shape = None
@@ -396,8 +466,11 @@ class Detect_DyHead_Prune(nn.Module):
         self.conv = nn.ModuleList(nn.Sequential(Conv(x, hidc, 1)) for x in ch)
         self.dyhead = DyHeadBlock_Prune(hidc)
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch)
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch)
+            nn.Sequential(Conv(hidc, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for _ in ch
+        )
+        self.cv3 = nn.ModuleList(
+            nn.Sequential(Conv(hidc, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for _ in ch
+        )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
     def forward(self, x):
@@ -418,9 +491,9 @@ class Detect_DyHead_Prune(nn.Module):
             self.shape = shape
 
         x_cat = torch.cat([xi.view(shape[0], self.no, -1) for xi in x], 2)
-        if self.export and self.format in ('saved_model', 'pb', 'tflite', 'edgetpu', 'tfjs'):  # avoid TF FlexSplitV ops
-            box = x_cat[:, :self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4:]
+        if self.export and self.format in ("saved_model", "pb", "tflite", "edgetpu", "tfjs"):  # avoid TF FlexSplitV ops
+            box = x_cat[:, : self.reg_max * 4]
+            cls = x_cat[:, self.reg_max * 4 :]
         else:
             box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
         dbox = dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
@@ -434,7 +507,8 @@ class Detect_DyHead_Prune(nn.Module):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[:m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+
 
 class Segment_Efficient(Detect_Efficient):
     """YOLOv8 Segment head for segmentation models."""
@@ -461,6 +535,7 @@ class Segment_Efficient(Detect_Efficient):
             return x, mc, p
         return (torch.cat([x, mc], 1), p) if self.export else (torch.cat([x[0], mc], 1), (x[1], mc, p))
 
+
 class Scale(nn.Module):
     """A learnable scale parameter.
 
@@ -478,6 +553,7 @@ class Scale(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x * self.scale
 
+
 class Conv_GN(nn.Module):
     """Standard convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)."""
 
@@ -493,6 +569,7 @@ class Conv_GN(nn.Module):
     def forward(self, x):
         """Apply convolution, batch normalization and activation to input tensor."""
         return self.act(self.gn(self.conv(x)))
+
 
 class Detect_LSCD(nn.Module):
     # Lightweight Shared Convolutional Detection Head
@@ -567,6 +644,7 @@ class Detect_LSCD(nn.Module):
         """Decode bounding boxes."""
         return dist2bbox(self.dfl(bboxes), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
 
+
 class Segment_LSCD(Detect_LSCD):
     """YOLOv8 Segment head for segmentation models."""
 
@@ -579,7 +657,9 @@ class Segment_LSCD(Detect_LSCD):
         self.detect = Detect_LSCD.forward
 
         c4 = max(ch[0] // 4, self.nm)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv_GN(x, c4, 1), Conv_GN(c4, c4, 3), nn.Conv2d(c4, self.nm, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(Conv_GN(x, c4, 1), Conv_GN(c4, c4, 3), nn.Conv2d(c4, self.nm, 1)) for x in ch
+        )
 
     def forward(self, x):
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
@@ -591,6 +671,7 @@ class Segment_LSCD(Detect_LSCD):
         if self.training:
             return x, mc, p
         return (torch.cat([x, mc], 1), p) if self.export else (torch.cat([x[0], mc], 1), (x[1], mc, p))
+
 
 class Pose_LSCD(Detect_LSCD):
     """YOLOv8 Pose head for keypoints models."""
@@ -632,6 +713,7 @@ class Pose_LSCD(Detect_LSCD):
             y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
             return y
 
+
 class OBB_LSCD(Detect_LSCD):
     """YOLOv8 OBB detection head for detection with rotation models."""
 
@@ -642,7 +724,9 @@ class OBB_LSCD(Detect_LSCD):
         self.detect = Detect_LSCD.forward
 
         c4 = max(ch[0] // 4, self.ne)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv_GN(x, c4, 1), Conv_GN(c4, c4, 3), nn.Conv2d(c4, self.ne, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(Conv_GN(x, c4, 1), Conv_GN(c4, c4, 3), nn.Conv2d(c4, self.ne, 1)) for x in ch
+        )
 
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
@@ -662,26 +746,27 @@ class OBB_LSCD(Detect_LSCD):
         """Decode rotated bounding boxes."""
         return dist2rbox(self.dfl(bboxes), self.angle, self.anchors.unsqueeze(0), dim=1) * self.strides
 
+
 class TaskDecomposition(nn.Module):
     def __init__(self, feat_channels, stacked_convs, la_down_rate=8):
-        super(TaskDecomposition, self).__init__()
+        super().__init__()
         self.feat_channels = feat_channels
         self.stacked_convs = stacked_convs
         self.in_channels = self.feat_channels * self.stacked_convs
-        self.la_conv1 = nn.Conv2d( self.in_channels,  self.in_channels // la_down_rate, 1)
+        self.la_conv1 = nn.Conv2d(self.in_channels, self.in_channels // la_down_rate, 1)
         self.relu = nn.ReLU(inplace=True)
-        self.la_conv2 = nn.Conv2d( self.in_channels // la_down_rate,  self.stacked_convs, 1, padding=0)
+        self.la_conv2 = nn.Conv2d(self.in_channels // la_down_rate, self.stacked_convs, 1, padding=0)
         self.sigmoid = nn.Sigmoid()
-        
+
         self.reduction_conv = Conv_GN(self.in_channels, self.feat_channels, 1)
         self.init_weights()
-        
+
     def init_weights(self):
         # self.la_conv1.weight.normal_(std=0.001)
         # self.la_conv2.weight.normal_(std=0.001)
         # self.la_conv2.bias.data.zero_()
         # self.reduction_conv.conv.weight.normal_(std=0.01)
-        
+
         torch.nn.init.normal_(self.la_conv1.weight.data, mean=0, std=0.001)
         torch.nn.init.normal_(self.la_conv2.weight.data, mean=0, std=0.001)
         torch.nn.init.zeros_(self.la_conv2.bias.data)
@@ -697,8 +782,9 @@ class TaskDecomposition(nn.Module):
         # here we first compute the product between layer attention weight and conv weight,
         # and then compute the convolution between new conv weight and feature map,
         # in order to save memory and FLOPs.
-        conv_weight = weight.reshape(b, 1, self.stacked_convs, 1) * \
-                          self.reduction_conv.conv.weight.reshape(1, self.feat_channels, self.stacked_convs, self.feat_channels)
+        conv_weight = weight.reshape(b, 1, self.stacked_convs, 1) * self.reduction_conv.conv.weight.reshape(
+            1, self.feat_channels, self.stacked_convs, self.feat_channels
+        )
         conv_weight = conv_weight.reshape(b, self.feat_channels, self.in_channels)
         feat = feat.reshape(b, self.in_channels, h * w)
         feat = torch.bmm(conv_weight, feat).reshape(b, self.feat_channels, h, w)
@@ -706,6 +792,7 @@ class TaskDecomposition(nn.Module):
         feat = self.reduction_conv.act(feat)
 
         return feat
+
 
 class Detect_TADDH(nn.Module):
     # Task Dynamic Align Detection Head
@@ -744,21 +831,21 @@ class Detect_TADDH(nn.Module):
             stack_res_list = [self.share_conv[0](x[i])]
             stack_res_list.extend(m(stack_res_list[-1]) for m in self.share_conv[1:])
             feat = torch.cat(stack_res_list, dim=1)
-            
+
             # task decomposition
             avg_feat = F.adaptive_avg_pool2d(feat, (1, 1))
             cls_feat = self.cls_decomp(feat, avg_feat)
             reg_feat = self.reg_decomp(feat, avg_feat)
-            
+
             # reg alignment
             offset_and_mask = self.spatial_conv_offset(feat)
-            offset = offset_and_mask[:, :self.offset_dim, :, :]
-            mask = offset_and_mask[:, self.offset_dim:, :, :].sigmoid()
+            offset = offset_and_mask[:, : self.offset_dim, :, :]
+            mask = offset_and_mask[:, self.offset_dim :, :, :].sigmoid()
             reg_feat = self.DyDCNV2(reg_feat, offset, mask)
-            
+
             # cls alignment
             cls_prob = self.cls_prob_conv2(F.relu(self.cls_prob_conv1(feat))).sigmoid()
-            
+
             x[i] = torch.cat((self.scale[i](self.cv2(reg_feat)), self.cv3(cls_feat * cls_prob)), 1)
         if self.training:  # Training path
             return x
@@ -802,6 +889,7 @@ class Detect_TADDH(nn.Module):
         """Decode bounding boxes."""
         return dist2bbox(self.dfl(bboxes), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
 
+
 class Segment_TADDH(Detect_TADDH):
     """YOLOv8 Segment head for segmentation models."""
 
@@ -814,7 +902,9 @@ class Segment_TADDH(Detect_TADDH):
         self.detect = Detect_TADDH.forward
 
         c4 = max(ch[0] // 4, self.nm)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv_GN(x, c4, 1), Conv_GN(c4, c4, 3), nn.Conv2d(c4, self.nm, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(Conv_GN(x, c4, 1), Conv_GN(c4, c4, 3), nn.Conv2d(c4, self.nm, 1)) for x in ch
+        )
 
     def forward(self, x):
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
@@ -826,6 +916,7 @@ class Segment_TADDH(Detect_TADDH):
         if self.training:
             return x, mc, p
         return (torch.cat([x, mc], 1), p) if self.export else (torch.cat([x[0], mc], 1), (x[1], mc, p))
+
 
 class Pose_TADDH(Detect_TADDH):
     """YOLOv8 Pose head for keypoints models."""
@@ -867,6 +958,7 @@ class Pose_TADDH(Detect_TADDH):
             y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
             return y
 
+
 class OBB_TADDH(Detect_TADDH):
     """YOLOv8 OBB detection head for detection with rotation models."""
 
@@ -877,7 +969,9 @@ class OBB_TADDH(Detect_TADDH):
         self.detect = Detect_TADDH.forward
 
         c4 = max(ch[0] // 4, self.ne)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv_GN(x, c4, 1), Conv_GN(c4, c4, 3), nn.Conv2d(c4, self.ne, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(Conv_GN(x, c4, 1), Conv_GN(c4, c4, 3), nn.Conv2d(c4, self.ne, 1)) for x in ch
+        )
 
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
@@ -896,6 +990,7 @@ class OBB_TADDH(Detect_TADDH):
     def decode_bboxes(self, bboxes):
         """Decode rotated bounding boxes."""
         return dist2rbox(self.dfl(bboxes), self.angle, self.anchors.unsqueeze(0), dim=1) * self.strides
+
 
 class Detect_LADH(nn.Module):
     """YOLOv8 Detect head for detection models."""
@@ -916,7 +1011,14 @@ class Detect_LADH(nn.Module):
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
-            nn.Sequential(DSConv(x, c2, 3), DSConv(c2, c2, 3), DSConv(c2, c2, 3), Conv(c2, c2, 1), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
+            nn.Sequential(
+                DSConv(x, c2, 3),
+                DSConv(c2, c2, 3),
+                DSConv(c2, c2, 3),
+                Conv(c2, c2, 1),
+                nn.Conv2d(c2, 4 * self.reg_max, 1),
+            )
+            for x in ch
         )
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 1), Conv(c3, c3, 1), nn.Conv2d(c3, self.nc, 1)) for x in ch)
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
@@ -967,6 +1069,7 @@ class Detect_LADH(nn.Module):
         """Decode bounding boxes."""
         return dist2bbox(self.dfl(bboxes), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
 
+
 class Segment_LADH(Detect_LADH):
     """YOLOv8 Segment head for segmentation models."""
 
@@ -979,7 +1082,9 @@ class Segment_LADH(Detect_LADH):
         self.detect = Detect_LADH.forward
 
         c4 = max(ch[0] // 4, self.nm)
-        self.cv4 = nn.ModuleList(nn.Sequential(DSConv(x, c4, 3), DSConv(c4, c4, 3), Conv(c4, c4, 1), nn.Conv2d(c4, self.nm, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(DSConv(x, c4, 3), DSConv(c4, c4, 3), Conv(c4, c4, 1), nn.Conv2d(c4, self.nm, 1)) for x in ch
+        )
 
     def forward(self, x):
         """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
@@ -992,6 +1097,7 @@ class Segment_LADH(Detect_LADH):
             return x, mc, p
         return (torch.cat([x, mc], 1), p) if self.export else (torch.cat([x[0], mc], 1), (x[1], mc, p))
 
+
 class Pose_LADH(Detect_LADH):
     """YOLOv8 Pose head for keypoints models."""
 
@@ -1003,7 +1109,9 @@ class Pose_LADH(Detect_LADH):
         self.detect = Detect_LADH.forward
 
         c4 = max(ch[0] // 4, self.nk)
-        self.cv4 = nn.ModuleList(nn.Sequential(DSConv(x, c4, 3), DSConv(c4, c4, 3), Conv(c4, c4, 1), nn.Conv2d(c4, self.nk, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(DSConv(x, c4, 3), DSConv(c4, c4, 3), Conv(c4, c4, 1), nn.Conv2d(c4, self.nk, 1)) for x in ch
+        )
 
     def forward(self, x):
         """Perform forward pass through YOLO model and return predictions."""
@@ -1032,6 +1140,7 @@ class Pose_LADH(Detect_LADH):
             y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
             return y
 
+
 class OBB_LADH(Detect_LADH):
     """YOLOv8 OBB detection head for detection with rotation models."""
 
@@ -1042,7 +1151,9 @@ class OBB_LADH(Detect_LADH):
         self.detect = Detect_LADH.forward
 
         c4 = max(ch[0] // 4, self.ne)
-        self.cv4 = nn.ModuleList(nn.Sequential(DSConv(x, c4, 3), Conv(c4, c4, 1), nn.Conv2d(c4, self.ne, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(
+            nn.Sequential(DSConv(x, c4, 3), Conv(c4, c4, 1), nn.Conv2d(c4, self.ne, 1)) for x in ch
+        )
 
     def forward(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
@@ -1061,6 +1172,7 @@ class OBB_LADH(Detect_LADH):
     def decode_bboxes(self, bboxes):
         """Decode rotated bounding boxes."""
         return dist2rbox(self.dfl(bboxes), self.angle, self.anchors.unsqueeze(0), dim=1) * self.strides
+
 
 class Detect_LSCSBD(nn.Module):
     # Lightweight Shared Convolutional Separate BN Detection Head
@@ -1137,7 +1249,8 @@ class Detect_LSCSBD(nn.Module):
     def decode_bboxes(self, bboxes):
         """Decode bounding boxes."""
         return dist2bbox(self.dfl(bboxes), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
-    
+
+
 class Segment_LSCSBD(Detect_LSCSBD):
     """YOLOv8 Segment head for segmentation models."""
 
@@ -1162,6 +1275,7 @@ class Segment_LSCSBD(Detect_LSCSBD):
         if self.training:
             return x, mc, p
         return (torch.cat([x, mc], 1), p) if self.export else (torch.cat([x[0], mc], 1), (x[1], mc, p))
+
 
 class Pose_LSCSBD(Detect_LSCSBD):
     """YOLOv8 Pose head for keypoints models."""
@@ -1202,6 +1316,7 @@ class Pose_LSCSBD(Detect_LSCSBD):
             y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)) * self.strides
             y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
             return y
+
 
 class OBB_LSCSBD(Detect_LSCSBD):
     """YOLOv8 OBB detection head for detection with rotation models."""

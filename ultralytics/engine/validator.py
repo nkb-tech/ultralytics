@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """
 Check a model's accuracy on a test or val split of a dataset.
 
@@ -119,9 +119,7 @@ class BaseValidator:
                 self.loss = torch.zeros_like(trainer.loss_items, device=trainer.device)
             else:
                 self.loss = torch.zeros(
-                    len(trainer.loss_items-1)
-                    if self.args.teacher is not None
-                    else len(trainer.loss_items),
+                    len(trainer.loss_items - 1) if self.args.teacher is not None else len(trainer.loss_items),
                     device=trainer.device,
                     dtype=trainer.loss_items.dtype,
                 )

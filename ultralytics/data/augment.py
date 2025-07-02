@@ -1,4 +1,5 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 import math
 import random
 from copy import deepcopy
@@ -278,9 +279,9 @@ class Compose:
         """
         assert isinstance(index, (int, list)), f"The indices should be either list or int type but got {type(index)}"
         if isinstance(index, list):
-            assert isinstance(
-                value, list
-            ), f"The indices should be the same type as values, but got {type(index)} and {type(value)}"
+            assert isinstance(value, list), (
+                f"The indices should be the same type as values, but got {type(index)} and {type(value)}"
+            )
         if isinstance(index, int):
             index, value = [index], [value]
         for i, v in zip(index, value):
@@ -2728,10 +2729,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
 
 
 def crop_transforms(dataset, imgsz, hyp, stretch=False):
-    """
-    Compose из кастомных SAHI-кропов + стандартных аугментаций.
-    """
-
+    """Compose из кастомных SAHI-кропов + стандартных аугментаций."""
     albu_args = {
         "dropout_prob": hyp.albu_dropout_prob if hasattr(hyp, "albu_dropout_prob") else None,
         "quality_lower": hyp.albu_quality_lower if hasattr(hyp, "albu_quality_lower") else None,
@@ -2787,9 +2785,7 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
 
 
 def crop_val_transforms(dataset, imgsz, hyp, stretch=False):
-    """
-    Compose из кастомных SAHI-кропов + стандартных аугментаций.
-    """
+    """Compose из кастомных SAHI-кропов + стандартных аугментаций."""
     transforms = []
 
     crop_transform = A.OneOf(

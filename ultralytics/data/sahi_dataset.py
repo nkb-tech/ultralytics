@@ -1,3 +1,5 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from functools import partial

@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import os
 import random
@@ -10,8 +10,16 @@ from PIL import Image
 from torch.utils.data import dataloader, distributed
 
 from ultralytics.data.dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset, YOLOWeightedDataset
-from ultralytics.data.loaders import (LOADERS, LoadImagesAndVideos, LoadPilAndNumpy, LoadScreenshots, LoadStreams,
-                                      LoadTensor, SourceTypes, autocast_list,)
+from ultralytics.data.loaders import (
+    LOADERS,
+    LoadImagesAndVideos,
+    LoadPilAndNumpy,
+    LoadScreenshots,
+    LoadStreams,
+    LoadTensor,
+    SourceTypes,
+    autocast_list,
+)
 from ultralytics.data.sahi_dataset import SAHIDataset
 from ultralytics.data.utils import IMG_FORMATS, PIN_MEMORY, VID_FORMATS
 from ultralytics.utils import RANK, colorstr

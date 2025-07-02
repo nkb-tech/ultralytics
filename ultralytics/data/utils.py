@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import contextlib
 import hashlib
@@ -346,10 +346,10 @@ def check_det_dataset(dataset, autodownload=True):
 def check_cls_dataset(dataset, split=""):
     """
     Checks a classification dataset such as Imagenet, now with .yaml support.
-    
+
     This function first checks if `dataset` is a YAML file. If so, it parses the YAML similar to `check_det_dataset`.
     Otherwise, it treats `dataset` as a directory (or attempts download if it's a known dataset name or URL).
-    
+
     Args:
         dataset (str | Path): The name or path of the dataset or a YAML file describing it.
         split (str, optional): The split of the dataset. Either 'val', 'test', or ''. Defaults to ''.
@@ -389,7 +389,9 @@ def check_cls_dataset(dataset, split=""):
             raise SyntaxError(emojis(f"{dataset} key missing ❌.\n either 'names' or 'nc' are required."))
 
         if "names" in data and "nc" in data and len(data["names"]) != data["nc"]:
-            raise SyntaxError(emojis(f"{dataset} 'names' length {len(data['names'])} does not match 'nc: {data['nc']}'."))
+            raise SyntaxError(
+                emojis(f"{dataset} 'names' length {len(data['names'])} does not match 'nc: {data['nc']}'.")
+            )
 
         # If only nc given, create generic names
         if "names" not in data:
@@ -422,7 +424,7 @@ def check_cls_dataset(dataset, split=""):
         # split='val' or 'test' means we might just return val or test sets.
         # For now, we assume user wants entire dataset info, not filtered by split.
         # If split == 'val', we might just return val sets as primary sets, and so forth.
-        
+
         # If nc/names provided by YAML, we don't need to scan. But we must ensure directories exist
         # If directories not found or empty, warn or raise error.
         # Check for existence of provided directories
@@ -458,7 +460,13 @@ def check_cls_dataset(dataset, split=""):
             LOGGER.info(s)
 
         train_dirs = [data_dir / "train"]
-        val_dirs = [data_dir / "val"] if (data_dir / "val").exists() else [data_dir / "validation"] if (data_dir / "validation").exists() else []
+        val_dirs = (
+            [data_dir / "val"]
+            if (data_dir / "val").exists()
+            else [data_dir / "validation"]
+            if (data_dir / "validation").exists()
+            else []
+        )
         test_dirs = [data_dir / "test"] if (data_dir / "test").exists() else []
 
         # Infer nc and names from directory structure
@@ -480,7 +488,7 @@ def check_cls_dataset(dataset, split=""):
             LOGGER.info(f"{colorstr(f'{name}:')} None")
             return
         for d in dirs:
-            prefix = f'{colorstr(f"{name}:")} {d}...'
+            prefix = f"{colorstr(f'{name}:')} {d}..."
             if not d.exists():
                 LOGGER.warning(f"{prefix} directory does not exist ⚠️")
                 continue
@@ -501,13 +509,7 @@ def check_cls_dataset(dataset, split=""):
     log_dataset_info("val", val_dirs)
     log_dataset_info("test", test_dirs)
 
-    return {
-        "train": train_dirs,
-        "val": val_dirs,
-        "test": test_dirs,
-        "nc": nc,
-        "names": names
-    }
+    return {"train": train_dirs, "val": val_dirs, "test": test_dirs, "nc": nc, "names": names}
 
 
 class HUBDatasetStats:
@@ -558,7 +560,7 @@ class HUBDatasetStats:
             except Exception as e:
                 raise Exception("error/HUB/dataset_stats/init") from e
 
-        self.hub_dir = Path(f'{data["path"]}-hub')
+        self.hub_dir = Path(f"{data['path']}-hub")
         self.im_dir = self.hub_dir / "images"
         self.stats = {"nc": len(data["names"]), "names": list(data["names"].values())}  # statistics dictionary
         self.data = data
@@ -570,7 +572,7 @@ class HUBDatasetStats:
             return False, None, path
         unzip_dir = unzip_file(path, path=path.parent)
         assert unzip_dir.is_dir(), (
-            f"Error unzipping {path}, {unzip_dir} not found. " f"path/to/abc.zip MUST unzip to path/to/abc/"
+            f"Error unzipping {path}, {unzip_dir} not found. path/to/abc.zip MUST unzip to path/to/abc/"
         )
         return True, str(unzip_dir), find_dataset_yaml(unzip_dir)  # zipped, data_dir, yaml_path
 

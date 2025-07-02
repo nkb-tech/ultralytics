@@ -1,24 +1,26 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ['ReparamLargeKernelConv']
+__all__ = ["ReparamLargeKernelConv"]
 
-def get_conv2d(
-        in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias
-):
+
+def get_conv2d(in_channels, out_channels, kernel_size, stride, padding, dilation, groups, bias):
     # return DepthWiseConv2dImplicitGEMM(in_channels, kernel_size, bias=bias)
     try:
         paddings = (kernel_size[0] // 2, kernel_size[1] // 2)
-    except Exception as e:
+    except Exception:
         paddings = padding
-    return nn.Conv2d(
-        in_channels, out_channels, kernel_size, stride, paddings, dilation, groups, bias
-    )
+    return nn.Conv2d(in_channels, out_channels, kernel_size, stride, paddings, dilation, groups, bias)
+
 
 def get_bn(channels):
     return nn.BatchNorm2d(channels)
+
 
 class Mask(nn.Module):
     def __init__(self, size):
@@ -31,9 +33,8 @@ class Mask(nn.Module):
         masked_wt = w.mul(x)
         return masked_wt
 
-def conv_bn_ori(
-        in_channels, out_channels, kernel_size, stride, padding, groups, dilation=1, bn=True
-):
+
+def conv_bn_ori(in_channels, out_channels, kernel_size, stride, padding, groups, dilation=1, bn=True):
     if padding is None:
         padding = kernel_size // 2
     result = nn.Sequential()
@@ -55,18 +56,24 @@ def conv_bn_ori(
         result.add_module("bn", get_bn(out_channels))
     return result
 
-class LoRAConvsByWeight(nn.Module):
-    '''
-    merge LoRA1 LoRA2
-    shuffle channel by weights rather index
-    '''
 
-    def __init__(self,
-                 in_channels: int,
-                 out_channels: int,
-                 big_kernel, small_kernel,
-                 stride=1, group=1,
-                 bn=True, use_small_conv=True):
+class LoRAConvsByWeight(nn.Module):
+    """
+    merge LoRA1 LoRA2
+    shuffle channel by weights rather index.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        big_kernel,
+        small_kernel,
+        stride=1,
+        group=1,
+        bn=True,
+        use_small_conv=True,
+    ):
         super().__init__()
         self.kernels = (small_kernel, big_kernel)
         self.stride = stride
@@ -76,10 +83,9 @@ class LoRAConvsByWeight(nn.Module):
         self.pad = padding, after_padding_index, index
         self.nk = math.ceil(big_kernel / small_kernel)
         out_n = out_channels * self.nk
-        self.split_convs = nn.Conv2d(in_channels, out_n,
-                                     kernel_size=small_kernel, stride=stride,
-                                     padding=padding, groups=group,
-                                     bias=False)
+        self.split_convs = nn.Conv2d(
+            in_channels, out_n, kernel_size=small_kernel, stride=stride, padding=padding, groups=group, bias=False
+        )
 
         self.lora1 = Mask((1, out_n, 1, 1))
         self.lora2 = Mask((1, out_n, 1, 1))
@@ -96,12 +102,12 @@ class LoRAConvsByWeight(nn.Module):
         out = self.split_convs(inputs)
         # split output
         *_, ori_h, ori_w = inputs.shape
-        lora1_x = self.forward_lora(self.lora1(out), ori_h, ori_w, VH='H', bn=self.bn_lora1)
-        lora2_x = self.forward_lora(self.lora2(out), ori_h, ori_w, VH='W', bn=self.bn_lora2)
+        lora1_x = self.forward_lora(self.lora1(out), ori_h, ori_w, VH="H", bn=self.bn_lora1)
+        lora2_x = self.forward_lora(self.lora2(out), ori_h, ori_w, VH="W", bn=self.bn_lora2)
         x = lora1_x + lora2_x
         return x
 
-    def forward_lora(self, out, ori_h, ori_w, VH='H', bn=None):
+    def forward_lora(self, out, ori_h, ori_w, VH="H", bn=None):
         # shift along the index of every group
         b, c, h, w = out.shape
         out = torch.split(out.reshape(b, -1, self.nk, h, w), 1, 2)  # ※※※※※※※※※※※
@@ -129,7 +135,7 @@ class LoRAConvsByWeight(nn.Module):
         else:
             pad_l = (index - 1 - idx) * (k // stride)
             s = 0
-        if VH == 'H':
+        if VH == "H":
             # assume add sufficient padding for origin conv
             suppose_len = (ori_w + 2 * ori_p - ori_k) // stride + 1
             pad_r = 0 if (s + suppose_len) <= (w + pad_l) else s + suppose_len - w - pad_l
@@ -150,7 +156,7 @@ class LoRAConvsByWeight(nn.Module):
         # padding on v direction
         if padding * 2 + 1 != k:
             pad = padding - k // 2
-            if VH == 'H':  # horizonal
+            if VH == "H":  # horizontal
                 x = torch.narrow(x, 2, pad, h - 2 * pad)
             else:  # vertical
                 x = torch.narrow(x, 3, pad, w - 2 * pad)
@@ -159,10 +165,10 @@ class LoRAConvsByWeight(nn.Module):
         return xs
 
     def shift(self, kernels):
-        '''
+        """
         We assume the conv does not change the feature map size, so padding = bigger_kernel_size//2. Otherwise,
         you may configure padding as you wish, and change the padding of small_conv accordingly.
-        '''
+        """
         mink, maxk = min(kernels), max(kernels)
         mid_p = maxk // 2
         # 1. new window size is mink. middle point index in the window
@@ -187,21 +193,19 @@ class LoRAConvsByWeight(nn.Module):
 
 def conv_bn(in_channels, out_channels, kernel_size, stride, padding, groups, dilation=1, bn=True, use_small_conv=True):
     if isinstance(kernel_size, int) or len(set(kernel_size)) == 1:
-        return conv_bn_ori(
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride,
-            padding,
-            groups,
-            dilation,
-            bn)
+        return conv_bn_ori(in_channels, out_channels, kernel_size, stride, padding, groups, dilation, bn)
     else:
         big_kernel, small_kernel = kernel_size
-        return LoRAConvsByWeight(in_channels, out_channels, bn=bn,
-                                 big_kernel=big_kernel, small_kernel=small_kernel,
-                                 group=groups, stride=stride,
-                                 use_small_conv=use_small_conv)
+        return LoRAConvsByWeight(
+            in_channels,
+            out_channels,
+            bn=bn,
+            big_kernel=big_kernel,
+            small_kernel=small_kernel,
+            group=groups,
+            stride=stride,
+            use_small_conv=use_small_conv,
+        )
 
 
 def fuse_bn(conv, bn):
@@ -218,18 +222,18 @@ def fuse_bn(conv, bn):
 
 class ReparamLargeKernelConv(nn.Module):
     def __init__(
-            self,
-            in_channels,
-            out_channels,
-            kernel_size,
-            small_kernel=5,
-            stride=1,
-            groups=1,
-            small_kernel_merged=False,
-            Decom=True,
-            bn=True,
+        self,
+        in_channels,
+        out_channels,
+        kernel_size,
+        small_kernel=5,
+        stride=1,
+        groups=1,
+        small_kernel_merged=False,
+        Decom=True,
+        bn=True,
     ):
-        super(ReparamLargeKernelConv, self).__init__()
+        super().__init__()
         self.kernel_size = kernel_size
         self.small_kernel = small_kernel
         self.Decom = Decom
@@ -256,7 +260,7 @@ class ReparamLargeKernelConv(nn.Module):
                     padding=padding,
                     dilation=1,
                     groups=groups,
-                    bn=bn
+                    bn=bn,
                 )
             else:
                 self.lkb_origin = conv_bn(
@@ -281,7 +285,7 @@ class ReparamLargeKernelConv(nn.Module):
                     dilation=1,
                     bn=bn,
                 )
-        
+
         self.bn = get_bn(out_channels)
         self.act = nn.SiLU()
 
@@ -305,13 +309,11 @@ class ReparamLargeKernelConv(nn.Module):
             small_k, small_b = fuse_bn(self.small_conv.conv, self.small_conv.bn)
             eq_b += small_b
             #   add to the central part
-            eq_k += nn.functional.pad(
-                small_k, [(self.kernel_size - self.small_kernel) // 2] * 4
-            )
+            eq_k += nn.functional.pad(small_k, [(self.kernel_size - self.small_kernel) // 2] * 4)
         return eq_k, eq_b
 
     def switch_to_deploy(self):
-        if hasattr(self, 'lkb_origin'):
+        if hasattr(self, "lkb_origin"):
             eq_k, eq_b = self.get_equivalent_kernel_bias()
             self.lkb_reparam = get_conv2d(
                 in_channels=self.lkb_origin.conv.in_channels,

@@ -1,10 +1,11 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """Activation modules."""
 
 import torch
 import torch.nn as nn
 
-__all__ = ['EMA', 'AGLU']
+__all__ = ["EMA", "AGLU"]
+
 
 class AGLU(nn.Module):
     """Unified activation function module from https://github.com/kostas1515/AGLU."""
@@ -22,13 +23,11 @@ class AGLU(nn.Module):
         return torch.exp((1 / lam) * self.act((self.kappa * x) - torch.log(lam)))
 
 
-
 class EMA(nn.Module):
-    '''
-    Attention from paper https://arxiv.org/abs/2305.13563
-    '''
+    """Attention from paper https://arxiv.org/abs/2305.13563."""
+
     def __init__(self, channels: int, factor: int = 32):
-        super(EMA, self).__init__()
+        super().__init__()
         self.groups = factor
         assert channels // self.groups > 0
         self.softmax = nn.Softmax(-1)

@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import contextlib
 import shutil
@@ -33,15 +33,13 @@ from ultralytics.utils import (
 
 # Define valid tasks and modes
 MODES = {"train", "val", "predict", "export", "track", "benchmark", "compress"}
-TASKS = {"detect", "segment", "classify", "pose", "obb" }
+TASKS = {"detect", "segment", "classify", "pose", "obb"}
 TASK2DATA = {
     "detect": "coco8.yaml",
     "segment": "coco8-seg.yaml",
     "classify": "imagenet10",
     "pose": "coco8-pose.yaml",
     "obb": "dota8.yaml",
-   
-     
 }
 TASK2MODEL = {
     "detect": "yolo11n.pt",
@@ -62,7 +60,7 @@ MODELS = {TASK2MODEL[task] for task in TASKS}
 
 ARGV = sys.argv or ["", ""]  # sometimes sys.argv = []
 CLI_HELP_MSG = f"""
-    Arguments received: {str(['yolo'] + ARGV[1:])}. Ultralytics 'yolo' commands use the following syntax:
+    Arguments received: {str(["yolo"] + ARGV[1:])}. Ultralytics 'yolo' commands use the following syntax:
 
         yolo TASK MODE ARGS
 
@@ -113,7 +111,6 @@ CFG_FLOAT_KEYS = {  # integer or float arguments, i.e. x=2 and x=2.0
     "time",
     "workspace",
     "batch",
-
     "albu_max_factor",
 }
 CFG_FRACTION_KEYS = {  # fractional float arguments with 0.0<=values<=1.0
@@ -140,7 +137,6 @@ CFG_FRACTION_KEYS = {  # fractional float arguments with 0.0<=values<=1.0
     "conf",
     "iou",
     "fraction",
-
     "albu_dropout_prob",
     "albu_brightness",
     "albu_contrast",
@@ -159,7 +155,6 @@ CFG_INT_KEYS = {  # integer-only arguments
     "line_width",
     "nbs",
     "save_period",
-
     "albu_quality_lower",
     "albu_clip_limit",
     "min_size",
@@ -334,11 +329,11 @@ def check_cfg(cfg, hard=True):
                         )
                     cfg[k] = v = float(v)
                 if not (0.0 <= v <= 1.0):
-                    raise ValueError(f"'{k}={v}' is an invalid value. " f"Valid '{k}' values are between 0.0 and 1.0.")
+                    raise ValueError(f"'{k}={v}' is an invalid value. Valid '{k}' values are between 0.0 and 1.0.")
             elif k in CFG_INT_KEYS and not isinstance(v, int):
                 if hard:
                     raise TypeError(
-                        f"'{k}={v}' is of invalid type {type(v).__name__}. " f"'{k}' must be an int (i.e. '{k}=8')"
+                        f"'{k}={v}' is of invalid type {type(v).__name__}. '{k}' must be an int (i.e. '{k}=8')"
                     )
                 cfg[k] = int(v)
             elif k in CFG_BOOL_KEYS and not isinstance(v, bool):
@@ -816,19 +811,20 @@ def entrypoint(debug=""):
         from ultralytics import SAM
 
         model = SAM(model)
-    elif mode =="compress":
+    elif mode == "compress":
         from ultralytics.models import yolo
-        if overrides['do_prune']:
-            compressor = yolo.detect.compress.DetectionCompressor(overrides = overrides)
+
+        if overrides["do_prune"]:
+            compressor = yolo.detect.compress.DetectionCompressor(overrides=overrides)
             prune_model_path = compressor.compress()
-            overrides['model'] = prune_model_path
-            overrides['name'] = f'{overrides["name"]}-finetune'
-            
-        if overrides['do_finetune']:
+            overrides["model"] = prune_model_path
+            overrides["name"] = f"{overrides['name']}-finetune"
+
+        if overrides["do_finetune"]:
             trainer = yolo.detect.compress.DetectionFinetune(overrides=overrides)
             trainer.train()
-            
-        return 'Compressing is successfully done'
+
+        return "Compressing is successfully done"
     else:
         from ultralytics import YOLO
 

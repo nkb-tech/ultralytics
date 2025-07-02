@@ -1,8 +1,8 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
 
-from typing import Tuple
 import random
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -11,9 +11,9 @@ from torch import Graph, Tensor, Value
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
+from .activation import EMA
 from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
 from .transformer import TransformerBlock
-from .activation import EMA
 
 __all__ = (
     "DFL",
@@ -387,6 +387,7 @@ class BottleneckCSP(nn.Module):
         y2 = self.cv2(x)
         return self.cv4(self.act(self.bn(torch.cat((y1, y2), 1))))
 
+
 class BottleneckEMA(Bottleneck):
     """EMA bottleneck."""
 
@@ -400,7 +401,6 @@ class BottleneckEMA(Bottleneck):
     def forward(self, x):
         """'forward()' applies the YOLO FPN to input data."""
         return x + self.att(self.cv2(self.cv1(x))) if self.add else self.att(self.cv2(self.cv1(x)))
-
 
 
 class ResNetBlock(nn.Module):
@@ -1209,7 +1209,7 @@ class ONNXNMS(torch.autograd.Function):
     ) -> Tensor:
         """
         Symbolic method to export an NonMaxSupression ONNX models.
-        See details in https://github.com/onnx/onnx/blob/main/docs/Operators.md#nonmaxsuppression
+        See details in https://github.com/onnx/onnx/blob/main/docs/Operators.md#nonmaxsuppression.
 
         Args:
             boxes (Tensor): An input tensor with shape [num_batches, spatial_dimension, 4].

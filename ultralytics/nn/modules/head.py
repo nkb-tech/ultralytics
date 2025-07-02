@@ -1,19 +1,18 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """Model head modules."""
-
-from typing import Tuple
 
 import copy
 import math
+from typing import Tuple
 
 import torch
-from torch import Tensor
 import torch.nn as nn
+from torch import Tensor
 from torch.nn.init import constant_, xavier_uniform_
 
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
 
-from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto, EfficientTRTNMS, ONNXNMS
+from .block import DFL, ONNXNMS, BNContrastiveHead, ContrastiveHead, EfficientTRTNMS, Proto
 from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
@@ -42,7 +41,7 @@ class Detect(nn.Module):
     end2end = False  # end2end
     max_det = 300  # max_det
     pose = False  # pose
-    segment = False # segment
+    segment = False  # segment
     shape = None
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
@@ -52,13 +51,12 @@ class Detect(nn.Module):
         super().__init__()
         self.nc = nc  # number of classes
         self.nl = len(ch)  # number of detection layers
-        self.reg_max = 16 # 20 DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
+        self.reg_max = 16  # 20 DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1))
-            for x in ch
+            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
         )
         self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
@@ -97,8 +95,7 @@ class Detect(nn.Module):
         """
         x_detach = [xi.detach() for xi in x]
         one2one = [
-            torch.cat((self.one2one_cv2[i](x_detach[i]), self.one2one_cv3[i](x_detach[i])), 1)
-            for i in range(self.nl)
+            torch.cat((self.one2one_cv2[i](x_detach[i]), self.one2one_cv3[i](x_detach[i])), 1) for i in range(self.nl)
         ]
         for i in range(self.nl):
             x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
@@ -629,13 +626,13 @@ class v10Pose(Detect):
     end2end = True
     pose = True
     max_det = 300
-    
+
     def __init__(self, nc=80, kpt_shape=(17, 3), ch=()):
         """Initialize YOLO network with default parameters and Convolutional Layers."""
         super().__init__(nc, ch)
         self.kpt_shape = kpt_shape  # number of keypoints, number of dims (2 for x,y or 3 for x,y,visible)
         self.nk = kpt_shape[0] * kpt_shape[1]  # number of keypoints total
-        
+
         c3 = max(ch[0], min(self.nc, 100))
         self.cv3 = nn.ModuleList(
             nn.Sequential(
@@ -654,15 +651,15 @@ class v10Pose(Detect):
         """Perform forward pass through YOLO model and return predictions."""
         bs = x[0].shape[0]  # batch size
         kpt = torch.cat([self.cv4[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], -1)  # (bs, 17*3, h*w)
-        
+
         x = Detect.forward(self, x)
         if self.training:
             x["one2one"] = x["one2one"], kpt
             x["one2many"] = x["one2many"], kpt
-            return x              
-        
-        pred_kpt = self.kpts_decode(bs, kpt) # 1, 51, 8400
-        
+            return x
+
+        pred_kpt = self.kpts_decode(bs, kpt)  # 1, 51, 8400
+
         if self.export:
             return self.postprocess(
                 x.permute(0, 2, 1),
@@ -672,7 +669,7 @@ class v10Pose(Detect):
                 kpt_shape=self.kpt_shape,
             )
         else:
-            y = x[0] # 1, 300, 6
+            y = x[0]  # 1, 300, 6
             y = self.postprocess(
                 y.permute(0, 2, 1),
                 pred_kpt.permute(0, 2, 1),
@@ -702,7 +699,9 @@ class v10Pose(Detect):
             return y
 
     @staticmethod
-    def postprocess(detect_preds: torch.Tensor, kpt_preds: torch.Tensor, max_det: int, nc: int = 18, kpt_shape: tuple = (17, 3)):
+    def postprocess(
+        detect_preds: torch.Tensor, kpt_preds: torch.Tensor, max_det: int, nc: int = 18, kpt_shape: tuple = (17, 3)
+    ):
         """
         Post-processes the keypoint predictions obtained from a YOLOv10 model.
 
@@ -715,20 +714,20 @@ class v10Pose(Detect):
         assert kpt_shape[0] * kpt_shape[1] == kpt_preds.shape[-1]
         assert 4 + nc == detect_preds.shape[-1]
         boxes, scores = detect_preds.split([4, nc], dim=-1)
-        
+
         max_scores = scores.amax(dim=-1)
         max_scores, index = torch.topk(max_scores, min(max_det, max_scores.shape[1]), axis=-1)
         index = index.unsqueeze(-1)
         boxes = torch.gather(boxes, dim=1, index=index.repeat(1, 1, boxes.shape[-1]))
         scores = torch.gather(scores, dim=1, index=index.repeat(1, 1, scores.shape[-1]))
         kpts = torch.gather(kpt_preds, dim=1, index=index.repeat(1, 1, kpt_preds.shape[-1]))
-        
+
         scores, index = torch.topk(scores.flatten(1), max_det, axis=-1)
         labels = index % nc
         index = index // nc
         boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
         kpts = kpts.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, kpts.shape[-1]))
-        
+
         return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).to(boxes.dtype), kpts], dim=-1)
 
 
@@ -736,14 +735,14 @@ class v10Segment(Detect):
     end2end = True
     segment = True
     max_det = 300
-    
+
     def __init__(self, nc=80, nm=32, npr=256, ch=()):
         """Initialize YOLO network with default parameters for segmentation."""
         super().__init__(nc, ch)
         self.nm = nm  # number of masks
         self.npr = npr  # number of prototypes
         self.proto = Proto(ch[0], self.npr, self.nm)  # proto layers for mask prediction
-        
+
         # Define Conv layers for box and mask prediction
         c3 = max(ch[0], min(self.nc, 100))
         self.cv3 = nn.ModuleList(
@@ -755,13 +754,10 @@ class v10Segment(Detect):
             for x in ch
         )
         self.one2one_cv3 = copy.deepcopy(self.cv3)
-        
+
         # Define additional Conv layers for mask coefficients
         c4 = max(ch[0] // 4, self.nm)
-        self.cv4 = nn.ModuleList(
-            nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nm, 1))
-            for x in ch
-        )
+        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.nm, 1)) for x in ch)
 
     def forward(self, x):
         """Perform forward pass through YOLO model and return segmentation masks."""
@@ -773,12 +769,12 @@ class v10Segment(Detect):
         pred_masks = mc.permute(0, 2, 1).contiguous()
 
         x = Detect.forward(self, x)
-        
+
         if self.training:
             x["one2one"] = x["one2one"], mc, p
             x["one2many"] = x["one2many"], mc, p
             return x
-        
+
         pred_masks = self.mask_decode(mc, p)
 
         if self.export:
@@ -833,9 +829,11 @@ class v10Segment(Detect):
 class v11Detect(Detect):
     """
     V11 Detection head.
+
     Args:
         nc (int): Number of classes.
         ch (tuple): Tuple of channel sizes.
+
     Methods:
         __init__(self, nc=80, ch=()): Initializes the v11Detect object.
         forward(self, x): Performs forward pass of the v11Detect module.

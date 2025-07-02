@@ -1,4 +1,5 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 # YOLOv8 object detection model with P3-P5 outputs. For Usage examples see https://docs.ultralytics.com/tasks/detect
 
 # Parameters
@@ -27,9 +28,9 @@ backbone:
 
 # YOLOv8.0n head
 head:
-  - [4, 1, Conv, [256]]  # 10-P3/8
-  - [6, 1, Conv, [256]]  # 11-P4/16
-  - [9, 1, Conv, [256]]  # 12-P5/32
+  - [4, 1, Conv, [256]] # 10-P3/8
+  - [6, 1, Conv, [256]] # 11-P4/16
+  - [9, 1, Conv, [256]] # 12-P5/32
 
   - [[10, 11, 12], 1, CrossLayerChannelAttention, []] # 13
   - [13, 1, GetIndexOutput, [0]] # 14-P3/8

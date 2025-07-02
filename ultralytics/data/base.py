@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import glob
 import math
@@ -107,7 +107,7 @@ class BaseDataset(Dataset):
             self.cache_images()
         elif self.cache == "disk" and self.check_cache_disk():
             self.cache_images()
-        elif self.cache == "low-ram": # кэшируем в виде JPEG
+        elif self.cache == "low-ram":  # кэшируем в виде JPEG
             self.cache_images()
 
         # Transforms
@@ -157,7 +157,7 @@ class BaseDataset(Dataset):
                     self.labels[i]["keypoints"] = keypoints[j]
             if self.single_cls:
                 self.labels[i]["cls"][:, 0] = 0
-    
+
     def _resize(self, im, h0, w0, rect_mode):
         if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
             r = self.imgsz / max(h0, w0)  # ratio
@@ -171,7 +171,9 @@ class BaseDataset(Dataset):
 
     def load_image(self, i, rect_mode=True):
         stored, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
-        if self.cache == "low-ram" and isinstance(stored, (bytes, bytearray)):  # low-ram: если в self.ims байтовый JPEG-буфер, то декодируем на лету
+        if self.cache == "low-ram" and isinstance(
+            stored, (bytes, bytearray)
+        ):  # low-ram: если в self.ims байтовый JPEG-буфер, то декодируем на лету
             arr = np.frombuffer(stored, dtype=np.uint8)
             im = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if im is None:
@@ -222,7 +224,6 @@ class BaseDataset(Dataset):
                     self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
 
         return im, (h0, w0), im.shape[:2]
-
 
     def cache_images(self):
         """Cache images to memory or disk."""
@@ -292,7 +293,7 @@ class BaseDataset(Dataset):
         data = buf.tobytes()
         self.ims[i] = data
         return len(data)
-    
+
     def check_cache_ram(self, safety_margin=0.5):
         """Check image caching requirements vs available memory."""
         b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes

@@ -1,6 +1,7 @@
 # Mamba
 
 ![Mamba](assets/selection.png "Selective State Space")
+
 > **Mamba: Linear-Time Sequence Modeling with Selective State Spaces**\
 > Albert Gu*, Tri Dao*\
 > Paper: https://arxiv.org/abs/2312.00752
@@ -21,6 +22,7 @@ It can also be built from source with `pip install .` from this repository.
 If `pip` complains about PyTorch versions, try passing `--no-build-isolation` to `pip`.
 
 Other requirements:
+
 - Linux
 - NVIDIA GPU
 - PyTorch 1.12+
@@ -43,6 +45,7 @@ The main module of this repository is the Mamba architecture block wrapping the 
 Source: [modules/mamba_simple.py](mamba_ssm/modules/mamba_simple.py).
 
 Usage:
+
 ```
 from mamba_ssm import Mamba
 
@@ -68,8 +71,6 @@ Source: [models/mixer_seq_simple.py](mamba_ssm/models/mixer_seq_simple.py).
 This is an example of how to integrate Mamba into an end-to-end neural network.
 This example is used in the generation scripts below.
 
-
-
 ## Pretrained Models
 
 Pretrained models are uploaded to
@@ -80,8 +81,8 @@ The models will be autodownloaded by the generation script below.
 
 These models were trained on the [Pile](https://huggingface.co/datasets/EleutherAI/pile), and follow the standard model dimensions described by GPT-3 and followed by many open source models:
 
-| Parameters | Layers | Model dim. | 
-|------------|--------|------------|
+| Parameters | Layers | Model dim. |
+| ---------- | ------ | ---------- |
 | 130M       | 12     | 768        |
 | 370M       | 24     | 1024       |
 | 790M       | 24     | 1536       |
@@ -93,7 +94,6 @@ These models were trained on the [Pile](https://huggingface.co/datasets/Eleuther
 Note: these are base models trained only for 300B tokens, without any form of downstream modification (instruction tuning, etc.).
 Performance is expected to be comparable or better than other architectures trained on similar data, but not to match larger or fine-tuned models.
 
-
 ## Evaluations
 
 To run zero-shot evaluations of models (corresponding to Table 3 of the paper),
@@ -102,9 +102,10 @@ we use the
 library.
 
 1. Pull the `lm-evaluation-harness` repo by `git submodule update --init
-   --recursive`. We use the `big-refactor` branch.
+--recursive`. We use the `big-refactor` branch.
 2. Install `lm-evaluation-harness`: `pip install -e 3rdparty/lm-evaluation-harness`
 3. Run evaluation with (more documentation at the [lm-evaluation-harness](https://github.com/EleutherAI/lm-evaluation-harness/tree/big-refactor) repo):
+
 ```
 python evals/lm_harness_eval.py --model mamba --model_args pretrained=state-spaces/mamba-130m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande --device cuda --batch_size 64
 python evals/lm_harness_eval.py --model hf --model_args pretrained=EleutherAI/pythia-160m --tasks lambada_openai,hellaswag,piqa,arc_easy,arc_challenge,winogrande --device cuda --batch_size 64
@@ -115,6 +116,7 @@ Note that the result of each task might differ from reported values by 0.1-0.3 d
 ## Inference
 
 The script [benchmarks/benchmark_generation_mamba_simple.py](benchmarks/benchmark_generation_mamba_simple.py)
+
 1. autoloads a model from the HuggingFace Hub,
 2. generates completions of a user-specified prompt,
 3. benchmarks the inference speed of this generation.
@@ -131,6 +133,7 @@ python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/
 ```
 
 To test generation throughput with random prompts (e.g. large batch size):
+
 ```
 python benchmarks/benchmark_generation_mamba_simple.py --model-name "state-spaces/mamba-2.8b" --batch 128
 python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/pythia-2.8b" --batch 128
@@ -139,6 +142,7 @@ python benchmarks/benchmark_generation_mamba_simple.py --model-name "EleutherAI/
 ## Citation
 
 If you use this codebase, or otherwise found our work valuable, please cite Mamba:
+
 ```
 @article{mamba,
   title={Mamba: Linear-Time Sequence Modeling with Selective State Spaces},

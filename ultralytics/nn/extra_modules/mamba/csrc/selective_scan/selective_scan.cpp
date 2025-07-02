@@ -1,3 +1,5 @@
+// Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 /******************************************************************************
  * Copyright (c) 2023, Tri Dao.
  ******************************************************************************/
@@ -162,7 +164,7 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                         void* D_ptr,
                         void* delta_bias_ptr,
                         void* x_ptr,
-                        const at::Tensor dout,
+                        const at::Tensor doubt,
                         const at::Tensor du,
                         const at::Tensor ddelta,
                         const at::Tensor dA,
@@ -174,18 +176,18 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
                         bool has_z,
                         bool delta_softplus,
                         bool recompute_out_z) {
-    // Pass in "dout" instead of "out", we're not gonna use "out" unless we have z
+    // Pass in "doubt" instead of "out", we're not gonna use "out" unless we have z
     set_ssm_params_fwd(params, batch, dim, seqlen, dstate, n_groups, n_chunks, is_variable_B, is_variable_C,
-                       u, delta, A, B, C, has_z ? out : dout,
-                       has_z ? z : dout,
-                       // If not recompute_out_z, pass dout instead of out_z.
+                       u, delta, A, B, C, has_z ? out : doubt,
+                       has_z ? z : doubt,
+                       // If not recompute_out_z, pass doubt instead of out_z.
                        // This won't be used by the bwd kernel
-                       recompute_out_z ? out_z : dout,
+                       recompute_out_z ? out_z : doubt,
                        D_ptr, delta_bias_ptr, x_ptr, has_z, delta_softplus);
     if (!recompute_out_z) { params.out_z_ptr = nullptr; }
 
     // Set the pointers and strides.
-    params.dout_ptr = dout.data_ptr();
+    params.dout_ptr = doubt.data_ptr();
     params.du_ptr = du.data_ptr();
     params.dA_ptr = dA.data_ptr();
     params.dB_ptr = dB.data_ptr();
@@ -195,8 +197,8 @@ void set_ssm_params_bwd(SSMParamsBwd &params,
     params.ddelta_bias_ptr = ddelta_bias_ptr;
     params.dz_ptr = has_z ? dz.data_ptr() : nullptr;
     // All stride are in elements, not bytes.
-    params.dout_batch_stride = dout.stride(0);
-    params.dout_d_stride = dout.stride(1);
+    params.dout_batch_stride = doubt.stride(0);
+    params.dout_d_stride = doubt.stride(1);
     params.dA_d_stride = dA.stride(0);
     params.dA_dstate_stride = dA.stride(1);
     if (!is_variable_B) {
@@ -341,7 +343,7 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                   const c10::optional<at::Tensor> &D_,
                   const c10::optional<at::Tensor> &z_,
                   const c10::optional<at::Tensor> &delta_bias_,
-                  const at::Tensor &dout,
+                  const at::Tensor &doubt,
                   const c10::optional<at::Tensor> &x_,
                   const c10::optional<at::Tensor> &out_,
                   c10::optional<at::Tensor> &dz_,
@@ -359,18 +361,18 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
     TORCH_CHECK(delta.scalar_type() == input_type);
     TORCH_CHECK(B.scalar_type() == (!is_variable_B ? weight_type : input_type));
     TORCH_CHECK(C.scalar_type() == (!is_variable_C ? weight_type : input_type));
-    TORCH_CHECK(dout.scalar_type() == input_type);
+    TORCH_CHECK(doubt.scalar_type() == input_type);
 
     TORCH_CHECK(u.is_cuda());
     TORCH_CHECK(delta.is_cuda());
     TORCH_CHECK(A.is_cuda());
     TORCH_CHECK(B.is_cuda());
     TORCH_CHECK(C.is_cuda());
-    TORCH_CHECK(dout.is_cuda());
+    TORCH_CHECK(doubt.is_cuda());
 
     TORCH_CHECK(u.stride(-1) == 1);
     TORCH_CHECK(delta.stride(-1) == 1);
-    TORCH_CHECK(dout.stride(-1) == 1);
+    TORCH_CHECK(doubt.stride(-1) == 1);
 
     const auto sizes = u.sizes();
     const int batch_size = sizes[0];
@@ -396,7 +398,7 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
         CHECK_SHAPE(C, batch_size, n_groups, dstate, !is_complex ? seqlen: seqlen * 2);
         TORCH_CHECK(C.stride(-1) == 1);
     }
-    CHECK_SHAPE(dout, batch_size, dim, seqlen);
+    CHECK_SHAPE(doubt, batch_size, dim, seqlen);
 
     if (D_.has_value()) {
         auto D = D_.value();
@@ -471,7 +473,7 @@ selective_scan_bwd(const at::Tensor &u, const at::Tensor &delta,
                        D_.has_value() ? D_.value().data_ptr() : nullptr,
                        delta_bias_.has_value() ? delta_bias_.value().data_ptr() : nullptr,
                        x_.has_value() ? x_.value().data_ptr() : nullptr,
-                       dout, du, ddelta, dA, dB, dC, dz,
+                       doubt, du, ddelta, dA, dB, dC, dz,
                        D_.has_value() ? dD.data_ptr() : nullptr,
                        delta_bias_.has_value() ? ddelta_bias.data_ptr() : nullptr,
                        has_z, delta_softplus, recompute_out_z);

@@ -1,3 +1,5 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 # ------------------------------------------------------------------------------------------------
 # Deformable DETR
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
@@ -7,5 +9,5 @@
 # ------------------------------------------------------------------------------------------------
 
 # from .ms_flash_deform_attn_func import FlashMSDeformAttnFunction
-from .flash_deform_attn_func import FlashDeformAttnFunction
 from .dcnv4_func import DCNv4Function
+from .flash_deform_attn_func import FlashDeformAttnFunction

@@ -1,3 +1,5 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 # Hyperparameters ------------------------------------------------------------------------------------------------------
 lr0: 0.001 # (float) initial learning rate (i.e. SGD=1E-2, Adam=1E-3)
 lrf: 0.1 # (float) final learning rate (lr0 * lrf)
