@@ -1,14 +1,15 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 # Copyright (c) 2023, Albert Gu, Tri Dao.
 
 import math
-from functools import partial
-
 from collections import namedtuple
+from functools import partial
 
 import torch
 import torch.nn as nn
 
-from mamba_ssm.modules.mamba_simple import Mamba, Block
+from mamba_ssm.modules.mamba_simple import Block, Mamba
 from mamba_ssm.utils.generation import GenerationMixin
 from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 
@@ -33,9 +34,7 @@ def create_block(
         ssm_cfg = {}
     factory_kwargs = {"device": device, "dtype": dtype}
     mixer_cls = partial(Mamba, layer_idx=layer_idx, **ssm_cfg, **factory_kwargs)
-    norm_cls = partial(
-        nn.LayerNorm if not rms_norm else RMSNorm, eps=norm_epsilon, **factory_kwargs
-    )
+    norm_cls = partial(nn.LayerNorm if not rms_norm else RMSNorm, eps=norm_epsilon, **factory_kwargs)
     block = Block(
         d_model,
         mixer_cls,
@@ -127,9 +126,7 @@ class MixerModel(nn.Module):
             ]
         )
 
-        self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(
-            d_model, eps=norm_epsilon, **factory_kwargs
-        )
+        self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(d_model, eps=norm_epsilon, **factory_kwargs)
 
         self.apply(
             partial(
@@ -149,9 +146,7 @@ class MixerModel(nn.Module):
         hidden_states = self.embedding(input_ids)
         residual = None
         for layer in self.layers:
-            hidden_states, residual = layer(
-                hidden_states, residual, inference_params=inference_params
-            )
+            hidden_states, residual = layer(hidden_states, residual, inference_params=inference_params)
         if not self.fused_add_norm:
             residual = (hidden_states + residual) if residual is not None else hidden_states
             hidden_states = self.norm_f(residual.to(dtype=self.norm_f.weight.dtype))
@@ -171,7 +166,6 @@ class MixerModel(nn.Module):
 
 
 class MambaLMHeadModel(nn.Module, GenerationMixin):
-
     def __init__(
         self,
         d_model: int,
@@ -216,7 +210,7 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
     def forward(self, input_ids, position_ids=None, inference_params=None, num_last_tokens=0):
         """
         "position_ids" is just to be compatible with Transformer generation. We don't use it.
-        num_last_tokens: if > 0, only return the logits for the last n tokens
+        num_last_tokens: if > 0, only return the logits for the last n tokens.
         """
         hidden_states = self.backbone(input_ids, inference_params=inference_params)
         if num_last_tokens > 0:

@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import contextlib
 import json
@@ -107,12 +107,12 @@ class YOLODataset(BaseDataset):
                     # Filter out small boxes
                     if len(lb):
                         boxes_pix = lb[:, 1:].copy()
-                        boxes_pix[:, [2,3]] *= shape[1], shape[0]
-                        
+                        boxes_pix[:, [2, 3]] *= shape[1], shape[0]
+
                         # Keep boxes with width and height >= 20 pixels
-                        valid_mask = (boxes_pix[:,2] >= self.min_size) & (boxes_pix[:,3] >= self.min_size)
+                        valid_mask = (boxes_pix[:, 2] >= self.min_size) & (boxes_pix[:, 3] >= self.min_size)
                         lb = lb[valid_mask]
-                    
+
                     x["labels"].append(
                         {
                             "im_file": im_file,
@@ -264,8 +264,7 @@ class YOLOWeightedDataset(YOLODataset):
         Args:
             class_weights (list or numpy array): A list or array of weights corresponding to each class.
         """
-
-        super(YOLOWeightedDataset, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         self.train_mode = "train" in self.prefix
 
@@ -279,17 +278,17 @@ class YOLOWeightedDataset(YOLODataset):
         self.class_weights = np.array(class_weights)
         self.weights = self.calculate_weights()
         self.probabilities = self.calculate_probabilities()
-    
+
     def count_instances(self):
         """
-        Count the number of instances per class
+        Count the number of instances per class.
 
         Returns:
             dict: A dict containing the counts for each class.
         """
         self.counts = [0 for i in range(len(self.data["names"]))]
         for label in self.labels:
-            cls = label['cls'].reshape(-1).astype(int)
+            cls = label["cls"].reshape(-1).astype(int)
             for id in cls:
                 self.counts[id] += 1
 
@@ -305,12 +304,12 @@ class YOLOWeightedDataset(YOLODataset):
         """
         weights = []
         for label in self.labels:
-            cls = label['cls'].reshape(-1).astype(int)
+            cls = label["cls"].reshape(-1).astype(int)
 
             # Give a default weight to background class
             if cls.size == 0:
-              weights.append(1)
-              continue
+                weights.append(1)
+                continue
 
             # Take mean of weights
             # You can change this weight aggregation function to aggregate weights differently
@@ -330,9 +329,7 @@ class YOLOWeightedDataset(YOLODataset):
         return probabilities
 
     def __getitem__(self, index):
-        """
-        Return transformed label information based on the sampled index.
-        """
+        """Return transformed label information based on the sampled index."""
         # Don't use for validation
         if not self.train_mode:
             return self.transforms(self.get_image_and_label(index))
@@ -392,7 +389,7 @@ class GroundingDataset(YOLODataset):
         LOGGER.info("Loading annotation file...")
         with open(self.json_file) as f:
             annotations = json.load(f)
-        images = {f'{x["id"]:d}': x for x in annotations["images"]}
+        images = {f"{x['id']:d}": x for x in annotations["images"]}
         img_to_anns = defaultdict(list)
         for ann in annotations["annotations"]:
             img_to_anns[ann["image_id"]].append(ann)
@@ -585,21 +582,21 @@ class ClassificationDataset:
             if augment
             else classify_transforms(size=args.imgsz, crop_fraction=args.crop_fraction)
         )
-        
+
         self.weighted = args.weighted
-        if self.weighted and Path(self.root).name=='train':
-            print('constructing weighted classify dataset: ', end="")
+        if self.weighted and Path(self.root).name == "train":
+            print("constructing weighted classify dataset: ", end="")
             weights = self.calculate_weights()
             self.probabilities = self.calculate_probabilities(weights)
-            print("dataset weights: ", {k:weights[v] for k,v in self.base.class_to_idx.items()})
+            print("dataset weights: ", {k: weights[v] for k, v in self.base.class_to_idx.items()})
         elif self.weighted:
-            print(f'using weighted dataset with val dataset ({self.root})')
-            
-    def calculate_weights(self, power: int=1):
+            print(f"using weighted dataset with val dataset ({self.root})")
+
+    def calculate_weights(self, power: int = 1):
         """
         Count the number of instances per class
         Attributes:
-            power: weights ~ 1/counts^power
+            power: weights ~ 1/counts^power.
 
         Returns:
             dict: A dict containing the counts for each class.
@@ -611,18 +608,18 @@ class ClassificationDataset:
 
         counts = np.array(counts)
         counts = np.where(counts == 0, 1, counts)
-        weights = 1/counts**power
-        weights = weights/sum(weights)
+        weights = 1 / counts**power
+        weights = weights / sum(weights)
         return {cls: weights[cls] for cls in self.base.class_to_idx.values()}
 
     def calculate_probabilities(self, weights):
         probabilities = np.array([weights[i[1]] for i in self.samples])
-        probabilities = probabilities/sum(probabilities)
+        probabilities = probabilities / sum(probabilities)
         return probabilities
 
     def __getitem__(self, i):
         """Returns subset of data and targets corresponding to given indices."""
-        if self.weighted and hasattr(self, 'probabilities'):
+        if self.weighted and hasattr(self, "probabilities"):
             i = np.random.choice(len(self.samples), p=self.probabilities)
         f, j, fn, im = self.samples[i]  # filename, index, filename.with_suffix('.npy'), image
         if self.cache_ram:
@@ -663,8 +660,8 @@ class ClassificationDataset:
         nf, nc, msgs, samples, x = 0, 0, [], [], {}
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(
-                func=lambda args: verify_image(args, min_size=self.min_size), 
-                iterable=zip(self.samples, repeat(self.prefix))
+                func=lambda args: verify_image(args, min_size=self.min_size),
+                iterable=zip(self.samples, repeat(self.prefix)),
             )
             pbar = TQDM(results, desc=desc, total=len(self.samples))
             for sample, nf_f, nc_f, msg in pbar:

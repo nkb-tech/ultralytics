@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """
 Module provides functionalities for hyperparameter tuning of the Ultralytics YOLO models for object detection, instance
 segmentation, image classification, pose estimation, and multi-object tracking.
@@ -148,10 +148,9 @@ class Tuner:
             hyp = {k: float(x[i + 1] * v[i]) for i, k in enumerate(self.space.keys())}
         else:
             hyp = {k: getattr(self.args, k) for k in self.space.keys()}
-            for k,v in self.space.items(): # allows parameters with value=0 to be mutated
-                if hyp[k]<1e-5:
-                    hyp[k] = v[0] if abs(v[0])>1e-5 else v[1]
-                    
+            for k, v in self.space.items():  # allows parameters with value=0 to be mutated
+                if hyp[k] < 1e-5:
+                    hyp[k] = v[0] if abs(v[0]) > 1e-5 else v[1]
 
         # Constrain to limits
         for k, v in self.space.items():
@@ -228,12 +227,12 @@ class Tuner:
 
             # Save and print tune results
             header = (
-                f'{self.prefix}{i + 1}/{iterations} iterations complete ✅ ({time.time() - t0:.2f}s)\n'
-                f'{self.prefix}Results saved to {colorstr("bold", self.tune_dir)}\n'
-                f'{self.prefix}Best fitness={fitness[best_idx]} observed at iteration {best_idx + 1}\n'
-                f'{self.prefix}Best fitness metrics are {best_metrics}\n'
-                f'{self.prefix}Best fitness model is {best_save_dir}\n'
-                f'{self.prefix}Best fitness hyperparameters are printed below.\n'
+                f"{self.prefix}{i + 1}/{iterations} iterations complete ✅ ({time.time() - t0:.2f}s)\n"
+                f"{self.prefix}Results saved to {colorstr('bold', self.tune_dir)}\n"
+                f"{self.prefix}Best fitness={fitness[best_idx]} observed at iteration {best_idx + 1}\n"
+                f"{self.prefix}Best fitness metrics are {best_metrics}\n"
+                f"{self.prefix}Best fitness model is {best_save_dir}\n"
+                f"{self.prefix}Best fitness hyperparameters are printed below.\n"
             )
             LOGGER.info("\n" + header)
             data = {k: float(x[best_idx, i + 1]) for i, k in enumerate(self.space.keys())}

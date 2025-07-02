@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 # --------------------------------------------------------
 # InternImage
 # Copyright (c) 2022 OpenGVLab

@@ -1,6 +1,6 @@
-# Compress guide 
+# Compress guide
 
-------------------  ------------------
+---
 
 В файле `ultralytics/prune.py` находится код для запуска прунинга:
 
@@ -31,10 +31,10 @@ param_dict = {
         'sl_epochs': 500,
         'sl_hyp': '/home/jovyan/Kozlov_KY/new_ultralytics/ultralytics/ultralytics/cfg/hyp.scratch.sl.yaml',
         'sl_model':None
-        
+
     }
     prune_model_path = compress(copy.deepcopy(param_dict))
-    
+
     finetune(copy.deepcopy(param_dict),  prune_model_path)
 ```
 
@@ -47,28 +47,26 @@ param_dict = {
 `reg` - параметр шага прунинга (лучше посмотреть сами методы внутри torch_pruning)
 `sl_epochs` - количество эпох обучения для sparse_learning
 `sl_hyp` - конфиг sparse_learning
-`sl_model` - модель sparse_learning 
+`sl_model` - модель sparse_learning
 ```
 
 У меня плохо переводилась модель `sl_model` в onnx, возможно пока не нужно это пробовать.
 
-
 Логика процесса такая: Сначала идет процесс прунинга, затем файнтюн, сейчас опция resume очень криво работает, поэтому советую отдельно прунить, а затем ставить модельку на дообучение, чтобы не потерять весь прогресс.
 
-В файле `ultralytics/ultralytics/models/yolo/detect/compress.py` 
+В файле `ultralytics/ultralytics/models/yolo/detect/compress.py`
 находится основной код, прунинга, который вызывает `prune.py`
-
 
 В начале файла выбираются слои, которые игнорятся во время прунинга, этот код зависит от выбранной модели, если вы пруните не обычную yolov8, пожалуйста, измените слои на нужные вам.
 
 В файле `c2f_transfer.py` идет замена c2f на с2faster блоки, это в целом можно отключить, если залезть в него.
 
-Удачные параметры для прунинга советую посмотреть в файле `compress.md`, там собраны разные эксперименты 
-
+Удачные параметры для прунинга советую посмотреть в файле `compress.md`, там собраны разные эксперименты
 
 # Установка
 
 Установка такая же как с обычным ультралитиксом, с поправкой на способ клонирования с mlspace, почитайте инструкцию Паши, чтобы себе все настроить
+
 ```
 git clone https://gitlab.ai.cloud.ru/manzherok/ultralytics.git
 ```

@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 from pathlib import Path
 
@@ -37,7 +37,7 @@ class YOLO(Model):
                 "trainer": yolo.detect.DetectionTrainer,
                 "validator": yolo.detect.DetectionValidator,
                 "predictor": yolo.detect.DetectionPredictor,
-                "compressor":  yolo.detect.DetectionCompressor,
+                "compressor": yolo.detect.DetectionCompressor,
             },
             "segment": {
                 "model": SegmentationModel,

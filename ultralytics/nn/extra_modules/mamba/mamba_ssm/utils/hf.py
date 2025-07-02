@@ -1,8 +1,9 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 import json
 
 import torch
-
-from transformers.utils import WEIGHTS_NAME, CONFIG_NAME
+from transformers.utils import CONFIG_NAME, WEIGHTS_NAME
 from transformers.utils.hub import cached_file
 
 

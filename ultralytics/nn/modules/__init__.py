@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """
 Ultralytics modules.
 
@@ -35,12 +35,12 @@ from .block import (
     Attention,
     BNContrastiveHead,
     Bottleneck,
-    BottleneckEMA,
     BottleneckCSP,
+    BottleneckEMA,
     C2f,
-    C2fEMA,
     C2fAttn,
     C2fCIB,
+    C2fEMA,
     C2fPSA,
     C3Ghost,
     C3k2,
@@ -66,9 +66,9 @@ from .conv import (
     Conv,
     Conv2,
     ConvTranspose,
+    DSConv,
     DWConv,
     DWConvTranspose2d,
-    DSConv,
     Focus,
     GhostConv,
     LightConv,
@@ -80,6 +80,8 @@ from .head import (
     Classify,
     Detect,
     Pose,
+    PostDetectONNXNMS,
+    PostDetectTRTNMS,
     RTDETRDecoder,
     Segment,
     WorldDetect,
@@ -87,8 +89,6 @@ from .head import (
     v10Pose,
     v10Segment,
     v11Detect,
-    PostDetectTRTNMS,
-    PostDetectONNXNMS,
 )
 from .transformer import (
     AIFI,

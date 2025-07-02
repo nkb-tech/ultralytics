@@ -1,5 +1,9 @@
-import json
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 import argparse
+import json
+
+
 class LineParser:
     def __init__(self) -> None:
         self.data = {}
@@ -11,31 +15,32 @@ class LineParser:
                     return True
             return False
 
-        if not startswith(line, ['1', '2', '3', '4', '5', '6', '7', '8', '9']):
+        if not startswith(line, ["1", "2", "3", "4", "5", "6", "7", "8", "9"]):
             return
 
-        eles = line.strip().split()
-        key = eles[0]
+        else = line.strip().split()
+        key = else[0]
         if key not in self.data:
             self.data[key] = []
-        
-        self.data[key].append([eles[1], float(eles[2])])
-    
+
+        self.data[key].append([else[1], float(else[2])])
+
     def sort(self):
         for k, v in self.data.items():
             nv = sorted(v, key=lambda x: x[1])
             self.data[k] = nv
-    
+
     def display_best(self):
         for k, v in self.data.items():
-            print(f'{k} \t {v[0][0]} \t {v[0][1]:.4f} \t {v[1][0]} \t {v[1][1]:.4f}')
-    
+            print(f"{k} \t {v[0][0]} \t {v[0][1]:.4f} \t {v[1][0]} \t {v[1][1]:.4f}")
+
     def display_best_python(self, output):
         res = {}
+
         def parse(spec):
-            d_stride = int(spec.split('/')[0])
-            thread = int(spec.split('/')[1].split('(')[0])
-            m = int(spec.split('(')[1].split(')')[0])
+            d_stride = int(spec.split("/")[0])
+            thread = int(spec.split("/")[1].split("(")[0])
+            m = int(spec.split("(")[1].split(")")[0])
             return d_stride, thread, m
 
         for k, v in self.data.items():
@@ -44,10 +49,11 @@ class LineParser:
         with open(output, "w") as f:
             json.dump(res, f, indent=4)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--input', type=str)
-    parser.add_argument('--output', type=str)
+    parser.add_argument("--input", type=str)
+    parser.add_argument("--output", type=str)
     args = parser.parse_args()
 
     with open(args.input) as f:

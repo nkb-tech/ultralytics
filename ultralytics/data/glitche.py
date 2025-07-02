@@ -1,24 +1,24 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 import math
 import random
-import sys
 from enum import Enum
 from pathlib import Path
 from typing import List
 
-import numpy
-import scipy
-from scipy.signal import lfilter
-from scipy.ndimage.interpolation import shift
-
-import numpy as np
 import cv2
+import numpy
+import numpy as np
+import scipy
+from scipy.ndimage.interpolation import shift
+from scipy.signal import lfilter
 
 M_PI = math.pi
 
 Int_MIN_VALUE = -2147483648
 Int_MAX_VALUE = 2147483647
 
-ring_pattern_real_path = 'ringPattern.npy'
+ring_pattern_real_path = "ringPattern.npy"
 
 ring_pattern_path = Path(ring_pattern_real_path)
 RingPattern = np.load(str(ring_pattern_path.resolve()))
@@ -31,7 +31,7 @@ def ringing(img2d, alpha=0.5, noiseSize=0, noiseValue=2, clip=True, seed=None):
     :param alpha: float, reconstruction quality (0-1) optimal values for tv ringing modeling is 0.3-0.99
     :param noiseSize: float, noise size  (0-1) optimal values  is 0.5-0.99 if noiseSize=0 - no noise
     :param noiseValue: float, noise amplitude  (0-5) optimal values  is 0.5-2
-    :return: 2d image
+    :return: 2d image.
     """
     dft = cv2.dft(np.float32(img2d), flags=cv2.DFT_COMPLEX_OUTPUT)
     dft_shift = np.fft.fftshift(dft)
@@ -41,15 +41,15 @@ def ringing(img2d, alpha=0.5, noiseSize=0, noiseValue=2, clip=True, seed=None):
     mask = np.zeros((rows, cols, 2), np.uint8)
 
     maskH = min(crow, int(1 + alpha * crow))
-    mask[:, ccol - maskH:ccol + maskH] = 1
+    mask[:, ccol - maskH : ccol + maskH] = 1
 
     if noiseSize > 0:
-        noise = np.ones((mask.shape[0], mask.shape[1], mask.shape[2])) * noiseValue - noiseValue / 2.
+        noise = np.ones((mask.shape[0], mask.shape[1], mask.shape[2])) * noiseValue - noiseValue / 2.0
         start = int(ccol - ((1 - noiseSize) * ccol))
         stop = int(ccol + ((1 - noiseSize) * ccol))
         noise[:, start:stop, :] = 0
         rnd = np.random.RandomState(seed)
-        mask = mask.astype(np.float32) + rnd.rand(mask.shape[0], mask.shape[1], mask.shape[2]) * noise - noise / 2.
+        mask = mask.astype(np.float32) + rnd.rand(mask.shape[0], mask.shape[1], mask.shape[2]) * noise - noise / 2.0
 
     img_back = cv2.idft(np.fft.ifftshift(dft_shift * mask), flags=cv2.DFT_SCALE)
     if clip:
@@ -64,7 +64,7 @@ def ringing2(img2d, power=4, shift=0, clip=True):
     https://bavc.github.io/avaa/artifacts/ringing.html
     :param img2d: 2d image
     :param power: int, ringing parrern poser (optimal 2 - 6)
-    :return: 2d image
+    :return: 2d image.
     """
     dft = cv2.dft(np.float32(img2d), flags=cv2.DFT_COMPLEX_OUTPUT)
     dft_shift = np.fft.fftshift(dft)
@@ -74,8 +74,8 @@ def ringing2(img2d, power=4, shift=0, clip=True):
     scalecols = int(cols * (1 + shift))
     mask = cv2.resize(RingPattern[np.newaxis, :], (scalecols, 1), interpolation=cv2.INTER_LINEAR)[0]
 
-    mask = mask[(scalecols // 2) - (cols // 2):(scalecols // 2) + (cols // 2)]
-    mask = mask ** power
+    mask = mask[(scalecols // 2) - (cols // 2) : (scalecols // 2) + (cols // 2)]
+    mask = mask**power
     img_back = cv2.idft(np.fft.ifftshift(dft_shift * mask[None, :, None]), flags=cv2.DFT_SCALE)
     if clip:
         _min, _max = img2d.min(), img2d.max()
@@ -224,7 +224,7 @@ def cut_black_line_border(image: numpy.ndarray, bordersize: int = None) -> None:
     else:
         line_width = bordersize  # TODO: value to settings
 
-    image[:, -1*line_width:] = 0  # 0 set to black
+    image[:, -1 * line_width :] = 0  # 0 set to black
 
 
 def composite_lowpass(yiq: numpy.ndarray, field: int, fieldno: int):
@@ -240,7 +240,7 @@ def composite_lowpass(yiq: numpy.ndarray, field: int, fieldno: int):
             f = lp[0].lowpass_array(f)
             f = lp[1].lowpass_array(f)
             f = lp[2].lowpass_array(f)
-            P[i, 0:width - delay] = f.astype(numpy.int32)[delay:]
+            P[i, 0 : width - delay] = f.astype(numpy.int32)[delay:]
 
 
 # lighter-weight filtering, probably what your old CRT does to reduce color fringes a bit
@@ -256,11 +256,12 @@ def composite_lowpass_tv(yiq: numpy.ndarray, field: int, fieldno: int):
             f = lp[0].lowpass_array(f)
             f = lp[1].lowpass_array(f)
             f = lp[2].lowpass_array(f)
-            P[i, 0:width - delay] = f.astype(numpy.int32)[delay:]
+            P[i, 0 : width - delay] = f.astype(numpy.int32)[delay:]
 
 
-def composite_preemphasis(yiq: numpy.ndarray, field: int, composite_preemphasis: float,
-                          composite_preemphasis_cut: float):
+def composite_preemphasis(
+    yiq: numpy.ndarray, field: int, composite_preemphasis: float, composite_preemphasis_cut: float
+):
     fY, fI, fQ = yiq
     pre = LowpassFilter(Ntsc.NTSC_RATE, composite_preemphasis_cut, 16.0)
     fields = fY[field::2]
@@ -322,7 +323,9 @@ class Ntsc:
         self._subcarrier_amplitude_back = 50
         self._emulating_vhs = False
         self._nocolor_subcarrier = False  # if set, emulate subcarrier but do not decode back to color (debug)
-        self._vhs_chroma_vert_blend = True  # if set, and VHS, blend vertically the chroma scanlines (as the VHS format does)
+        self._vhs_chroma_vert_blend = (
+            True  # if set, and VHS, blend vertically the chroma scanlines (as the VHS format does)
+        )
         self._vhs_svideo_out = False  # if not set, and VHS, video is recombined as if composite out on VCR
 
         self._output_ntsc = True  # NTSC color subcarrier emulation
@@ -424,20 +427,20 @@ class Ntsc:
 
         t = twidth * (262.5 if self._output_ntsc else 312.5)
         p = int(fmod(self._vhs_head_switching_point + noise, 1.0) * t)
-        self._vhs_head_switching_point += self._head_switching_speed/1000
+        self._vhs_head_switching_point += self._head_switching_speed / 1000
         y = int(p // twidth * 2) + field
         p = int(fmod(self._vhs_head_switching_phase + noise, 1.0) * t)
         x = p % twidth
         y -= (262 - 240) * 2 if self._output_ntsc else (312 - 288) * 2
         tx = x
         ishif = x - twidth if x >= twidth // 2 else x
-        shif = 0
+        shift = 0
         while y < height:
             if y >= 0:
                 Y = fY[y]
-                if shif != 0:
+                if shift != 0:
                     tmp = numpy.zeros(twidth)
-                    x2 = (tx + twidth + shif) % twidth
+                    x2 = (tx + twidth + shift) % twidth
                     tmp[:width] = Y
 
                     x = tx
@@ -448,7 +451,7 @@ class Ntsc:
                             x2 = 0
                         x += 1
 
-            shif = ishif if shy == 0 else int(shif * 7 / 8)
+            shift = ishif if shy == 0 else int(shift * 7 / 8)
             tx = 0
             y += 2
             shy += 1
@@ -460,9 +463,9 @@ class Ntsc:
         if self._video_scanline_phase_shift == 90:
             return int(fieldno + self._video_scanline_phase_shift_offset + (y >> 1)) & 3
         elif self._video_scanline_phase_shift == 180:
-            return int(((((fieldno + y) & 2) + self._video_scanline_phase_shift_offset) & 3))
+            return int((((fieldno + y) & 2) + self._video_scanline_phase_shift_offset) & 3)
         elif self._video_scanline_phase_shift == 270:
-            return int(((fieldno + self._video_scanline_phase_shift_offset) & 3))
+            return int((fieldno + self._video_scanline_phase_shift_offset) & 3)
         else:
             return int(self._video_scanline_phase_shift_offset & 3)
 
@@ -478,8 +481,8 @@ class Ntsc:
             Q = fQ[y]
             xi = self._chroma_luma_xi(fieldno, y)
 
-            chroma = I * subcarrier_amplitude * umult[xi:xi + width]
-            chroma += Q * subcarrier_amplitude * vmult[xi:xi + width]
+            chroma = I * subcarrier_amplitude * umult[xi : xi + width]
+            chroma += Q * subcarrier_amplitude * vmult[xi : xi + width]
             Y[:] = Y + chroma.astype(numpy.int32) // 50
             I[:] = 0
             Q[:] = 0
@@ -507,21 +510,21 @@ class Ntsc:
 
             x = 4 - xi & 3
             # // flip the part of the sine wave that would correspond to negative U and V values
-            chroma[x + 2::4] = -chroma[x + 2::4]
-            chroma[x + 3::4] = -chroma[x + 3::4]
+            chroma[x + 2 :: 4] = -chroma[x + 2 :: 4]
+            chroma[x + 3 :: 4] = -chroma[x + 3 :: 4]
 
-            chroma = (chroma * 50 / subcarrier_amplitude)
+            chroma = chroma * 50 / subcarrier_amplitude
 
             # decode the color right back out from the subcarrier we generated
             cxi = -chroma[xi::2]
-            cxi1 = -chroma[xi + 1::2]
+            cxi1 = -chroma[xi + 1 :: 2]
             I[::2] = numpy.pad(cxi, (0, width // 2 - cxi.shape[0]))
             Q[::2] = numpy.pad(cxi1, (0, width // 2 - cxi1.shape[0]))
 
-            I[1:width - 2:2] = (I[:width - 2:2] + I[2::2]) >> 1
-            Q[1:width - 2:2] = (Q[:width - 2:2] + Q[2::2]) >> 1
-            I[width - 2:] = 0
-            Q[width - 2:] = 0
+            I[1 : width - 2 : 2] = (I[: width - 2 : 2] + I[2::2]) >> 1
+            Q[1 : width - 2 : 2] = (Q[: width - 2 : 2] + Q[2::2]) >> 1
+            I[width - 2 :] = 0
+            Q[width - 2 :] = 0
 
     def vhs_luma_lowpass(self, yiq: numpy.ndarray, field: int, luma_cut: float):
         _, height, width = yiq.shape
@@ -543,14 +546,14 @@ class Ntsc:
             f0 = lpU[0].lowpass_array(U)
             f1 = lpU[1].lowpass_array(f0)
             f2 = lpU[2].lowpass_array(f1)
-            U[:width - chroma_delay] = f2[chroma_delay:]
+            U[: width - chroma_delay] = f2[chroma_delay:]
 
         for V in fQ[field::2]:
             lpV = lowpassFilters(cutoff=chroma_cut, reset=0.0)
             f0 = lpV[0].lowpass_array(V)
             f1 = lpV[1].lowpass_array(f0)
             f2 = lpV[2].lowpass_array(f1)
-            V[:width - chroma_delay] = f2[chroma_delay:]
+            V[: width - chroma_delay] = f2[chroma_delay:]
 
     # VHS decks also vertically smear the chroma subcarrier using a delay line
     # to add the previous line's color subcarrier to the current line's color subcarrier.
@@ -560,12 +563,12 @@ class Ntsc:
     def vhs_chroma_vert_blend(self, yiq: numpy.ndarray, field: int):
         _, height, width = yiq.shape
         fY, fI, fQ = yiq
-        U2 = fI[field + 2::2, ]
-        V2 = fQ[field + 2::2, ]
-        delayU = numpy.pad(U2[:-1, ], [[1, 0], [0, 0]])
-        delayV = numpy.pad(V2[:-1, ], [[1, 0], [0, 0]])
-        fI[field + 2::2, ] = (delayU + U2 + 1) >> 1
-        fQ[field + 2::2, ] = (delayV + V2 + 1) >> 1
+        U2 = fI[field + 2 :: 2,]
+        V2 = fQ[field + 2 :: 2,]
+        delayU = numpy.pad(U2[:-1,], [[1, 0], [0, 0]])
+        delayV = numpy.pad(V2[:-1,], [[1, 0], [0, 0]])
+        fI[field + 2 :: 2,] = (delayU + U2 + 1) >> 1
+        fQ[field + 2 :: 2,] = (delayV + V2 + 1) >> 1
 
     def vhs_sharpen(self, yiq: numpy.ndarray, field: int, luma_cut: float):
         _, height, width = yiq.shape
@@ -576,7 +579,7 @@ class Ntsc:
             ts = lp[0].lowpass_array(Y)
             ts = lp[1].lowpass_array(ts)
             ts = lp[2].lowpass_array(ts)
-            Y[:] = (s + (s - ts) * self._vhs_out_sharpen * 2.0)
+            Y[:] = s + (s - ts) * self._vhs_out_sharpen * 2.0
 
     # http://www.michaeldvd.com.au/Articles/VideoArtefacts/VideoArtefactsColourBleeding.html
     # https://bavc.github.io/avaa/artifacts/yc_delay_error.html
@@ -596,8 +599,9 @@ class Ntsc:
         _, height, width = yiq.shape
         fY, fI, fQ = yiq
         rnds = self.random.nextIntArray(height // 2, 0, self._vhs_edge_wave)
-        lp = LowpassFilter(Ntsc.NTSC_RATE, self._output_vhs_tape_speed.luma_cut,
-                           0)  # no real purpose to initialize it with ntsc values
+        lp = LowpassFilter(
+            Ntsc.NTSC_RATE, self._output_vhs_tape_speed.luma_cut, 0
+        )  # no real purpose to initialize it with ntsc values
         rnds = lp.lowpass_array(rnds).astype(numpy.int32)
 
         for y, Y in enumerate(fY[field::2]):
@@ -733,7 +737,7 @@ def initialize_ntsc(seed=None):
         "video_chroma_phase_noise": int(rnd.triangular(0, 50, 2)),
         "video_chroma_loss": int(rnd.triangular(0, 800, 10)),
         "video_noise": int(rnd.triangular(0, 4200, 2)),
-        "emulating_vhs": False, #rnd.random() < 0.2,
+        "emulating_vhs": False,  # rnd.random() < 0.2,
         "vhs_edge_wave": int(rnd.triangular(0, 5, 0)),
         "video_scanline_phase_shift": rnd.choice([0, 90, 180, 270]),
         "video_scanline_phase_shift_offset": rnd.randint(0, 3),
@@ -787,6 +791,7 @@ def initialize_ntsc(seed=None):
 
 def lowpassFilters(cutoff: float, reset: float, rate: float = Ntsc.NTSC_RATE) -> List[LowpassFilter]:
     return [LowpassFilter(rate, cutoff, reset) for x in range(0, 3)]
+
 
 def apply_main_effect(nt: Ntsc, frame1, frame2=None):
     if frame2 is None:

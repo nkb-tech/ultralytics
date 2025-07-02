@@ -1,19 +1,24 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 import torch
 import torch.nn as nn
+
 from ..modules.conv import Conv
 
-__all__ = ['DySnakeConv']
+__all__ = ["DySnakeConv"]
+
 
 class DySnakeConv(nn.Module):
     def __init__(self, inc, ouc, k=3) -> None:
         super().__init__()
-        
+
         self.conv_0 = Conv(inc, ouc, k)
         self.conv_x = DSConv(inc, ouc, 0, k)
         self.conv_y = DSConv(inc, ouc, 1, k)
-    
+
     def forward(self, x):
         return torch.cat([self.conv_0(x), self.conv_x(x), self.conv_y(x)], dim=1)
+
 
 class DSConv(nn.Module):
     def __init__(self, in_ch, out_ch, morph, kernel_size=3, if_offset=True, extend_scope=1):
@@ -25,9 +30,9 @@ class DSConv(nn.Module):
         :param extend_scope: the range to expand (default 1 for this method)
         :param morph: the morphology of the convolution kernel is mainly divided into two types
                         along the x-axis (0) and the y-axis (1) (see the paper for details)
-        :param if_offset: whether deformation is required, if it is False, it is the standard convolution kernel
+        :param if_offset: whether deformation is required, if it is False, it is the standard convolution kernel.
         """
-        super(DSConv, self).__init__()
+        super().__init__()
         # use the <offset_conv> to learn the deformable offset
         self.offset_conv = nn.Conv2d(in_ch, 2 * kernel_size, 3, padding=1)
         self.bn = nn.BatchNorm2d(2 * kernel_size)
@@ -77,7 +82,7 @@ class DSConv(nn.Module):
 
 
 # Core code, for ease of understanding, we mark the dimensions of input and output next to the code
-class DSC(object):
+class DSC:
     def __init__(self, input_shape, kernel_size, extend_scope, morph):
         self.num_points = kernel_size
         self.width = input_shape[2]
@@ -160,23 +165,17 @@ class DSC(object):
                 # This part is quite simple. The main idea is that "offset is an iterative process"
                 y_offset_new[center] = 0
                 for index in range(1, center):
-                    y_offset_new[center + index] = (y_offset_new[center + index - 1] + y_offset[center + index])
-                    y_offset_new[center - index] = (y_offset_new[center - index + 1] + y_offset[center - index])
+                    y_offset_new[center + index] = y_offset_new[center + index - 1] + y_offset[center + index]
+                    y_offset_new[center - index] = y_offset_new[center - index + 1] + y_offset[center - index]
                 y_offset_new = y_offset_new.permute(1, 0, 2, 3).to(device)
                 y_new = y_new.add(y_offset_new.mul(self.extend_scope))
 
-            y_new = y_new.reshape(
-                [self.num_batch, self.num_points, 1, self.width, self.height])
+            y_new = y_new.reshape([self.num_batch, self.num_points, 1, self.width, self.height])
             y_new = y_new.permute(0, 3, 1, 4, 2)
-            y_new = y_new.reshape([
-                self.num_batch, self.num_points * self.width, 1 * self.height
-            ])
-            x_new = x_new.reshape(
-                [self.num_batch, self.num_points, 1, self.width, self.height])
+            y_new = y_new.reshape([self.num_batch, self.num_points * self.width, 1 * self.height])
+            x_new = x_new.reshape([self.num_batch, self.num_points, 1, self.width, self.height])
             x_new = x_new.permute(0, 3, 1, 4, 2)
-            x_new = x_new.reshape([
-                self.num_batch, self.num_points * self.width, 1 * self.height
-            ])
+            x_new = x_new.reshape([self.num_batch, self.num_points * self.width, 1 * self.height])
             return y_new, x_new
 
         else:
@@ -220,29 +219,24 @@ class DSC(object):
                 center = int(self.num_points // 2)
                 x_offset_new[center] = 0
                 for index in range(1, center):
-                    x_offset_new[center + index] = (x_offset_new[center + index - 1] + x_offset[center + index])
-                    x_offset_new[center - index] = (x_offset_new[center - index + 1] + x_offset[center - index])
+                    x_offset_new[center + index] = x_offset_new[center + index - 1] + x_offset[center + index]
+                    x_offset_new[center - index] = x_offset_new[center - index + 1] + x_offset[center - index]
                 x_offset_new = x_offset_new.permute(1, 0, 2, 3).to(device)
                 x_new = x_new.add(x_offset_new.mul(self.extend_scope))
 
-            y_new = y_new.reshape(
-                [self.num_batch, 1, self.num_points, self.width, self.height])
+            y_new = y_new.reshape([self.num_batch, 1, self.num_points, self.width, self.height])
             y_new = y_new.permute(0, 3, 1, 4, 2)
-            y_new = y_new.reshape([
-                self.num_batch, 1 * self.width, self.num_points * self.height
-            ])
-            x_new = x_new.reshape(
-                [self.num_batch, 1, self.num_points, self.width, self.height])
+            y_new = y_new.reshape([self.num_batch, 1 * self.width, self.num_points * self.height])
+            x_new = x_new.reshape([self.num_batch, 1, self.num_points, self.width, self.height])
             x_new = x_new.permute(0, 3, 1, 4, 2)
-            x_new = x_new.reshape([
-                self.num_batch, 1 * self.width, self.num_points * self.height
-            ])
+            x_new = x_new.reshape([self.num_batch, 1 * self.width, self.num_points * self.height])
             return y_new, x_new
 
     """
     input: input feature map [N,C,D,W,H]；coordinate map [N,K*D,K*W,K*H] 
     output: [N,1,K*D,K*W,K*H]  deformed feature map
     """
+
     def _bilinear_interpolate_3D(self, input_feature, y, x):
         device = input_feature.device
         y = y.reshape([-1]).float()
@@ -265,8 +259,7 @@ class DSC(object):
         x1 = torch.clamp(x1, zero, max_x)
 
         input_feature_flat = input_feature.flatten()
-        input_feature_flat = input_feature_flat.reshape(
-            self.num_batch, self.num_channels, self.width, self.height)
+        input_feature_flat = input_feature_flat.reshape(self.num_batch, self.num_channels, self.width, self.height)
         input_feature_flat = input_feature_flat.permute(0, 2, 3, 1)
         input_feature_flat = input_feature_flat.reshape(-1, self.num_channels)
         dimension = self.height * self.width
@@ -274,8 +267,7 @@ class DSC(object):
         base = torch.arange(self.num_batch) * dimension
         base = base.reshape([-1, 1]).float()
 
-        repeat = torch.ones([self.num_points * self.width * self.height
-                             ]).unsqueeze(0)
+        repeat = torch.ones([self.num_points * self.width * self.height]).unsqueeze(0)
         repeat = repeat.float()
 
         base = torch.matmul(base, repeat)
@@ -322,24 +314,27 @@ class DSC(object):
         vol_a1 = ((y - y0_float) * (x1_float - x)).unsqueeze(-1).to(device)
         vol_c1 = ((y - y0_float) * (x - x0_float)).unsqueeze(-1).to(device)
 
-        outputs = (value_a0 * vol_a0 + value_c0 * vol_c0 + value_a1 * vol_a1 +
-                   value_c1 * vol_c1)
+        outputs = value_a0 * vol_a0 + value_c0 * vol_c0 + value_a1 * vol_a1 + value_c1 * vol_c1
 
         if self.morph == 0:
-            outputs = outputs.reshape([
-                self.num_batch,
-                self.num_points * self.width,
-                1 * self.height,
-                self.num_channels,
-            ])
+            outputs = outputs.reshape(
+                [
+                    self.num_batch,
+                    self.num_points * self.width,
+                    1 * self.height,
+                    self.num_channels,
+                ]
+            )
             outputs = outputs.permute(0, 3, 1, 2)
         else:
-            outputs = outputs.reshape([
-                self.num_batch,
-                1 * self.width,
-                self.num_points * self.height,
-                self.num_channels,
-            ])
+            outputs = outputs.reshape(
+                [
+                    self.num_batch,
+                    1 * self.width,
+                    self.num_points * self.height,
+                    self.num_channels,
+                ]
+            )
             outputs = outputs.permute(0, 3, 1, 2)
         return outputs
 

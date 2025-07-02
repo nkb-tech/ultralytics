@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import math
 import random
@@ -10,14 +10,12 @@ import numpy as np
 import torch
 from PIL import Image
 
-from numba import njit
+from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils import LOGGER, colorstr
 from ultralytics.utils.checks import check_version
 from ultralytics.utils.instance import Instances
 from ultralytics.utils.metrics import bbox_ioa
 from ultralytics.utils.ops import segment2box, xyxyxyxy2xywhr
-from ultralytics.utils.ops import masks2segments, resample_segments, segment2box
-from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils.torch_utils import TORCHVISION_0_10, TORCHVISION_0_11, TORCHVISION_0_13
 
 # from .glitche import Ntsc, VHSSpeed, NumpyRandom
@@ -30,6 +28,7 @@ ALBU_AVAILABLE = False
 
 try:
     import albumentations as A
+
     ALBU_AVAILABLE = True
 except:
     ALBU_AVAILABLE = False
@@ -283,9 +282,9 @@ class Compose:
         """
         assert isinstance(index, (int, list)), f"The indices should be either list or int type but got {type(index)}"
         if isinstance(index, list):
-            assert isinstance(
-                value, list
-            ), f"The indices should be the same type as values, but got {type(index)} and {type(value)}"
+            assert isinstance(value, list), (
+                f"The indices should be the same type as values, but got {type(index)} and {type(value)}"
+            )
         if isinstance(index, int):
             index, value = [index], [value]
         for i, v in zip(index, value):
@@ -1509,7 +1508,7 @@ class RandomHSV:
 #         if isinstance(labels, dict):
 #             frame1 = labels["img"]
 #             is_pil = False
-            
+
 #         elif isinstance(labels, Image.Image):
 #             frame1 = np.asarray(labels)
 #             is_pil = True
@@ -1551,7 +1550,7 @@ class RGB2TIR:
         >>> augmented_image = augmented_labels["img"]
     """
 
-    def __init__(self, gamma=2.0, alpha=1.0, beta=0, clahe_clip=2.0, clahe_tile=(8,8), p=0.5):
+    def __init__(self, gamma=2.0, alpha=1.0, beta=0, clahe_clip=2.0, clahe_tile=(8, 8), p=0.5):
         self.gamma = gamma
         self.alpha = alpha
         self.beta = beta
@@ -1592,26 +1591,25 @@ class RGB2TIR:
 
         # Step 1: Convert RGB image to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
+
         # Step 2: Apply CLAHE to enhance local contrast
         gray_clahe = self.clahe.apply(gray)
-        
+
         # Step 3: Normalize the CLAHE output to span the full 0-255 range
         gray_normalized = cv2.normalize(gray_clahe, None, 0, 255, cv2.NORM_MINMAX)
-        
+
         # Step 4: Apply gamma correction to adjust luminance
         if self.gamma != 1.0:
             inv_gamma = 1.0 / self.gamma
             # Create a lookup table for gamma correction
-            table = np.array([((i / 255.0) ** inv_gamma) * 255 
-                            for i in np.arange(256)]).astype("uint8")
+            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(256)]).astype("uint8")
             gray_corrected = cv2.LUT(gray_normalized, table)
         else:
             gray_corrected = gray_normalized.copy()
-        
+
         # Step 5: Apply contrast and brightness adjustments
         gray_adjusted = cv2.convertScaleAbs(gray_corrected, alpha=self.alpha, beta=self.beta)
-        
+
         # Step 6: Apply the chosen colormap for thermal visualization
         infrared = cv2.applyColorMap(gray_adjusted, cv2.COLORMAP_INFERNO)
 
@@ -1983,16 +1981,16 @@ class Albumentations:
     compression.
     """
 
-    def __init__(self, p=1.0, task='detect', args=None):
+    def __init__(self, p=1.0, task="detect", args=None):
         """Initialize the transform object for YOLO bbox formatted params."""
         self.p = p
         self.transform = None
-        assert task in ('detect', 'classify', 'segment', 'pose'), f'Got {task}, expected yolo-like tasks.'
+        assert task in ("detect", "classify", "segment", "pose"), f"Got {task}, expected yolo-like tasks."
         prefix = colorstr(f"albumentations for {task}: ")
 
         if ALBU_AVAILABLE:
             try:
-                from albumentations.core.composition import TransformsSeqType, TransformType, BaseCompose
+                from albumentations.core.composition import BaseCompose, TransformsSeqType, TransformType
                 from albumentations.core.transforms_interface import BasicTransform
 
                 check_version(A.__version__, "1.0.3", hard=True)  # version requirement
@@ -2064,50 +2062,61 @@ class Albumentations:
 
                 # Transforms
                 default_params = {
-                        "dropout_prob":0.1,
-                        "quality_lower": 75, 
-                        "max_factor": 1.1,
-                        "clip_limit": 2,
-                        "brightness": 0.3,
-                        "contrast":0.4, 
-                        "saturation":0.3, 
-                        "hue":0.3
-                    }
+                    "dropout_prob": 0.1,
+                    "quality_lower": 75,
+                    "max_factor": 1.1,
+                    "clip_limit": 2,
+                    "brightness": 0.3,
+                    "contrast": 0.4,
+                    "saturation": 0.3,
+                    "hue": 0.3,
+                }
                 self.augs_params = default_params
                 if args is not None:
-                    self.aug_params = {args.get(k,None) if args.get(k,None) is not None else default_params[k] for k in default_params.keys()}
+                    self.aug_params = {
+                        args.get(k, None) if args.get(k, None) is not None else default_params[k]
+                        for k in default_params.keys()
+                    }
 
                 T = [
-                    A.OneOf([
-                        # A.CoarseDropout(
-                        #     num_holes_range=(3, 10),
-                        #     hole_height_range=(10, 200),
-                        #     hole_width_range=(10, 200),
-                        #     fill_value="random",
-                        #     p=0.3,
-                        # ),
-                        A.PixelDropout(dropout_prob=self.augs_params["dropout_prob"], p=0.5),
-                        A.ImageCompression(quality_lower=self.augs_params["quality_lower"], p=0.3),
-                        A.ZoomBlur(max_factor=self.augs_params["max_factor"], p=0.5),
-                        A.PixelDropout(p=0.3),
-                    ], p=0.4),
-                    A.OneOf([
-                        A.CLAHE(clip_limit=self.augs_params["clip_limit"], p=0.5),
-                        A.RandomBrightnessContrast(p=0.2),
-                        A.RandomGamma(p=0.1),
-                        A.Emboss(p=0.2),
-                        A.Sharpen(p=0.2),
-                        A.ColorJitter(brightness=self.augs_params["brightness"], 
-                                      contrast=self.augs_params["contrast"], 
-                                      saturation=self.augs_params["saturation"], 
-                                      hue=self.augs_params["hue"], 
-                                      p=0.3),
-                    ], p=0.3),
+                    A.OneOf(
+                        [
+                            # A.CoarseDropout(
+                            #     num_holes_range=(3, 10),
+                            #     hole_height_range=(10, 200),
+                            #     hole_width_range=(10, 200),
+                            #     fill_value="random",
+                            #     p=0.3,
+                            # ),
+                            A.PixelDropout(dropout_prob=self.augs_params["dropout_prob"], p=0.5),
+                            A.ImageCompression(quality_lower=self.augs_params["quality_lower"], p=0.3),
+                            A.ZoomBlur(max_factor=self.augs_params["max_factor"], p=0.5),
+                            A.PixelDropout(p=0.3),
+                        ],
+                        p=0.4,
+                    ),
+                    A.OneOf(
+                        [
+                            A.CLAHE(clip_limit=self.augs_params["clip_limit"], p=0.5),
+                            A.RandomBrightnessContrast(p=0.2),
+                            A.RandomGamma(p=0.1),
+                            A.Emboss(p=0.2),
+                            A.Sharpen(p=0.2),
+                            A.ColorJitter(
+                                brightness=self.augs_params["brightness"],
+                                contrast=self.augs_params["contrast"],
+                                saturation=self.augs_params["saturation"],
+                                hue=self.augs_params["hue"],
+                                p=0.3,
+                            ),
+                        ],
+                        p=0.3,
+                    ),
                     A.ToGray(p=0.3),
                 ]
-                
+
                 # Compose transforms
-                self.contains_spatial = False if task == 'classify' else check_contains_spatial(T)
+                self.contains_spatial = False if task == "classify" else check_contains_spatial(T)
                 self.transform = (
                     A.Compose(
                         T,
@@ -2123,7 +2132,7 @@ class Albumentations:
                 LOGGER.info(f"{prefix}{e}")
         else:
             LOGGER.info("Albumentations is not installed, skip.")
-           
+
     # def __call__(self, labels):
     #     # Generates object detections and returns a dictionary with detection results.
     #     if self.transform is None or random.random() > self.p:
@@ -2155,17 +2164,17 @@ class Albumentations:
 
     #     if len(new['class_labels']) > 0:
     #         labels = self._update_labels(labels, new, n_obj, points, h, w)
-            
+
     #     return labels
 
     # def _get_masks(self, instances, h, w):
-    #     # Get masks of images from  instances. 
+    #     # Get masks of images from  instances.
     #     if len(instances.segments) > 0:
     #         return polygons2masks((h, w), instances.segments, color=1, downsample_ratio=1)
     #     return None
 
     # def _get_keypoints(self, instances, h, w):
-    #     # Get keypoints of images from  instances. 
+    #     # Get keypoints of images from  instances.
     #     if instances.keypoints is not None:
     #         keypoints = np.copy(instances.keypoints)
     #         keypoints =  self._shift_keypoints(keypoints, h, w)
@@ -2173,33 +2182,33 @@ class Albumentations:
     #         keypoints = keypoints.reshape(-1, 3)
     #         return keypoints,  n_obj, num_kps, points
     #     return None, None, None, None
-    
+
     # @staticmethod
-    # @njit(fastmath=True) 
+    # @njit(fastmath=True)
     # def _shift_keypoints(keypoints, height, width):
-        
-    #     keypoints[...,0] = np.clip(keypoints[...,0], 0, width - 1) 
-    #     keypoints[...,1] = np.clip(keypoints[...,1], 0, height - 1) 
-        
+
+    #     keypoints[...,0] = np.clip(keypoints[...,0], 0, width - 1)
+    #     keypoints[...,1] = np.clip(keypoints[...,1], 0, height - 1)
+
     #     return keypoints
-    
+
     # @staticmethod
-    # @njit(fastmath=True) 
+    # @njit(fastmath=True)
     # def _bounding_segments(segments_out):
     #     bboxes = np.empty((segments_out.shape[0], 4), dtype=np.float64)
     #     for i, polygon in enumerate(segments_out):
     #         x_min, y_min = np.min(polygon[:,0]), np.min(polygon[:,1])
     #         x_max, y_max = np.max(polygon[:,0]), np.max(polygon[:,1])
-            
+
     #         w = x_max - x_min
     #         h = y_max - y_min
     #         x_center, y_center = (x_max+x_min)/2, (y_max+y_min)/2
-            
+
     #         bboxes[i] = [x_center, y_center, w, h]
     #     return bboxes
 
     # def _update_labels(self, labels, new, n_obj, points, h, w):
-    #     # Update labels with transforms. 
+    #     # Update labels with transforms.
     #     labels['img'] =  new["image"]
     #     labels['cls'] = np.array(new['class_labels'])
     #     bboxes_new = np.array(new['bboxes'], dtype=np.float32)
@@ -2209,7 +2218,7 @@ class Albumentations:
     #         segments_new = masks2segments(masks_new, strategy='largest') if masks_new is not None else []
     #         non_empty = [s.shape[0] != 0 for s in segments_new]
     #         segments_out = [segment for segment, flag in zip(segments_new, non_empty) if flag]
-    #         bboxes_out = bboxes_new[non_empty]        
+    #         bboxes_out = bboxes_new[non_empty]
     #     else:
     #         bboxes_out = bboxes_new
 
@@ -2217,12 +2226,12 @@ class Albumentations:
     #         segments_out = resample_segments(segments_out)
     #         segments_out = np.stack(segments_out, axis=0)
     #         segments_out /= (w, h)
-            
+
     #         # change bounding of bboxes
     #         correct_bboxes = self._bounding_segments(segments_out)
     #         labels["instances"].update(bboxes=correct_bboxes, segments=segments_out)
     #         return labels
-            
+
     #     if n_obj is None:
     #         labels["instances"].update(bboxes=bboxes_out)
     #     else:
@@ -2289,7 +2298,7 @@ class Albumentations:
 
         return labels
 
-    
+
 class Format:
     """
     A class for formatting image annotations for object detection, instance segmentation, and pose estimation tasks.
@@ -2698,21 +2707,21 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
             raise ValueError(f"data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}")
 
     albu_args = {
-                "dropout_prob":hyp.albu_dropout_prob if hasattr(hyp, 'albu_dropout_prob') else None,
-                "quality_lower":hyp.albu_quality_lower if hasattr(hyp, 'albu_quality_lower') else None,
-                "max_factor":hyp.albu_max_factor if hasattr(hyp, 'albu_max_factor') else None,
-                "clip_limit":hyp.albu_clip_limit if hasattr(hyp, 'albu_clip_limit') else None,
-                "brightness":hyp.albu_brightness if hasattr(hyp, 'albu_brightness') else None,
-                "contrast":hyp.albu_contrast if hasattr(hyp, 'albu_contrast') else None,
-                "saturation":hyp.albu_saturation if hasattr(hyp, 'albu_saturation') else None,
-                "hue":hyp.albu_hue if hasattr(hyp, 'albu_hue') else None,
-            }
+        "dropout_prob": hyp.albu_dropout_prob if hasattr(hyp, "albu_dropout_prob") else None,
+        "quality_lower": hyp.albu_quality_lower if hasattr(hyp, "albu_quality_lower") else None,
+        "max_factor": hyp.albu_max_factor if hasattr(hyp, "albu_max_factor") else None,
+        "clip_limit": hyp.albu_clip_limit if hasattr(hyp, "albu_clip_limit") else None,
+        "brightness": hyp.albu_brightness if hasattr(hyp, "albu_brightness") else None,
+        "contrast": hyp.albu_contrast if hasattr(hyp, "albu_contrast") else None,
+        "saturation": hyp.albu_saturation if hasattr(hyp, "albu_saturation") else None,
+        "hue": hyp.albu_hue if hasattr(hyp, "albu_hue") else None,
+    }
     return Compose(
         [
             pre_transform,
             MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
             Albumentations(p=1.0, args=albu_args),
-            #RandomGlitche(p=0.6),
+            # RandomGlitche(p=0.6),
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
             RandomFlip(direction="vertical", p=hyp.flipud),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
@@ -2797,14 +2806,14 @@ def classify_augmentations(
     force_color_jitter=False,
     erasing=0.0,
     interpolation="BILINEAR",
-    albu_dropout_prob = 0.1,
-    albu_quality_lower = 75,
-    albu_max_factor = 1.1,
-    albu_clip_limit = 2,
-    albu_brightness = 0.3,
-    albu_contrast = 0.4,
-    albu_saturation = 0.3 ,
-    albu_hue = 0.3,
+    albu_dropout_prob=0.1,
+    albu_quality_lower=75,
+    albu_max_factor=1.1,
+    albu_clip_limit=2,
+    albu_brightness=0.3,
+    albu_contrast=0.4,
+    albu_saturation=0.3,
+    albu_hue=0.3,
 ):
     """
     Creates a composition of image augmentation transforms for classification tasks.
@@ -2853,7 +2862,10 @@ def classify_augmentations(
     ratio = tuple(ratio or (3.0 / 4.0, 4.0 / 3.0))  # default imagenet ratio range
     interpolation = getattr(T.InterpolationMode, interpolation)
     size = (size, size) if isinstance(size, int) else size
-    primary_tfl = [ClassifyLetterBox(size), T.RandomResizedCrop(size, scale=scale, ratio=ratio, interpolation=interpolation)]
+    primary_tfl = [
+        ClassifyLetterBox(size),
+        T.RandomResizedCrop(size, scale=scale, ratio=ratio, interpolation=interpolation),
+    ]
     # primary_tfl = [T.Resize(size), T.RandomResizedCrop(size, scale=scale, ratio=ratio, interpolation=interpolation)]
     if hflip > 0.0:
         primary_tfl.append(T.RandomHorizontalFlip(p=hflip))
@@ -2895,19 +2907,9 @@ def classify_augmentations(
     if not disable_color_jitter:
         secondary_tfl.append(T.ColorJitter(brightness=hsv_v, contrast=hsv_v, saturation=hsv_s, hue=hsv_h))
 
-    albu_args = {
-                "dropout_prob":albu_dropout_prob,
-                "quality_lower":albu_quality_lower,
-                "max_factor":albu_max_factor,
-                "clip_limit":albu_clip_limit,
-                "brightness":albu_brightness,
-                "contrast":albu_contrast,
-                "saturation":albu_saturation,
-                "hue":albu_hue,
-            }
     final_tfl = [
         # T.RandomChoice([RandomGlitche(p=1), Albumentations(p=1., task='classify', args=albu_args)], p=[1,1]),
-        #T.RandomApply([RandomGlitche(p=1)], p=0.5),
+        # T.RandomApply([RandomGlitche(p=1)], p=0.5),
         T.RandomApply([T.Grayscale(num_output_channels=3)], p=0.5),
         T.ToTensor(),
         T.Normalize(mean=torch.tensor(mean), std=torch.tensor(std)),

@@ -1,4 +1,5 @@
-# Compress Experiment 
+# Compress Experiment
+
 ### Model:yolov8n.yaml Dataset:Visdrone only using 30% Training Data
 
 ```
@@ -42,7 +43,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-lamp-exp1',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': False,
@@ -71,7 +72,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-lamp-exp2',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -100,7 +101,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-lamp-exp3',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -132,7 +133,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-grouptaylor-exp1',
-    
+
     # prune
     'prune_method':'group_taylor',
     'global_pruning': True,
@@ -161,7 +162,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-grouptaylor-exp2',
-    
+
     # prune
     'prune_method':'group_taylor',
     'global_pruning': False,
@@ -193,7 +194,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-grouphessian-exp1',
-    
+
     # prune
     'prune_method':'group_hessian',
     'global_pruning': True,
@@ -225,7 +226,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-slim-exp1',
-    
+
     # prune
     'prune_method':'slim',
     'global_pruning': True,
@@ -258,7 +259,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-groupsl-exp1',
-    
+
     # prune
     'prune_method':'group_sl',
     'global_pruning': True,
@@ -291,7 +292,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-groupslim-exp1',
-    
+
     # prune
     'prune_method':'group_slim',
     'global_pruning': True,
@@ -355,7 +356,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-lamp-exp1',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -386,7 +387,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-grouptaylor-exp1',
-    
+
     # prune
     'prune_method':'group_taylor',
     'global_pruning': True,
@@ -416,7 +417,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-grouptaylor-exp2',
-    
+
     # prune
     'prune_method':'group_taylor',
     'global_pruning': False,
@@ -448,7 +449,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-visdrone-grouphessian-exp1',
-    
+
     # prune
     'prune_method':'group_hessian',
     'global_pruning': False,
@@ -465,6 +466,7 @@ nohup python get_FPS.py --weights runs/prune/yolov8n-visdrone-grouphessian-exp1-
 ```
 
 ### Model:yolov8-BIFPN-EfficientRepHead.yaml Dataset:Seaship
+
 ```
 ------------------ train base model ------------------
 model = YOLO('ultralytics/cfg/models/v8/yolov8n.yaml')
@@ -529,7 +531,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-light-lamp-exp1',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': False,
@@ -559,7 +561,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-light-lamp-exp2',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': False,
@@ -576,6 +578,7 @@ nohup python get_FPS.py --weights runs/prune/yolov8n-light-lamp-exp2-prune/weigh
 ```
 
 ### Model:yolov8-ASF-P2.yaml Dataset:Visdrone
+
 ```
 nohup python get_FPS.py --weights runs/prune/yolov8n-asf-p2-lamp-exp1-prune/weights/model_c2f_v2.pt --batch 32 --device 0 --warmup 200 --testtime 400 > logs/yolov8n-asf-p2-fps.log 2>&1 & tail -f logs/yolov8n-asf-p2-fps.log
 ------------------ lamp exp1 ------------------
@@ -593,7 +596,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-asf-p2-lamp-exp1',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -623,7 +626,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-asf-p2-lamp-exp2',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -653,7 +656,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-asf-p2-lamp-exp3',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -670,6 +673,7 @@ nohup python get_FPS.py --weights runs/prune/yolov8n-asf-p2-lamp-exp3-prune/weig
 ```
 
 ### Model:yolov8-ASF-P2.yaml Dataset:Visdrone only using 30% Training Data
+
 ```
 ------------------ train base model ------------------
 model = YOLO('yolov8-GhostHGNetV2-SlimNeck-ASF.yaml')
@@ -730,7 +734,7 @@ param_dict = {
     'close_mosaic': 20,
     'project':'runs/prune',
     'name':'yolov8n-lamp-exp1',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -747,6 +751,7 @@ nohup python get_FPS.py --weights runs/prune/yolov8n-lamp-exp1-finetune/weights/
 ```
 
 ### Model:yolov8-convnextv2-goldyolo-asf.yaml Dataset:CrowdHuman only using 20% Training Data
+
 ```
 ------------------ train base model ------------------
 model = YOLO('yolov8-convnextv2-goldyolo-asf.yaml')
@@ -785,7 +790,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-convnextv2-goldyolo-asf-lamp-exp1',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -815,7 +820,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-convnextv2-goldyolo-asf-lamp-exp2',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -833,6 +838,7 @@ python plot_channel_image.py --base-weights runs/prune/yolov8-convnextv2-goldyol
 ```
 
 ### Model:yolov8-dyhead-prune.yaml Dataset:CrowdHuman only using 20% Training Data
+
 ```
 ------------------ train base model ------------------
 model = YOLO('yolov8-dyhead.yaml')
@@ -871,7 +877,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-DyHead-lamp-exp1',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -901,7 +907,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-DyHead-lamp-exp2',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': False,
@@ -931,7 +937,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-DyHead-lamp-exp2',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -961,7 +967,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-DyHead-lamp-exp3',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -978,6 +984,7 @@ nohup python get_FPS.py --weights runs/prune/yolov8-DyHead-lamp-exp3-finetune/we
 ```
 
 ### Model:yolov8-dyhead-prune.yaml Dataset:CrowdHuman only using 20% Training Data
+
 ```
 ------------------ train base model ------------------
 model = YOLO('yolov8-repvit-RepNCSPELAN.yaml')
@@ -1016,7 +1023,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-repvit-RepNCSPELAN-lamp-exp1',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -1046,7 +1053,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-repvit-RepNCSPELAN-lamp-exp2',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -1076,7 +1083,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-repvit-RepNCSPELAN-lamp-exp3',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -1106,7 +1113,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-repvit-RepNCSPELAN-lamp-exp4',
-    
+
     # prune
     'prune_method':'lamp',
     'global_pruning': True,
@@ -1136,7 +1143,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-repvit-RepNCSPELAN-slim-exp1',
-    
+
     # prune
     'prune_method':'slim',
     'global_pruning': True,
@@ -1166,7 +1173,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-repvit-RepNCSPELAN-group_taylor-exp1',
-    
+
     # prune
     'prune_method':'group_taylor',
     'global_pruning': True,
@@ -1196,7 +1203,7 @@ param_dict = {
     'close_mosaic': 0,
     'project':'runs/prune',
     'name':'yolov8-repvit-RepNCSPELAN-group_taylor-exp2',
-    
+
     # prune
     'prune_method':'group_taylor',
     'global_pruning': False,
@@ -1216,6 +1223,7 @@ python plot_channel_image.py --base-weights runs/prune/yolov8-repvit-RepNCSPELAN
 ```
 
 # 使用教程
+
     剪枝操作问题，报错问题统一群里问，我群里回复谢谢~
 
 # 环境
@@ -1225,95 +1233,98 @@ python plot_channel_image.py --base-weights runs/prune/yolov8-repvit-RepNCSPELAN
 ## 视频
 
 整体的流程说明和讲解(第一个必须要看的视频):
-链接：https://pan.baidu.com/s/1ho0s0ZqJuZD5MPk-Nbbntg?pwd=bfuc 
+链接：https://pan.baidu.com/s/1ho0s0ZqJuZD5MPk-Nbbntg?pwd=bfuc
 提取码：bfuc # BiliBili 魔鬼面具
 
 1. 20231221 增加一个使用教程的视频
 2. 20240114 增加一个c2f_v2转回去c2f的教程视频(需要对剪枝后的模型做蒸馏学习的必看!)
 3. 20240316 增加一个稀疏训练tensorboard结果可视化
 
---------------------------------------------------------------
+---
 
 yolov8-Faster-GFPN-P2-EfficientHead教程:(更正:里面的不是GFPN,是YOLOV6的EfficientRepBiPAN)
-链接：https://pan.baidu.com/s/103ljiewi9nG3bDJupH8jdw?pwd=b939 
+链接：https://pan.baidu.com/s/103ljiewi9nG3bDJupH8jdw?pwd=b939
 提取码：b939 # BiliBili 魔鬼面具
 
 yolov8-BIFPN-EfficientRepHead教程:
-链接：https://pan.baidu.com/s/1qJqvXN__5Ow0RakqYeKv4A?pwd=wedo 
+链接：https://pan.baidu.com/s/1qJqvXN__5Ow0RakqYeKv4A?pwd=wedo
 提取码：wedo # BiliBili 魔鬼面具
 
 EfficientHead中的PConv跳层教程:
-链接：https://pan.baidu.com/s/1MLVEqLicH6keIp6GhYDECw?pwd=ejqn 
+链接：https://pan.baidu.com/s/1MLVEqLicH6keIp6GhYDECw?pwd=ejqn
 提取码：ejqn # BiliBili 魔鬼面具
 
 yolov8-GhostHGNetV2-SlimNeck-ASF教程:
-链接：https://pan.baidu.com/s/1wSFWQLWB9DkA8SKCe377sg?pwd=da2d 
+链接：https://pan.baidu.com/s/1wSFWQLWB9DkA8SKCe377sg?pwd=da2d
 提取码：da2d # BiliBili 魔鬼面具
 
 yolov8-convnextv2-goldyolo-asf.yaml教程:
-链接：https://pan.baidu.com/s/1isZ2zfq8Hpq45UpxNCQtgA?pwd=dbew 
+链接：https://pan.baidu.com/s/1isZ2zfq8Hpq45UpxNCQtgA?pwd=dbew
 提取码：dbew # BiliBili 魔鬼面具
 
 yolov8-dyhead.yaml教程:
-链接：https://pan.baidu.com/s/1xFa7VkBDD2lRpAjUtUDHiQ?pwd=2nvl 
+链接：https://pan.baidu.com/s/1xFa7VkBDD2lRpAjUtUDHiQ?pwd=2nvl
 提取码：2nvl # BiliBili 魔鬼面具
 
 yolov8-repvit-RepNCSPELAN.yaml教程：
-链接：链接：https://pan.baidu.com/s/1gSVcdbfslxv1g88cdKi-Bw?pwd=zagg 
+链接：链接：https://pan.baidu.com/s/1gSVcdbfslxv1g88cdKi-Bw?pwd=zagg
 提取码：zagg # BiliBili 魔鬼面具
 
---------------------------------------------------------------
+---
 
 yolov5v7的示例讲解(主要是增加剪枝跳层的理解):
+
 1. yolov5n+C3-Faster+RepConv
-链接：https://pan.baidu.com/s/11UVcQINQUlzUQzWjTpp6fw?pwd=sa15 
-提取码：sa15 # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/11UVcQINQUlzUQzWjTpp6fw?pwd=sa15
+   提取码：sa15 # BiliBili 魔鬼面具
 
 2. yolov5n+RepViT+C2f
-链接：https://pan.baidu.com/s/1TtcLwwer3ANcc4aFZDoUxw?pwd=bodk 
-提取码：bodk # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/1TtcLwwer3ANcc4aFZDoUxw?pwd=bodk
+   提取码：bodk # BiliBili 魔鬼面具
 
 3. 原yolov7-tiny, yolov7-tiny+mobilenetv3+LSKBlock+TSCODE+RepConv, yolov7-tiny+Yolov7_Tiny_E_ELAN_DCN+AFPN
-链接：https://pan.baidu.com/s/1n7Y7Ec93jeznJM6XGb20Yg?pwd=vjpd 
-提取码：vjpd # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/1n7Y7Ec93jeznJM6XGb20Yg?pwd=vjpd
+   提取码：vjpd # BiliBili 魔鬼面具
 
 4. yolov7-tiny+FasterNet+DBB
-链接：https://pan.baidu.com/s/19HycIie3sa2lEj0HMF5jeA?pwd=s066 
-提取码：s066 # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/19HycIie3sa2lEj0HMF5jeA?pwd=s066
+   提取码：s066 # BiliBili 魔鬼面具
 
 5. yolov7-tiny+ReXNet+VoVGSCSP+DyHead+DecoupledHead
-链接：https://pan.baidu.com/s/1ycaI3COdqS6eTvEYR3xNpQ?pwd=ctxf 
-提取码：ctxf # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/1ycaI3COdqS6eTvEYR3xNpQ?pwd=ctxf
+   提取码：ctxf # BiliBili 魔鬼面具
 
 ## 我自己跑的实验数据
+
 1. yolov8n.yaml
-链接：https://pan.baidu.com/s/1T4XrW28Tj1O88TC00y5cRw?pwd=2ar0 
-提取码：2ar0 # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/1T4XrW28Tj1O88TC00y5cRw?pwd=2ar0
+   提取码：2ar0 # BiliBili 魔鬼面具
 2. yolov8-Faster-GFPN-P2-EfficientHead.yaml
-链接：https://pan.baidu.com/s/15V67npN4V6DX-ugFF9Ip2A?pwd=4r3k 
-提取码：4r3k # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/15V67npN4V6DX-ugFF9Ip2A?pwd=4r3k
+   提取码：4r3k # BiliBili 魔鬼面具
 3. yolov8-BIFPN-EfficientRepHead.yaml
-链接：https://pan.baidu.com/s/18gRkJV9ZAC-gHJr0AzIFcg?pwd=79nc 
-提取码：79nc # BiliBili 魔鬼面具
-链接：https://pan.baidu.com/s/16FoDC2yiIOlwlTN5o87PpQ?pwd=5c05 
-提取码：5c05 # BiliBili 魔鬼面具 Seaship数据集
+   链接：https://pan.baidu.com/s/18gRkJV9ZAC-gHJr0AzIFcg?pwd=79nc
+   提取码：79nc # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/16FoDC2yiIOlwlTN5o87PpQ?pwd=5c05
+   提取码：5c05 # BiliBili 魔鬼面具 Seaship数据集
 4. yolov8-ASF-P2.yaml(这个不需要额外的跳层,所以没有讲解视频)
-链接：https://pan.baidu.com/s/1zspaMKnRDnxCOXnmaa-siw?pwd=nywb 
-提取码：nywb # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/1zspaMKnRDnxCOXnmaa-siw?pwd=nywb
+   提取码：nywb # BiliBili 魔鬼面具
 5. yolov8-GhostHGNetV2-SlimNeck-ASF.yaml
-链接：https://pan.baidu.com/s/1o0HYkiAFlkYwYZWxOcjYxQ?pwd=9ys9 
-提取码：9ys9 # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/1o0HYkiAFlkYwYZWxOcjYxQ?pwd=9ys9
+   提取码：9ys9 # BiliBili 魔鬼面具
 6. yolov8-convnextv2-goldyolo-asf.yaml
-链接：https://pan.baidu.com/s/1wW3LpcY9xwwJSKDLfl2L1Q?pwd=d7nr 
-提取码：d7nr # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/1wW3LpcY9xwwJSKDLfl2L1Q?pwd=d7nr
+   提取码：d7nr # BiliBili 魔鬼面具
 7. yolov8-dyhead.yaml
-链接：https://pan.baidu.com/s/1t6cnn6I6yyx_ObZ-n3wBeQ?pwd=xazk 
-提取码：xazk # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/1t6cnn6I6yyx_ObZ-n3wBeQ?pwd=xazk
+   提取码：xazk # BiliBili 魔鬼面具
 8. yolov8-repvit-RepNCSPELAN.yaml
-链接：https://pan.baidu.com/s/1ngOU1aFzd7siMaaCT8dtpg?pwd=t2z1 
-提取码：t2z1 # BiliBili 魔鬼面具
+   链接：https://pan.baidu.com/s/1ngOU1aFzd7siMaaCT8dtpg?pwd=t2z1
+   提取码：t2z1 # BiliBili 魔鬼面具
 
 ## 常见问题与报错
+
 1. speedup是什么参数，修改其会对剪枝有什么影响？
 
     speedup决定剪枝率,speedup=剪枝前GFLOPS/剪枝后GFLOPS.比如speedup=2.0,相当于压缩百分之50的计算量.

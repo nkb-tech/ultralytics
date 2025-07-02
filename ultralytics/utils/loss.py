@@ -1,4 +1,5 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 
 import torch
 import torch.nn as nn
@@ -12,7 +13,6 @@ from ultralytics.utils.torch_utils import autocast
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
 
-from glob import glob
 
 class DistillationLoss(nn.Module):
     """Criterion class for computing training losses."""
@@ -21,7 +21,7 @@ class DistillationLoss(nn.Module):
         """Initializes DistillationLoss with the model, defining model-related properties and BCE loss function."""
         super().__init__()
 
-        if task=="classify":
+        if task == "classify":
             self.temperature = temperature
             self.alpha = alpha
             self.forward = self.forward_classify
@@ -33,36 +33,33 @@ class DistillationLoss(nn.Module):
             self.temperature = temperature
             self.alpha = alpha
             self.forward = self.forward_detect
-    
+
     def forward_detect(self, student_logits, teacher_logits):
-        """
-        Menghitung distillation loss.
-        """
+        """Menghitung distillation loss."""
         _, s_scores = torch.cat([xi.view(student_logits[0].shape[0], self.no, -1) for xi in student_logits], 2).split(
             (self.reg_max * 4, self.nc), 1
         )
         _, t_scores = torch.cat([xi.view(teacher_logits[0].shape[0], self.no, -1) for xi in teacher_logits], 2).split(
             (self.reg_max * 4, self.nc), 1
         )
-        
+
         s_scores = s_scores.permute(0, 2, 1).contiguous()
         t_scores = t_scores.permute(0, 2, 1).contiguous()
 
         student_soft = F.log_softmax(s_scores / self.temperature, dim=1)
         teacher_soft = F.softmax(t_scores / self.temperature, dim=1)
 
-        loss = F.kl_div(student_soft, teacher_soft, reduction='batchmean') * (self.temperature ** 2) / student_soft.shape[2]
+        loss = (
+            F.kl_div(student_soft, teacher_soft, reduction="batchmean") * (self.temperature**2) / student_soft.shape[2]
+        )
         return self.alpha * loss
 
     def forward_classify(self, student_logits, teacher_logits):
-        """
-        Menghitung distillation loss.
-        """
-
+        """Menghitung distillation loss."""
         student_soft = F.log_softmax(student_logits / self.temperature, dim=1)
         teacher_soft = F.softmax(teacher_logits / self.temperature, dim=1)
 
-        loss = F.kl_div(student_soft, teacher_soft, reduction='batchmean') * (self.temperature ** 2)
+        loss = F.kl_div(student_soft, teacher_soft, reduction="batchmean") * (self.temperature**2)
         return self.alpha * loss
 
 
@@ -72,7 +69,7 @@ class QualityfocalLoss(nn.Module):
 
     https://arxiv.org/abs/2006.04388.
     """
-    
+
     def __init__(self):
         """Initialize the Quality focal loss class."""
         super().__init__()
@@ -88,15 +85,15 @@ class QualityfocalLoss(nn.Module):
             loss = F.binary_cross_entropy_with_logits(
                 pred,
                 zerolabel,
-                reduction='none',
+                reduction="none",
             ) * scale_factor.pow(beta)
-        
+
         scale_factor = label[gt_target_pos_mask] - pred_sigmoid[gt_target_pos_mask]
         with autocast(enabled=False):
             loss[gt_target_pos_mask] = F.binary_cross_entropy_with_logits(
                 pred[gt_target_pos_mask],
                 label[gt_target_pos_mask],
-                reduction='none',
+                reduction="none",
             ) * scale_factor.abs().pow(beta)
         return loss
 
@@ -115,10 +112,9 @@ class VarifocalLoss(nn.Module):
     @staticmethod
     def forward(pred, label, gt_target_pos_mask=None, alpha=0.75, gamma=2.0):
         """Computes Varifocal loss."""
-        
         weight = alpha * (pred.sigmoid() - label).abs().pow(gamma) * (label <= 0.0) + label * (label > 0.0)
         with autocast(enabled=False):
-            return F.binary_cross_entropy_with_logits(pred, label, reduction='none') * weight
+            return F.binary_cross_entropy_with_logits(pred, label, reduction="none") * weight
 
 
 class FocalLoss(nn.Module):
@@ -374,9 +370,9 @@ class v8DetectionLoss:
 class v8SegmentationLoss(v8DetectionLoss):
     """Criterion class for computing training losses."""
 
-    def __init__(self, model, tal_topk=10 ):  # model must be de-paralleled
+    def __init__(self, model, tal_topk=10):  # model must be de-paralleled
         """Initializes the v8SegmentationLoss class, taking a de-paralleled model as argument."""
-        super().__init__(model,  tal_topk=tal_topk )
+        super().__init__(model, tal_topk=tal_topk)
         self.overlap = model.args.overlap_mask
 
     def __call__(self, preds, batch):
@@ -712,13 +708,16 @@ class v8PoseLoss(v8DetectionLoss):
 
 class v8ClassificationLoss:
     """Criterion class for computing training losses."""
-    def __init__(self, weights = None):
+
+    def __init__(self, weights=None):
         self.loss = torch.nn.CrossEntropyLoss(weights)
+
     def __call__(self, preds, batch):
         """Compute the classification loss between predictions and true labels."""
         loss = self.loss(preds, batch["cls"])
         loss_items = loss.reshape(-1).detach()
         return loss, loss_items
+
 
 class v8OBBLoss(v8DetectionLoss):
     """Calculates losses for object detection, classification, and box distribution in rotated YOLO models."""
@@ -875,8 +874,8 @@ class E2EPoseLoss:
 
 class E2ESegmentLoss:
     """Criterion class for computing training losses."""
+
     def __init__(self, model):
-        
         """Initialize E2ESegmentLoss with one-to-many and one-to-one detection losses using the provided model."""
         self.one2many = v8SegmentationLoss(model, tal_topk=10)
         self.one2one = v8SegmentationLoss(model, tal_topk=1)

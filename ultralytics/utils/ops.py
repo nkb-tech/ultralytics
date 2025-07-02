@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import contextlib
 import math
@@ -9,8 +9,8 @@ from typing import List
 import cv2
 import numpy as np
 import torch
-from torch import Tensor
 import torch.nn.functional as F
+from torch import Tensor
 
 from ultralytics.utils import LOGGER
 from ultralytics.utils.metrics import batch_probiou
@@ -218,7 +218,6 @@ def non_max_suppression(
         prediction = prediction[0]  # select only inference output
     if classes is not None:
         classes = torch.tensor(classes, device=prediction.device)
-
 
     if prediction.shape[-1] == 6 or prediction.shape[-2] == max_det:  # end-to-end model (BNC, i.e. 1,300,6)
         output = [pred[pred[:, 4] > conf_thres] for pred in prediction]
@@ -803,7 +802,7 @@ def masks2segments(masks, strategy="largest"):
         segments (List): list of segment masks
     """
     segments = []
-    for x in (masks.int().cpu().numpy() if isinstance(masks, torch.Tensor) else masks).astype('uint8'):
+    for x in (masks.int().cpu().numpy() if isinstance(masks, torch.Tensor) else masks).astype("uint8"):
         c = cv2.findContours(x, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
         if c:
             if strategy == "concat":  # concatenate all segments
@@ -844,7 +843,7 @@ def clean_str(s):
 
 def process_nms_trt_results(preds: List[Tensor], names: List[str]) -> List[Tensor]:
     """
-    Filter TensorRT-like bounding box structure via `max_det`
+    Filter TensorRT-like bounding box structure via `max_det`.
 
     Args:
         preds (List[torch.Tensor]): list of
@@ -860,7 +859,6 @@ def process_nms_trt_results(preds: List[Tensor], names: List[str]) -> List[Tenso
             shape (num_boxes, 6) containing the kept boxes, with columns
             (x1, y1, x2, y2, confidence, class).
     """
-
     named_dict = dict(zip(names, preds))  # dict and zip dont copy data
     outputs = []
 
@@ -878,7 +876,7 @@ def process_nms_trt_results(preds: List[Tensor], names: List[str]) -> List[Tenso
 
 def process_nms_onnx_results(preds: Tensor) -> List[Tensor]:
     """
-    Filter ONNX-like bounding box structure via `max_det`
+    Filter ONNX-like bounding box structure via `max_det`.
 
     Args:
         preds (torch.Tensor): Tensor of shape Nx7. Contains
@@ -892,7 +890,6 @@ def process_nms_onnx_results(preds: Tensor) -> List[Tensor]:
             shape (num_boxes, 6) containing the kept boxes, with columns
             (x1, y1, x2, y2, confidence, class).
     """
-
     batch_index, yolo_dets = preds[..., 0], preds[..., 1:]
     bs = int(batch_index[-1])
 

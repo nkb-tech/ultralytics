@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 """
 Train a model on a dataset.
 
@@ -15,14 +15,16 @@ import warnings
 from copy import copy, deepcopy
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import torch
+from timm.optim.optim_factory import create_optimizer
 from torch import distributed as dist
 from torch import nn, optim
 
 from ultralytics.cfg import get_cfg, get_save_dir
-from ultralytics.data.utils import check_cls_dataset, check_det_dataset, IMG_FORMATS
+from ultralytics.data.utils import check_cls_dataset, check_det_dataset
 from ultralytics.nn.tasks import attempt_load_one_weight, attempt_load_weights
 from ultralytics.utils import (
     DEFAULT_CFG,
@@ -41,6 +43,7 @@ from ultralytics.utils.autobatch import check_train_batch_size
 from ultralytics.utils.checks import check_amp, check_file, check_imgsz, check_model_file_from_stem, print_args
 from ultralytics.utils.dist import ddp_cleanup, generate_ddp_command
 from ultralytics.utils.files import get_latest_run
+from ultralytics.utils.loss import DistillationLoss
 from ultralytics.utils.torch_utils import (
     TORCH_2_4,
     EarlyStopping,
@@ -53,11 +56,6 @@ from ultralytics.utils.torch_utils import (
     strip_optimizer,
     torch_distributed_zero_first,
 )
-from ultralytics.utils.loss import DistillationLoss
-
-from types import SimpleNamespace
-from timm.optim.optim_factory import create_optimizer
-
 
 
 class BaseTrainer:
@@ -158,7 +156,7 @@ class BaseTrainer:
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
         if RANK in {-1, 0}:
             callbacks.add_integration_callbacks(self)
-        
+
         # Distillation
         if self.args.teacher is not None:
             self.setup_teacher(check_model_file_from_stem(self.args.teacher))
@@ -206,7 +204,7 @@ class BaseTrainer:
             # Command
             cmd, file = generate_ddp_command(world_size, self)
             try:
-                LOGGER.info(f'{colorstr("DDP:")} debug command {" ".join(cmd)}')
+                LOGGER.info(f"{colorstr('DDP:')} debug command {' '.join(cmd)}")
                 subprocess.run(cmd, check=True)
             except Exception as e:
                 raise e
@@ -244,14 +242,14 @@ class BaseTrainer:
         ckpt = self.setup_model()
         self.model = self.model.to(self.device)
         self.set_model_attributes()
-        
+
         # Set teacher model for distill
         if self.args.teacher is not None:
             for k, v in self.teacher.model.named_parameters():
                 v.requires_grad = False
             self.teacher = self.teacher.to(self.device)
             self.teacher.eval()
-            
+
         # Freeze layers
         freeze_list = (
             self.args.freeze
@@ -348,15 +346,14 @@ class BaseTrainer:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
         # Weighted loss (for classify task)
-        if self.args.weighted_loss and self.args.task=="classify":
+        if self.args.weighted_loss and self.args.task == "classify":
             weights = self.train_loader.dataset.calculate_weights(0.5)
             weights = torch.tensor([weights[k] for k in sorted(weights)], device=self.device, dtype=torch.float)
-            LOGGER.info(f'loss weights = {weights}')
+            LOGGER.info(f"loss weights = {weights}")
             if world_size > 1:
                 self.model.criterion = self.model.module.init_criterion(weights)
             else:
                 self.model.criterion = self.model.init_criterion(weights)
-
 
         nb = len(self.train_loader)  # number of batches
         nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup iterations
@@ -366,10 +363,10 @@ class BaseTrainer:
         self.train_time_start = time.time()
         self.run_callbacks("on_train_start")
         LOGGER.info(
-            f'Image sizes {self.args.imgsz} train, {self.args.imgsz} val\n'
-            f'Using {self.train_loader.num_workers * (world_size or 1)} dataloader workers\n'
+            f"Image sizes {self.args.imgsz} train, {self.args.imgsz} val\n"
+            f"Using {self.train_loader.num_workers * (world_size or 1)} dataloader workers\n"
             f"Logging results to {colorstr('bold', self.save_dir)}\n"
-            f'Starting training for ' + (f"{self.args.time} hours..." if self.args.time else f"{self.epochs} epochs...")
+            f"Starting training for " + (f"{self.args.time} hours..." if self.args.time else f"{self.epochs} epochs...")
         )
         if self.args.close_mosaic:
             base_idx = (self.epochs - self.args.close_mosaic) * nb
@@ -415,7 +412,7 @@ class BaseTrainer:
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
                     if self.args.teacher is not None:
-                        model_out = self.model(batch['img'])
+                        model_out = self.model(batch["img"])
                         if getattr(self.model, "criterion", None) is None:
                             if world_size > 1:
                                 self.model.criterion = self.model.module.init_criterion()
@@ -424,14 +421,14 @@ class BaseTrainer:
                         self.loss, self.loss_items = self.model.criterion(model_out, batch)
                     else:
                         self.loss, self.loss_items = self.model(batch)
-                    
+
                     if RANK != -1:
                         self.loss *= world_size
-                        
+
                     # Distillation part
                     if self.args.teacher is not None:
                         with torch.no_grad():
-                            teacher_out = self.teacher(batch['img'])
+                            teacher_out = self.teacher(batch["img"])
                             teacher_out = teacher_out[1] if isinstance(teacher_out, tuple) else teacher_out
                         # Calculate distillation loss
                         d_loss = self.dist_loss(model_out, teacher_out)
@@ -439,9 +436,7 @@ class BaseTrainer:
                         self.loss += d_loss
 
                     self.tloss = (
-                        (self.tloss * i + self.loss_items) / (i + 1)
-                        if self.tloss is not None
-                        else self.loss_items
+                        (self.tloss * i + self.loss_items) / (i + 1) if self.tloss is not None else self.loss_items
                     )
 
                 # Backward
@@ -673,14 +668,14 @@ class BaseTrainer:
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
         """Returns dataloader derived from torch.data.Dataloader."""
         raise NotImplementedError("get_dataloader function not implemented in trainer")
-    
+
     def setup_teacher(self, weights):
         if str(weights).endswith(".pt"):
             weights, ckpt = attempt_load_one_weight(weights)
             cfg = weights.yaml
         else:
             raise NotImplementedError(weights)
-        
+
         self.teacher = self.get_model(cfg=cfg, weights=weights, verbose=RANK == -1)  # calls Model(cfg, weights)
         return ckpt
 
@@ -868,13 +863,36 @@ class BaseTrainer:
 
         # timm optimizers https://timm.fast.ai/Optimizers & https://github.com/huggingface/pytorch-image-models/blob/4d4bdd64a996bf7b5919ec62f20af4a1c07d5848/timm/optim/optim_factory.py#L183
         elif name in {
-            'nadam', 'radam', 'adamp', 'Lookahead_Adam',  'lion', 'rmsproptf', 'rmsprop', 'novograd' , 'nvnovograd', 'madgradw',  'madgrad', 'adahessian',
-            'nlars', 'nlarc', 'lars', 'lambc','lamb', 'adanw', 'adanp', 'adafactor', 'adagrad', 'adadelta', 'radabelief',  'adabelief','adamax',
+            "nadam",
+            "radam",
+            "adamp",
+            "Lookahead_Adam",
+            "lion",
+            "rmsproptf",
+            "rmsprop",
+            "novograd",
+            "nvnovograd",
+            "madgradw",
+            "madgrad",
+            "adahessian",
+            "nlars",
+            "nlarc",
+            "lars",
+            "lambc",
+            "lamb",
+            "adanw",
+            "adanp",
+            "adafactor",
+            "adagrad",
+            "adadelta",
+            "radabelief",
+            "adabelief",
+            "adamax",
         }:
             args = SimpleNamespace()
             args.weight_decay = 0.0
             args.lr = lr
-            args.opt = name 
+            args.opt = name
             args.momentum = momentum
             optimizer = create_optimizer(args, g[2])
 
@@ -888,6 +906,6 @@ class BaseTrainer:
         optimizer.add_param_group({"params": g[1], "weight_decay": 0.0})  # add g1 (BatchNorm2d weights)
         LOGGER.info(
             f"{colorstr('optimizer:')} {type(optimizer).__name__}(lr={lr}, momentum={momentum}) with parameter groups "
-            f'{len(g[1])} weight(decay=0.0), {len(g[0])} weight(decay={decay}), {len(g[2])} bias(decay=0.0)'
+            f"{len(g[1])} weight(decay=0.0), {len(g[0])} weight(decay={decay}), {len(g[2])} bias(decay=0.0)"
         )
         return optimizer

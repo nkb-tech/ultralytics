@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 # ------------------------------------------------------------------------------------------------
 # Deformable DETR
 # Copyright (c) 2020 SenseTime. All Rights Reserved.

@@ -1,3 +1,5 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
 # Copyright (c) 2023, Tri Dao, Albert Gu.
 
 import math
@@ -6,9 +8,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
-
 from einops import rearrange, repeat
+from torch import Tensor
 
 try:
     from causal_conv1d import causal_conv1d_fn, causal_conv1d_update
@@ -16,7 +17,12 @@ except ImportError:
     causal_conv1d_fn, causal_conv1d_update = None
 
 try:
-    from mamba_ssm.ops.selective_scan_interface import selective_scan_fn, mamba_inner_fn, bimamba_inner_fn, mamba_inner_fn_no_out_proj
+    from mamba_ssm.ops.selective_scan_interface import (
+        bimamba_inner_fn,
+        mamba_inner_fn,
+        mamba_inner_fn_no_out_proj,
+        selective_scan_fn,
+    )
 except ImportError:
     selective_scan_fn, mamba_inner_fn, bimamba_inner_fn, mamba_inner_fn_no_out_proj = None, None, None, None, None
 
@@ -50,7 +56,7 @@ class Mamba(nn.Module):
         layer_idx=None,
         device=None,
         dtype=None,
-        bimamba_type="none"
+        bimamba_type="none",
     ):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -79,9 +85,7 @@ class Mamba(nn.Module):
         self.activation = "silu"
         self.act = nn.SiLU()
 
-        self.x_proj = nn.Linear(
-            self.d_inner, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs
-        )
+        self.x_proj = nn.Linear(self.d_inner, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs)
         self.dt_proj = nn.Linear(self.dt_rank, self.d_inner, bias=True, **factory_kwargs)
 
         # Initialize special dt projection to preserve variance at initialization
@@ -95,8 +99,7 @@ class Mamba(nn.Module):
 
         # Initialize dt bias so that F.softplus(dt_bias) is between dt_min and dt_max
         dt = torch.exp(
-            torch.rand(self.d_inner, **factory_kwargs) * (math.log(dt_max) - math.log(dt_min))
-            + math.log(dt_min)
+            torch.rand(self.d_inner, **factory_kwargs) * (math.log(dt_max) - math.log(dt_min)) + math.log(dt_min)
         ).clamp(min=dt_init_floor)
         # Inverse of softplus: https://github.com/pytorch/pytorch/issues/72759
         inv_dt = dt + torch.log(-torch.expm1(-dt))
@@ -129,7 +132,7 @@ class Mamba(nn.Module):
         ).contiguous()
         A_b_log = torch.log(A_b)  # Keep A_b_log in fp32
         self.A_b_log = nn.Parameter(A_b_log)
-        self.A_b_log._no_weight_decay = True 
+        self.A_b_log._no_weight_decay = True
 
         self.conv1d_b = nn.Conv1d(
             in_channels=self.d_inner,
@@ -141,9 +144,7 @@ class Mamba(nn.Module):
             **factory_kwargs,
         )
 
-        self.x_proj_b = nn.Linear(
-            self.d_inner, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs
-        )
+        self.x_proj_b = nn.Linear(self.d_inner, self.dt_rank + self.d_state * 2, bias=False, **factory_kwargs)
         self.dt_proj_b = nn.Linear(self.dt_rank, self.d_inner, bias=True, **factory_kwargs)
 
         self.D_b = nn.Parameter(torch.ones(self.d_inner, device=device))  # Keep in fp32
@@ -154,7 +155,7 @@ class Mamba(nn.Module):
     def forward(self, hidden_states, inference_params=None):
         """
         hidden_states: (B, L, D)
-        Returns: same shape as hidden_states
+        Returns: same shape as hidden_states.
         """
         batch, seqlen, dim = hidden_states.shape
 
@@ -207,7 +208,9 @@ class Mamba(nn.Module):
                     delta_softplus=True,
                 )
                 # F.linear(rearrange(out_z, "b d l -> b l d"), out_proj_weight, out_proj_bias)
-                out = F.linear(rearrange(out + out_b.flip([-1]), "b d l -> b l d"), self.out_proj.weight, self.out_proj.bias)
+                out = F.linear(
+                    rearrange(out + out_b.flip([-1]), "b d l -> b l d"), self.out_proj.weight, self.out_proj.bias
+                )
             else:
                 out = mamba_inner_fn(
                     xz,
@@ -319,20 +322,15 @@ class Mamba(nn.Module):
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         device = self.out_proj.weight.device
         conv_dtype = self.conv1d.weight.dtype if dtype is None else dtype
-        conv_state = torch.zeros(
-            batch_size, self.d_model * self.expand, self.d_conv, device=device, dtype=conv_dtype
-        )
+        conv_state = torch.zeros(batch_size, self.d_model * self.expand, self.d_conv, device=device, dtype=conv_dtype)
         ssm_dtype = self.dt_proj.weight.dtype if dtype is None else dtype
         # ssm_dtype = torch.float32
-        ssm_state = torch.zeros(
-            batch_size, self.d_model * self.expand, self.d_state, device=device, dtype=ssm_dtype
-        )
+        ssm_state = torch.zeros(batch_size, self.d_model * self.expand, self.d_state, device=device, dtype=ssm_dtype)
         return conv_state, ssm_state
 
     def _get_states_from_cache(self, inference_params, batch_size, initialize_states=False):
         assert self.layer_idx is not None
         if self.layer_idx not in inference_params.key_value_memory_dict:
-            batch_shape = (batch_size,)
             conv_state = torch.zeros(
                 batch_size,
                 self.d_model * self.expand,
@@ -359,11 +357,9 @@ class Mamba(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(
-        self, dim, mixer_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False
-    ):
+    def __init__(self, dim, mixer_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False):
         """
-        Simple block wrapping a mixer class with LayerNorm/RMSNorm and residual connection"
+        Simple block wrapping a mixer class with LayerNorm/RMSNorm and residual connection".
 
         This Block has a slightly different structure compared to a regular
         prenorm Transformer block.
@@ -381,13 +377,11 @@ class Block(nn.Module):
         self.norm = norm_cls(dim)
         if self.fused_add_norm:
             assert RMSNorm is not None, "RMSNorm import fails"
-            assert isinstance(
-                self.norm, (nn.LayerNorm, RMSNorm)
-            ), "Only LayerNorm and RMSNorm are supported for fused_add_norm"
+            assert isinstance(self.norm, (nn.LayerNorm, RMSNorm)), (
+                "Only LayerNorm and RMSNorm are supported for fused_add_norm"
+            )
 
-    def forward(
-        self, hidden_states: Tensor, residual: Optional[Tensor] = None, inference_params=None
-    ):
+    def forward(self, hidden_states: Tensor, residual: Optional[Tensor] = None, inference_params=None):
         r"""Pass the input through the encoder layer.
 
         Args:

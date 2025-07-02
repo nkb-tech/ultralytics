@@ -1,4 +1,4 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 
 import os
 import random
@@ -12,8 +12,8 @@ from torch.utils.data import dataloader, distributed
 from ultralytics.data.dataset import (
     GroundingDataset,
     YOLODataset,
-    YOLOWeightedDataset,
     YOLOMultiModalDataset,
+    YOLOWeightedDataset,
 )
 from ultralytics.data.loaders import (
     LOADERS,
