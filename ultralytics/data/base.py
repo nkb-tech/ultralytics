@@ -25,7 +25,7 @@ class BaseDataset(Dataset):
     Args:
         img_path (str): Path to the folder containing images.
         imgsz (int, optional): Image size. Defaults to 640.
-        cache (bool, optional): Cache images to RAM or disk during training. Defaults to False.
+        cache (bool or str, optional): Cache images in RAM (`True`, `"ram"`), on disk (`"disk"`), or low-RAM mode (`"low-ram"`). Defaults to False.
         augment (bool, optional): If True, data augmentation is applied. Defaults to True.
         hyp (dict, optional): Hyperparameters to apply data augmentation. Defaults to None.
         prefix (str, optional): Prefix to print in log messages. Defaults to ''.
@@ -36,6 +36,9 @@ class BaseDataset(Dataset):
         single_cls (bool, optional): If True, single class training is used. Defaults to False.
         classes (list): List of included classes. Default is None.
         fraction (float): Fraction of dataset to utilize. Default is 1.0 (use all data).
+        min_size (int, optional): Minimum bbox size. Defaults to 20.
+        sahi (bool, optional): If False, images are resized before augmentation to speed up training. Defaults to False.
+
 
     Attributes:
         im_files (list): List of image file paths.
@@ -62,6 +65,8 @@ class BaseDataset(Dataset):
         classes=None,
         fraction=1.0,
         min_size=20,
+        sahi=False,
+        **args,
     ):
         """Initialize BaseDataset with given configuration and options."""
         super().__init__()
@@ -80,6 +85,7 @@ class BaseDataset(Dataset):
         self.batch_size = batch_size
         self.stride = stride
         self.pad = pad
+        self.sahi = sahi
         if self.rect:
             assert self.batch_size is not None
             self.set_rectangle()
@@ -88,7 +94,7 @@ class BaseDataset(Dataset):
         self.buffer = []  # buffer size = batch size
         self.max_buffer_length = min((self.ni, self.batch_size * 8, 1000)) if self.augment else 0
 
-        # Cache images (options are cache = True, False, None, "ram", "disk")
+        # Cache images (options are cache = True, False, None, "ram", "disk", "low-ram")
         self.ims, self.im_hw0, self.im_hw = [None] * self.ni, [None] * self.ni, [None] * self.ni
         self.npy_files = [Path(f).with_suffix(".npy") for f in self.im_files]
         self.cache = cache.lower() if isinstance(cache, str) else "ram" if cache is True else None
@@ -100,6 +106,8 @@ class BaseDataset(Dataset):
                 )
             self.cache_images()
         elif self.cache == "disk" and self.check_cache_disk():
+            self.cache_images()
+        elif self.cache == "low-ram": # кэшируем в виде JPEG
             self.cache_images()
 
         # Transforms
@@ -149,58 +157,93 @@ class BaseDataset(Dataset):
                     self.labels[i]["keypoints"] = keypoints[j]
             if self.single_cls:
                 self.labels[i]["cls"][:, 0] = 0
+    
+    def _resize(self, im, h0, w0, rect_mode):
+        if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
+            r = self.imgsz / max(h0, w0)  # ratio
+            if r != 1:  # if sizes are not equal
+                w = min(math.ceil(w0 * r), self.imgsz)
+                h = min(math.ceil(h0 * r), self.imgsz)
+                return cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+        elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
+            return cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+        return im
 
     def load_image(self, i, rect_mode=True):
-        """Loads 1 image from dataset index 'i', returns (im, resized hw)."""
-        im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
-        if im is None:  # not cached in RAM
-            if fn.exists():  # load npy
-                try:
-                    im = np.load(fn)
-                except Exception as e:
-                    LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
-                    Path(fn).unlink(missing_ok=True)
-                    im = cv2.imread(f)  # BGR
-            else:  # read image
-                im = cv2.imread(f)  # BGR
+        stored, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
+        if self.cache == "low-ram" and isinstance(stored, (bytes, bytearray)):  # low-ram: если в self.ims байтовый JPEG-буфер, то декодируем на лету
+            arr = np.frombuffer(stored, dtype=np.uint8)
+            im = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             if im is None:
-                raise FileNotFoundError(f"Image Not Found {f}")
+                raise RuntimeError(f"{self.prefix}Corrupt JPEG buffer for {f}")
+            h0, w0 = im.shape[:2]
 
-            h0, w0 = im.shape[:2]  # orig hw
-            if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
-                r = self.imgsz / max(h0, w0)  # ratio
-                if r != 1:  # if sizes are not equal
-                    w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
-                    im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-            elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
-                im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+            # print(f"[load_image] #{i:05d}  ORIG  {h0}x{w0}")
+            if not self.sahi:
+                im = self._resize(im, h0, w0, rect_mode)
+            # print(f"[load_image] #{i:05d}  AFTER load_image() -> {im.shape[0]}x{im.shape[1]}")
 
-            # Add to buffer if training with augmentations
             if self.augment:
-                self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
+                self.im_hw0[i], self.im_hw[i] = (h0, w0), im.shape[:2]
                 self.buffer.append(i)
-                if 1 < len(self.buffer) >= self.max_buffer_length:  # prevent empty buffer
+                if len(self.buffer) >= self.max_buffer_length:
                     j = self.buffer.pop(0)
-                    if self.cache != "ram":
-                        self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
-
+                    self.im_hw0[j], self.im_hw[j] = None, None
             return im, (h0, w0), im.shape[:2]
 
-        return self.ims[i], self.im_hw0[i], self.im_hw[i]
+        if stored is not None:  # ram
+            return stored, self.im_hw0[i], self.im_hw[i]
+
+        # disk или False
+        if fn.exists():  # load npy
+            try:
+                im = np.load(fn)
+            except Exception as e:
+                LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
+                Path(fn).unlink(missing_ok=True)
+                im = cv2.imread(f)  # BGR
+        else:  # read image
+            im = cv2.imread(f)  # BGR
+        if im is None:
+            raise FileNotFoundError(f"Image Not Found {f}")
+
+        h0, w0 = im.shape[:2]  # orig hw
+        # print(f"[load_image] #{i:05d}  ORIG  {h0}x{w0}")
+        if not self.sahi:
+            im = self._resize(im, h0, w0, rect_mode)
+        # print(f"[load_image] #{i:05d}  AFTER load_image() -> {im.shape[0]}x{im.shape[1]}")
+
+        if self.augment:  # Add to buffer if training with augmentations
+            self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
+            self.buffer.append(i)
+            if len(self.buffer) >= self.max_buffer_length:
+                j = self.buffer.pop(0)
+                if self.cache != "ram":
+                    self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+
+        return im, (h0, w0), im.shape[:2]
+
 
     def cache_images(self):
         """Cache images to memory or disk."""
         b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
-        fcn, storage = (self.cache_images_to_disk, "Disk") if self.cache == "disk" else (self.load_image, "RAM")
+        if self.cache == "disk":
+            fcn, storage = self.cache_images_to_disk, "Disk"
+        elif self.cache == "low-ram":
+            fcn, storage = self.cache_images_to_buffer, "Low-RAM"
+        else:  # ram
+            fcn, storage = self.load_image, "RAM"
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(fcn, range(self.ni))
             pbar = TQDM(enumerate(results), total=self.ni, disable=LOCAL_RANK > 0)
             for i, x in pbar:
                 if self.cache == "disk":
                     b += self.npy_files[i].stat().st_size
-                else:  # 'ram'
+                elif self.cache == "ram":
                     self.ims[i], self.im_hw0[i], self.im_hw[i] = x  # im, hw_orig, hw_resized = load_image(self, i)
                     b += self.ims[i].nbytes
+                else:  # low-ram
+                    b += x
                 pbar.desc = f"{self.prefix}Caching images ({b / gb:.1f}GB {storage})"
             pbar.close()
 
@@ -238,6 +281,18 @@ class BaseDataset(Dataset):
             return False
         return True
 
+    def cache_images_to_buffer(self, i):
+        """Saves an image as JPEG bytes for low-ram on-the-fly decoding."""
+        im = cv2.imread(self.im_files[i])  # BGR
+        if im is None:
+            raise FileNotFoundError(f"{self.prefix}Image Not Found {self.im_files[i]}")
+        success, buf = cv2.imencode(".jpg", im, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
+        if not success:
+            raise RuntimeError(f"{self.prefix}Failed to JPEG-encode {self.im_files[i]}")
+        data = buf.tobytes()
+        self.ims[i] = data
+        return len(data)
+    
     def check_cache_ram(self, safety_margin=0.5):
         """Check image caching requirements vs available memory."""
         b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes

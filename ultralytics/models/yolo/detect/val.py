@@ -104,7 +104,9 @@ class DetectionValidator(BaseValidator):
     def _prepare_batch(self, si, batch):
         """Prepares a batch of images and annotations for validation."""
         idx = batch["batch_idx"] == si
+        
         cls = batch["cls"][idx].squeeze(-1)
+            
         bbox = batch["bboxes"][idx]
         ori_shape = batch["ori_shape"][si]
         imgsz = batch["img"].shape[2:]
