@@ -227,6 +227,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
             Dict[str, Union[np.ndarray, List]]: Transformed labels within the slice.
         """
         x_min, y_min, x_max, y_max = slice_bbox
+        x_crop_size, y_crop_size = x_max - x_min, y_max - y_min
         slice_labels = {"cls": [], "bboxes": []}
 
         for i in range(len(labels["bboxes"])):
@@ -249,13 +250,13 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
 
             new_x1 = max(x1 - x_min, 0)
             new_y1 = max(y1 - y_min, 0)
-            new_x2 = min(x2 - x_min, self.crop_size)
-            new_y2 = min(y2 - y_min, self.crop_size)
+            new_x2 = min(x2 - x_min, x_crop_size)
+            new_y2 = min(y2 - y_min, y_crop_size)
 
-            cx_new = (new_x1 + new_x2) / 2 / self.crop_size
-            cy_new = (new_y1 + new_y2) / 2 / self.crop_size
-            w_new = (new_x2 - new_x1) / self.crop_size
-            h_new = (new_y2 - new_y1) / self.crop_size
+            cx_new = (new_x1 + new_x2) / 2 / x_crop_size
+            cy_new = (new_y1 + new_y2) / 2 / y_crop_size
+            w_new = (new_x2 - new_x1) / x_crop_size
+            h_new = (new_y2 - new_y1) / y_crop_size
 
             slice_labels["cls"].append(cls)
             slice_labels["bboxes"].append([cx_new, cy_new, w_new, h_new])
