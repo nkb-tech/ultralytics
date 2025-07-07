@@ -2226,7 +2226,7 @@ class Albumentations:
                         A.OneOf(
                             [
                                 A.RandomRain(p=self.hyp.p_rain),
-                                A.RandomSnow(p=self.hyp.p_snow),
+                                A.RandomSnow(p=self.hyp.p_snow, brightness_coeff=2, snow_point_range=(0, 0.15)),
                             ],
                             p=0.1,
                         ),
