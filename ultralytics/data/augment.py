@@ -990,7 +990,17 @@ class RandomPerspective:
     """
 
     def __init__(
-        self, degrees=0.0, translate=0.1, scale=0.5, shear=0.0, perspective=0.0, border=(0, 0), pre_transform=None
+        self,
+        degrees=0.0,
+        translate=0.1,
+        scale=0.5,
+        shear=0.0,
+        perspective=0.0,
+        border=(0, 0),
+        aspect_ratio_thr=100,
+        wh_thr=2,
+        area_thr=0.1,
+        pre_transform=None,
     ):
         """
         Initializes RandomPerspective object with transformation parameters.
@@ -1007,6 +1017,9 @@ class RandomPerspective:
             border (Tuple[int, int]): Tuple specifying mosaic border (top/bottom, left/right).
             pre_transform (Callable | None): Function/transform to apply to the image before starting the random
                 transformation.
+            aspect_ratio_thr (float): Пороговое значение для соотношения сторон bounding box'а.
+            wh_thr (float): Порог ширины и высоты (в пикселях) для фильтрации слишком маленьких box'ов.
+            area_thr (float): Пороговое отношение площадей (после/до) для фильтрации чрезмерно обрезанных box'ов.
 
         Examples:
             >>> transform = RandomPerspective(degrees=10.0, translate=0.1, scale=0.5, shear=5.0)
@@ -1019,6 +1032,9 @@ class RandomPerspective:
         self.perspective = perspective
         self.border = border  # mosaic border
         self.pre_transform = pre_transform
+        self.aspect_ratio_thr = aspect_ratio_thr
+        self.wh_thr = wh_thr
+        self.area_thr = area_thr
 
     def affine_transform(self, img, border):
         """
@@ -1270,7 +1286,7 @@ class RandomPerspective:
         # print(f"[Albumentations end]   {labels['img'].shape[0]}x{labels['img'].shape[1]}")
         return labels
 
-    def box_candidates(self, box1, box2, wh_thr=2, ar_thr=100, area_thr=0.1, eps=1e-16):
+    def box_candidates(self, box1, box2, eps=1e-16):
         """
         Compute candidate boxes for further processing based on size and aspect ratio criteria.
 
@@ -1306,7 +1322,12 @@ class RandomPerspective:
         w1, h1 = box1[2] - box1[0], box1[3] - box1[1]
         w2, h2 = box2[2] - box2[0], box2[3] - box2[1]
         ar = np.maximum(w2 / (h2 + eps), h2 / (w2 + eps))  # aspect ratio
-        return (w2 > wh_thr) & (h2 > wh_thr) & (w2 * h2 / (w1 * h1 + eps) > area_thr) & (ar < ar_thr)  # candidates
+        return (
+            (w2 > self.wh_thr)
+            & (h2 > self.wh_thr)
+            & (w2 * h2 / (w1 * h1 + eps) > self.area_thr)
+            & (ar < self.aspect_ratio_thr)
+        )  # candidates
 
 
 class CutMix(BaseMixTransform):
@@ -2682,6 +2703,9 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         scale=hyp.scale,
         shear=hyp.shear,
         perspective=hyp.perspective,
+        aspect_ratio_thr=hyp.aspect_ratio_thr,
+        wh_thr=hyp.wh_thr,
+        area_thr=hyp.area_thr,
         pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz)),
     )
 
@@ -2769,6 +2793,9 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
         scale=hyp.scale,
         shear=hyp.shear,
         perspective=hyp.perspective,
+        aspect_ratio_thr=hyp.aspect_ratio_thr,
+        wh_thr=hyp.wh_thr,
+        area_thr=hyp.area_thr,
         pre_transform=LetterBox(new_shape=(imgsz, imgsz)),
     )
 
