@@ -127,8 +127,8 @@ crop_fraction: 1.0 # (float) image crop fraction for classification (0.1-1), 1.0
 
 #RandomPerspectiveAugs
 aspect_ratio_thr: 100 # aspect ratio threshold after RandomPerspective augmentation
-wh_thr: 2
-area_thr: 0.1
+wh_thr: 5 # after RandomPerspective width and height threshold in pixels. Boxes smaller than this in either dimension are rejected.
+area_thr: 0.1 # after RandomPerspective area ratio threshold. Boxes with an area ratio (new/old) less than this value are rejected.
 # Albumentations
 albu_dropout_prob: 0.1
 albu_quality_lower: 75

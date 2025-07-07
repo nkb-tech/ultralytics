@@ -1273,9 +1273,7 @@ class RandomPerspective:
         # Filter instances
         instances.scale(scale_w=scale, scale_h=scale, bbox_only=True)
         # Make the bboxes have the same scale with new_bboxes
-        i = self.box_candidates(
-            box1=instances.bboxes.T, box2=new_instances.bboxes.T, area_thr=0.01 if len(segments) else 0.10
-        )
+        i = self.box_candidates(box1=instances.bboxes.T, box2=new_instances.bboxes.T)
         labels["instances"] = new_instances[i]
         labels["cls"] = cls[i]
         labels["img"] = img
