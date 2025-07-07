@@ -47,7 +47,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         img_path: str,
         cut_strategy: str = "grid",
         crop_size: int = 640,
-        overlap_ratio: float = 0,
+        overlap_ratio: float = 0,  # now minimal overlap
         sampling_rate: float = 1.0,
         *args,
         **kwargs,
@@ -59,7 +59,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
             img_path (str): Path/paths to the directory containing images.
             cut_strategy (str): Strategy for slicing images ('grid' or 'random_crop'). Default is 'grid'.
             crop_size (int): Size of each crop (square). Default is 640.
-            overlap_ratio (float): Fraction of overlap between adjacent slices (only for 'grid'). Default is 0.
+            overlap_ratio (float): Minimal desired fraction of overlap between adjacent slices (used for 'grid', also calculate num of crops for 'random_crop'). Default is 0.
             sampling_rate (float): When using 'random_crop', this defines the ratio of random crops per image compared to
                                    how many slices that image would generate under the 'grid' strategy. Default is 1.0.
             *args, **kwargs: Additional arguments passed to the parent YOLODataset class.
@@ -77,11 +77,13 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         info = [f":\n  cut_strategy: {self.cut_strategy}", f"\n  crop_size: {self.crop_size}"]
         # overlap_ratio only for grid
         if self.cut_strategy == "grid":
-            info.append(f"\n  overlap_ratio: {self.overlap_ratio}")
+            info.append(f"\n  Minimal overlap_ratio: {self.overlap_ratio}")
 
         info.append(f"\n  total_images: {self.ni}")
         LOGGER.info(prefix + "".join(info))
 
+        # slice_indices store (img_idx, slice_idx) for 'random_crop' or
+        # (img_idx, slice_idx, (start_x, start_y, end_x, end_y)) for 'grid'
         self.slice_indices = self._precompute_slices()  # Список (img_idx, slice_idx)
         crop_info = (
             f"  Total crops: {len(self.slice_indices)}\n"
@@ -90,46 +92,129 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         )
         LOGGER.info(crop_info)
 
-    def _precompute_slices(self) -> List[Tuple[int, int]]:
+    def _precompute_slices(self) -> List[Tuple[int, Any]]:
         """
         Precompute (img_idx, slice_idx) pairs and collect statistics.
+        For 'grid', it also computes and stores the coordinates of each slice.
         If cut_strategy is 'random_crop', returns fewer slices per image based on sampling_rate.
         """
 
-        def process_single_image(
-            idx: int, crop_size: int, overlap_ratio: float, load_image_func: callable
-        ) -> Tuple[int, int]:
+        def _calculate_grid_params_for_image(
+            idx: int, crop_size: int, min_overlap_ratio: float, load_image_func: callable
+        ) -> Tuple[int, List[Tuple[int, int, int, int]]]:
+            """
+            Calculates optimal grid parameters and slice coordinates for a single image.
+            Ensures full image coverage by adjusting overlap for the last crop if necessary.
+            Returns image index and a list of (start_x, start_y, end_x, end_y) coordinates for each slice.
+            """
             im, (h0, w0), _ = load_image_func(idx)
 
-            step_x = int(crop_size * (1 - overlap_ratio))
-            step_y = int(crop_size * (1 - overlap_ratio))
+            # Determine effective crop size, respecting image dimensions
+            # If image dimension is smaller than crop_size, the effective crop is the image dimension itself
+            effective_crop_w = min(crop_size, w0)
+            effective_crop_h = min(crop_size, h0)
 
-            cols = max(1, (w0 - crop_size) // step_x + 1)
-            rows = max(1, (h0 - crop_size) // step_y + 1)
+            # Calculate step and number of slices for X-axis (width)
+            if w0 <= effective_crop_w:
+                cols = 1
+                step_x = 0
+            else:
+                desired_step_x = int(effective_crop_w * (1 - min_overlap_ratio))
+                if desired_step_x <= 0:  # Ensure step is at least 1 if overlap is too high
+                    desired_step_x = 1
 
-            total_slices = cols * rows
-            return idx, total_slices
+                # how many full steps
+                num_steps_to_fit = (w0 - effective_crop_w) // desired_step_x
+                remaining_width = (w0 - effective_crop_w) % desired_step_x
+
+                if remaining_width == 0:
+                    cols = num_steps_to_fit + 1
+                    step_x = desired_step_x
+                else:
+                    cols = num_steps_to_fit + 2  # +1 for the first crop, +1 for the last partial coverage
+                    step_x = (w0 - effective_crop_w) // (cols - 1)
+
+            # Calculate step and number of slices for Y-axis (height)
+            if h0 <= effective_crop_h:
+                rows = 1
+                step_y = 0
+            else:
+                desired_step_y = int(effective_crop_h * (1 - min_overlap_ratio))
+                if desired_step_y <= 0:
+                    desired_step_y = 1
+
+                num_steps_to_fit = (h0 - effective_crop_h) // desired_step_y
+                remaining_height = (h0 - effective_crop_h) % desired_step_y
+
+                if remaining_height == 0:
+                    rows = num_steps_to_fit + 1
+                    step_y = desired_step_y
+                else:
+                    rows = num_steps_to_fit + 2
+                    step_y = (h0 - effective_crop_h) // (rows - 1)
+
+            # Generate coordinates for all slices
+            slice_coords = []
+            for r in range(rows):
+                for c in range(cols):
+                    start_x = c * step_x
+                    start_y = r * step_y
+
+                    end_x = start_x + effective_crop_w
+                    end_y = start_y + effective_crop_h
+
+                    if end_x > w0:
+                        start_x = w0 - effective_crop_w
+                        end_x = w0
+                    if end_y > h0:
+                        start_y = h0 - effective_crop_h
+                        end_y = h0
+
+                    start_x = max(0, start_x)
+                    start_y = max(0, start_y)
+
+                    slice_coords.append((start_x, start_y, end_x, end_y))
+            return idx, slice_coords
 
         with ThreadPoolExecutor() as executor:
-            process_fn = partial(
-                process_single_image,
-                crop_size=self.crop_size,
-                overlap_ratio=self.overlap_ratio,
-                load_image_func=self.load_image,
-            )
-            results = list(executor.map(process_fn, range(self.ni)))
+            if self.cut_strategy == "grid":
+                process_fn = partial(
+                    _calculate_grid_params_for_image,
+                    crop_size=self.crop_size,
+                    min_overlap_ratio=self.overlap_ratio,
+                    load_image_func=self.load_image,
+                )
+                results = list(executor.map(process_fn, range(self.ni)))
+            else:  # random_crop
 
-        slice_indices: List[Tuple[int, int]] = []
+                def _get_total_grid_slices_count(idx, crop_size, overlap_ratio, load_image_func):
+                    _, slice_coords_list = _calculate_grid_params_for_image(
+                        idx, crop_size, overlap_ratio, load_image_func
+                    )
+                    return idx, len(slice_coords_list)
+
+                process_fn = partial(
+                    _get_total_grid_slices_count,
+                    crop_size=self.crop_size,
+                    overlap_ratio=self.overlap_ratio,
+                    load_image_func=self.load_image,
+                )
+                results = list(executor.map(process_fn, range(self.ni)))
+
+        slice_indices: List[Tuple[int, Any]] = []
         slices_per_image: List[int] = []
 
-        for idx, total_slices in results:
+        for idx, calculated_data in results:
             if self.cut_strategy == "random_crop":
-                sampled_slices = max(1, round(total_slices * self.sampling_rate))
+                total_grid_slices = calculated_data  # calculated_data is the slice count
+                sampled_slices = max(1, round(total_grid_slices * self.sampling_rate))
                 slice_indices.extend([(idx, s) for s in range(sampled_slices)])
                 slices_per_image.append(sampled_slices)
             else:  # grid
-                slice_indices.extend([(idx, s) for s in range(total_slices)])
-                slices_per_image.append(total_slices)
+                image_slice_coords = calculated_data  # calculated_data is the list of coords
+                for s_idx, coords in enumerate(image_slice_coords):
+                    slice_indices.append((idx, s_idx, coords))
+                slices_per_image.append(len(image_slice_coords))
 
         # Store statistics
         self.avg_slices = sum(slices_per_image) / len(slices_per_image)
@@ -157,7 +242,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
 
     def _get_grid_slice(self, index: int) -> Dict[str, Any]:
         """
-        Generate a single slice based on coordinates.
+        Generate a single slice based on precomputed coordinates.
 
         Args:
             index (int): Index of the slice in `self.slice_indices`.
@@ -165,22 +250,11 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         Returns:
             Dict[str, Any]: Dictionary containing sliced image and filtered labels.
         """
-        img_idx, slice_idx = self.slice_indices[index]
+        img_idx, _, slice_bbox_coords = self.slice_indices[index]
+        start_x, start_y, end_x, end_y = slice_bbox_coords
         im, (h0, w0), _ = self.load_image(img_idx)
         labels = deepcopy(self.labels[img_idx])
 
-        step_x = int(self.crop_size * (1 - self.overlap_ratio))
-        step_y = int(self.crop_size * (1 - self.overlap_ratio))
-        cols = max(1, (w0 - self.crop_size) // step_x + 1)
-
-        row = slice_idx // cols
-        col = slice_idx % cols
-
-        start_x = col * step_x
-        start_y = row * step_y
-
-        end_x = min(start_x + self.crop_size, w0)
-        end_y = min(start_y + self.crop_size, h0)
         slice_im = im[start_y:end_y, start_x:end_x]
         slice_bbox = [start_x, start_y, end_x, end_y]
 
