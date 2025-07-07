@@ -247,6 +247,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
 
             if inter_x1 >= inter_x2 or inter_y1 >= inter_y2:
                 continue  # No intersection
+            # TODO Filter small bboxes by condition
 
             new_x1 = max(x1 - x_min, 0)
             new_y1 = max(y1 - y_min, 0)
