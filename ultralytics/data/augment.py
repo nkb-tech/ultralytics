@@ -2242,7 +2242,7 @@ class Albumentations:
                 # Compose transforms
                 self.contains_spatial = False if task == "classify" else check_contains_spatial(T)
                 self.transform = (
-                    A.ReplayCompose(
+                    A.Compose(
                         T,
                         bbox_params=A.BboxParams(
                             format="yolo", filter_invalid_bboxes=True, label_fields=["class_labels"], min_visibility=0.5
@@ -2302,7 +2302,6 @@ class Albumentations:
                 bboxes = labels["instances"].bboxes
                 # TODO: add supports of segments and keypoints
                 new = self.transform(image=im, bboxes=bboxes, class_labels=cls)  # transformed
-                LOGGER.debug(new["replay"])
                 if len(new["class_labels"]) > 0 or self.crop_bg:  # skip update if no bbox in new im
                     labels["img"] = new["image"]
                     labels["cls"] = np.array(new["class_labels"])
