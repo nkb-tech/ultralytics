@@ -10,11 +10,19 @@ from PIL import Image
 from torch.utils.data import dataloader, distributed
 
 from ultralytics.data.dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset, YOLOWeightedDataset
-from ultralytics.data.loaders import (LOADERS, LoadImagesAndVideos, LoadPilAndNumpy, LoadScreenshots, LoadStreams,
-                                      LoadTensor, SourceTypes, autocast_list,)
+from ultralytics.data.loaders import (
+    LOADERS,
+    LoadImagesAndVideos,
+    LoadPilAndNumpy,
+    LoadScreenshots,
+    LoadStreams,
+    LoadTensor,
+    SourceTypes,
+    autocast_list,
+)
 from ultralytics.data.sahi_dataset import SAHIDataset
 from ultralytics.data.utils import IMG_FORMATS, PIN_MEMORY, VID_FORMATS
-from ultralytics.utils import RANK, colorstr
+from ultralytics.utils import LOGGER, RANK, colorstr
 from ultralytics.utils.checks import check_file
 
 
@@ -72,6 +80,13 @@ def seed_worker(worker_id):  # noqa
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+    worker_info = torch.utils.data.get_worker_info()
+    dataset_obj = worker_info.dataset
+
+    prefix = colorstr(f"Worker {worker_id} initialization:")
+    LOGGER.info(f"{prefix} Initialized with seed {worker_seed}. Transforms settings:\n")
+    if dataset_obj.transforms is None:
+        dataset_obj.transforms = dataset_obj.build_transforms(hyp=dataset_obj._hyp_for_transforms)
 
 
 def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, stride=32, multi_modal=False):

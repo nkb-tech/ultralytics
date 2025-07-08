@@ -2245,7 +2245,9 @@ class Albumentations:
                     A.Compose(
                         T,
                         bbox_params=A.BboxParams(
-                            format="yolo", filter_invalid_bboxes=True, label_fields=["class_labels"], min_visibility=0.5
+                            format="yolo",
+                            label_fields=["class_labels"],
+                            min_visibility=0.5,  # filter_invalid_bboxes=True
                         ),
                     )
                     if self.contains_spatial
