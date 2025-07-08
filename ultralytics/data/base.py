@@ -344,8 +344,8 @@ class BaseDataset(Dataset):
 
     def __getitem__(self, index):
         """Returns transformed label information for given index."""
-        if self.transforms is None:
-            self.transforms = self.build_transforms(hyp=self._hyp_for_transforms)
+        # if self.transforms is None:
+        #     self.transforms = self.build_transforms(hyp=self._hyp_for_transforms)
         return self.transforms(self.get_image_and_label(index))
 
     def get_image_and_label(self, index):

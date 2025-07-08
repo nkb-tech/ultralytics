@@ -2127,7 +2127,7 @@ class Albumentations:
                 from albumentations.core.composition import BaseCompose, TransformsSeqType, TransformType
                 from albumentations.core.transforms_interface import BasicTransform
 
-                check_version(A.__version__, "1.0.3", hard=True)  # version requirement
+                check_version(A.__version__, ">2.0.1", hard=True)  # version requirement
 
                 # List of possible spatial transforms
                 spatial_transforms = {
@@ -2245,9 +2245,7 @@ class Albumentations:
                     A.Compose(
                         T,
                         bbox_params=A.BboxParams(
-                            format="yolo",
-                            label_fields=["class_labels"],
-                            min_visibility=0.5,  # filter_invalid_bboxes=True
+                            format="yolo", label_fields=["class_labels"], min_visibility=0.5, filter_invalid_bboxes=True
                         ),
                     )
                     if self.contains_spatial
