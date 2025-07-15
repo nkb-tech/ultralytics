@@ -54,7 +54,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 mlruns/
-
+*.patch
 # Translations
 *.mo
 *.pot

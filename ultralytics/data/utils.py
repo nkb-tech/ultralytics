@@ -290,12 +290,20 @@ def check_det_dataset(dataset, autodownload=True):
         raise SyntaxError(emojis(f"{dataset} key missing ❌.\n either 'names' or 'nc' are required in all data YAMLs."))
     if "names" in data and "nc" in data and len(data["names"]) != data["nc"]:
         raise SyntaxError(emojis(f"{dataset} 'names' length {len(data['names'])} and 'nc: {data['nc']}' must match."))
-    if "names" not in data:
-        data["names"] = [f"class_{i}" for i in range(data["nc"])]
+    raw_names = data.get("names")
+    if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
+        # list of lists → multi-head model
+        data["names_per_task"] = [check_class_names(n) for n in raw_names]
+        data["nc_per_task"] = [len(n) for n in raw_names]
+        flat_names = [n for task in raw_names for n in task]
+        data["names"] = check_class_names(flat_names)
+        data["nc"] = len(flat_names)
     else:
-        data["nc"] = len(data["names"])
-
-    data["names"] = check_class_names(data["names"])
+        if "names" not in data:
+            data["names"] = [f"class_{i}" for i in range(data["nc"])]
+        else:
+            data["nc"] = len(data["names"])
+        data["names"] = check_class_names(data["names"])
 
     # Resolve paths
     path = Path(extract_dir or data.get("path") or Path(data.get("yaml_file", "")).parent)  # dataset root

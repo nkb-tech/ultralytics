@@ -178,8 +178,16 @@ def non_max_suppression(
     max_wh=7680,
     in_place=True,
     rotated=False,
+    num_classes_per_head=None,
 ):
     """
+    Tensor layout diagram
+    Single-head: [x1,y1,x2,y2, c0,c1,…,cn, m0,m1,…]
+    Multi-head : [x1,y1,x2,y2, conf0,cls0, conf1,cls1, ..., masks…]
+    Offsets:
+      conf_t = 4 + 2*t
+      cls_t  = 5 + 2*t
+
     Perform non-maximum suppression (NMS) on a set of boxes, with support for masks and multiple labels per box.
 
     Args:
@@ -205,6 +213,7 @@ def non_max_suppression(
         max_wh (int): The maximum box width and height in pixels.
         in_place (bool): If True, the input prediction tensor will be modified in place.
         rotated (bool): If Oriented Bounding Boxes (OBB) are being passed for NMS.
+        num_classes_per_head (List[int], optional): Number of classes for each head in a multi-head model.
 
     Returns:
         (List[torch.Tensor]): A list of length batch_size, where each element is a tensor of
@@ -221,7 +230,6 @@ def non_max_suppression(
     if classes is not None:
         classes = torch.tensor(classes, device=prediction.device)
 
-
     if prediction.shape[-1] == 6 or prediction.shape[-2] == max_det:  # end-to-end model (BNC, i.e. 1,300,6)
         output = [pred[pred[:, 4] > conf_thres] for pred in prediction]
         if classes is not None:
@@ -233,9 +241,16 @@ def non_max_suppression(
         # ]
         return output
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
+    is_multihead = num_classes_per_head is not None
     nc = nc or (prediction.shape[1] - 4)  # number of classes
-    nm = prediction.shape[1] - nc - nc2 - 4  # number of masks
-    mi = 4 + nc + nc2  # mask start index now includes nc2
+    if is_multihead:
+        total_nc = sum(num_classes_per_head)
+        nm = prediction.shape[1] - 4 - total_nc - len(num_classes_per_head)  # masks after all heads
+        mi = 4 + total_nc + len(num_classes_per_head)  # mask start index
+    else:
+        nm = prediction.shape[1] - nc - nc2 - 4  # number of masks
+        mi = 4 + nc + nc2  # mask start index now includes nc2
+    # keep boxes where any head's confidence exceeds threshold
     xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
 
     # Settings
@@ -251,7 +266,11 @@ def non_max_suppression(
             prediction = torch.cat((xywh2xyxy(prediction[..., :4]), prediction[..., 4:]), dim=-1)  # xywh to xyxy
 
     t = time.time()
-    output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
+    if is_multihead:
+        # each head contributes two columns: conf and class
+        output = [torch.zeros((0, 4 + 2 * len(num_classes_per_head) + nm), device=prediction.device)] * bs
+    else:
+        output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[:, 2:4] < min_wh) | (x[:, 2:4] > max_wh)).any(1), 4] = 0  # width-height
@@ -270,10 +289,28 @@ def non_max_suppression(
             continue
 
         if multi_label:
-            raise NotImplementedError("multi_label=True is not implemented yet.") # for dual-class models
-        
+            raise NotImplementedError("multi_label=True is not implemented yet.")  # for dual-class models
+
         # Detections matrix nx6+ (xyxy, conf, cls, cls2, mask...)
-        if nc2 > 0:
+        if is_multihead:
+            start = 4  # index of first conf column after the box coordinates
+            box = x[:, :4]
+            confs, clss = [], []
+            for nc_i in num_classes_per_head:
+                conf_idx = start  # first column for this head is its confidence
+                cls_slice = x[:, conf_idx + 1 : conf_idx + 1 + nc_i]  # class logits
+                conf_i = x[:, conf_idx : conf_idx + 1]  # confidence score
+                j_i = cls_slice.max(1, keepdim=True)[1]
+                confs.append(conf_i)
+                clss.append(j_i.float())
+                start += 1 + nc_i
+            mask = x[:, start:]
+            # final layout becomes [box, conf0,cls0, conf1,cls1, ..., mask]
+            x = torch.cat([box] + sum([[c, j] for c, j in zip(confs, clss)], []) + [mask], 1)[
+                confs[0].view(-1) > conf_thres
+            ]
+            conf, j = confs[0], clss[0]
+        elif nc2 > 0:
             box, cls, cls2, mask = x.split((4, nc, nc2, nm), 1)
             conf, j = cls.max(1, keepdim=True)
             conf2, j2 = cls2.max(1, keepdim=True)
@@ -808,7 +845,7 @@ def masks2segments(masks, strategy="largest"):
         segments (List): list of segment masks
     """
     segments = []
-    for x in (masks.int().cpu().numpy() if isinstance(masks, torch.Tensor) else masks).astype('uint8'):
+    for x in (masks.int().cpu().numpy() if isinstance(masks, torch.Tensor) else masks).astype("uint8"):
         c = cv2.findContours(x, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]
         if c:
             if strategy == "concat":  # concatenate all segments
