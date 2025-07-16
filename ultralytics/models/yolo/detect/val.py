@@ -142,6 +142,7 @@ class DetectionValidator(BaseValidator):
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
             num_classes_per_head=[t["nc"] for t in self.tasks] if self.is_multihead else None,
+            full_class_nms=getattr(self.args, "full_class_nms", False),
         )
 
     def _prepare_batch(self, si, batch):

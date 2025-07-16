@@ -44,35 +44,62 @@ def test_check_det_dataset_singlehead():
 
 
 def test_non_max_suppression_single_and_multihead():
-    pred_single = torch.tensor([
+    pred_single = torch.tensor(
         [
-            [10.0, 20.0],
-            [5.0, 10.0],
-            [5.0, 10.0],
-            [10.0, 20.0],
-            [0.9, 0.4],
-            [0.1, 0.8],
+            [
+                [10.0, 20.0],
+                [5.0, 10.0],
+                [5.0, 10.0],
+                [10.0, 20.0],
+                [0.9, 0.4],
+                [0.1, 0.8],
+            ]
         ]
-    ])
+    )
     out_single = ops.non_max_suppression(pred_single, nc=2)
     assert out_single[0].shape[1] == 6
 
-    pred_multi = torch.tensor([
+    pred_multi = torch.tensor(
         [
-            [10.0, 20.0],
-            [5.0, 10.0],
-            [5.0, 10.0],
-            [10.0, 20.0],
-            [0.9, 0.4],
-            [0.1, 0.8],
-            [0.2, 0.1],
-            [0.8, 0.3],
-            [0.3, 0.6],
-            [0.4, 0.1],
+            [
+                [10.0, 20.0],
+                [5.0, 10.0],
+                [5.0, 10.0],
+                [10.0, 20.0],
+                [0.9, 0.4],
+                [0.1, 0.8],
+                [0.2, 0.1],
+                [0.8, 0.3],
+                [0.3, 0.6],
+                [0.4, 0.1],
+            ]
         ]
-    ])
+    )
     out_multi = ops.non_max_suppression(pred_multi, num_classes_per_head=[2, 2])
     assert out_multi[0].shape[1] == 8
+
+
+def test_non_max_suppression_primary_only():
+    # three boxes: one class0 and two class1 overlapping
+    pred = torch.tensor(
+        [
+            [10.0, 20.0, 20.0],
+            [10.0, 20.0, 20.0],
+            [10.0, 10.0, 10.0],
+            [10.0, 10.0, 10.0],
+            [0.9, 0.8, 0.7],
+            [0.9, 0.1, 0.1],
+            [0.1, 0.9, 0.9],
+            [0.5, 0.5, 0.5],
+            [0.1, 0.1, 0.1],
+            [0.9, 0.9, 0.9],
+        ]
+    ).unsqueeze(0)
+    out = ops.non_max_suppression(pred, num_classes_per_head=[2, 2])
+    assert out[0].shape[0] == 3
+
+    out_full = ops.non_max_suppression(pred, num_classes_per_head=[2, 2], full_class_nms=True)
+    assert out_full[0].shape[0] == 2
 
 
 def test_process_batch_edge_cases():
@@ -90,7 +117,16 @@ def test_process_batch_edge_cases():
 
 
 def test_metrics_get_stats_multihead():
-    args = SimpleNamespace(conf=0.25, iou=0.45, single_cls=False, agnostic_nms=False, plots=False, save_json=False, save_txt=False, half=False)
+    args = SimpleNamespace(
+        conf=0.25,
+        iou=0.45,
+        single_cls=False,
+        agnostic_nms=False,
+        plots=False,
+        save_json=False,
+        save_txt=False,
+        half=False,
+    )
     validator = DetectionValidator(args=args)
     validator.device = torch.device("cpu")
     validator.is_multihead = True
@@ -110,4 +146,3 @@ def test_metrics_get_stats_multihead():
         validator.stats[t]["target_img"].append(gt_cls)
     results = validator.get_stats()
     assert all(k.startswith("task0_") or k.startswith("task1_") for k in results)
-

@@ -277,4 +277,5 @@ Explore our [Blog](https://www.ultralytics.com/blog) for use cases and success s
 
 Ultralytics validators automatically support custom models with multiple detection heads. When the dataset YAML defines
 `names` as a list of lists, metrics are computed separately for each head and reported individually. A macro-average is
-also printed for quick comparison.
+also printed for quick comparison. A new `full_class_nms` option lets you enable a second NMS pass over all classes when
+validating multi-head models.
