@@ -169,3 +169,5 @@ pnnx*
 
 # calibration image
 calibration_*.npy
+tests/*
+multihead_training_test.py

@@ -1070,8 +1070,10 @@ def plot_images(
                 boxes = ops.xywhr2xyxyxyxy(boxes) if is_obb else ops.xywh2xyxy(boxes)
                 for j, box in enumerate(boxes.astype(np.int64).tolist()):
                     c = classes[j]
-                    color = colors(c)
-                    c = names.get(c, c) if names else c
+                    if isinstance(c, (list, tuple, np.ndarray)):
+                        c = c[0]
+                    color = colors(int(c))
+                    c = names.get(int(c), c) if names else c
                     if labels or conf[j] > conf_thres:
                         label = f"{c}" if labels else f"{c} {conf[j]:.1f}"
                         annotator.box_label(box, label, color=color, rotated=is_obb)

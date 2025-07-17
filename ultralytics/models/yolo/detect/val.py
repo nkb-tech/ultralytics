@@ -138,7 +138,6 @@ class DetectionValidator(BaseValidator):
             self.args.conf,
             self.args.iou,
             labels=self.lb,
-            multi_label=True,
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
             num_classes_per_head=[t["nc"] for t in self.tasks] if self.is_multihead else None,
@@ -282,7 +281,8 @@ class DetectionValidator(BaseValidator):
 
     def print_results(self):
         """Prints training/validation set metrics per class."""
-        pf = "%22s" + "%11i" * 2 + "%11.3g" * len(self.metrics.keys)  # print format
+        metrics_keys = self.metrics[0].keys if self.is_multihead else self.metrics.keys
+        pf = "%22s" + "%11i" * 2 + "%11.3g" * len(metrics_keys)
         if self.is_multihead:
             for i, m in enumerate(self.metrics):
                 LOGGER.info(pf % (f"task{i}", self.seen, self.nt_per_class[i].sum(), *m.mean_results()))

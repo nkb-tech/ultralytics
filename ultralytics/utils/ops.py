@@ -168,11 +168,9 @@ def non_max_suppression(
     iou_thres=0.45,
     classes=None,
     agnostic=False,
-    multi_label=False,
     labels=(),
     max_det=300,
     nc=0,  # number of classes (optional)
-    nc2=0,  # number of extra classes (optional)
     max_time_img=0.05,
     max_nms=30000,
     max_wh=7680,
@@ -202,13 +200,11 @@ def non_max_suppression(
         classes (List[int]): A list of class indices to consider. If None, all classes will be considered.
         agnostic (bool): If True, the model is agnostic to the number of classes, and all
             classes will be considered as one.
-        multi_label (bool): If True, each box may have multiple labels.
         labels (List[List[Union[int, float, torch.Tensor]]]): A list of lists, where each inner
             list contains the apriori labels for a given image. The list should be in the format
             output by a dataloader, with each label being a tuple of (class_index, x1, y1, x2, y2).
         max_det (int): The maximum number of boxes to keep after NMS.
         nc (int, optional): The number of classes output by the model. Any indices after this will be considered masks.
-        nc2 (int, optional): Additional number of classes after 'nc' (e.g., for models with two classification heads).
         max_time_img (float): The maximum time (seconds) for processing one image.
         max_nms (int): The maximum number of boxes into torchvision.ops.nms().
         max_wh (int): The maximum box width and height in pixels.
@@ -250,15 +246,14 @@ def non_max_suppression(
         nm = prediction.shape[1] - 4 - total_nc - len(num_classes_per_head)  # masks after all heads
         mi = 4 + total_nc + len(num_classes_per_head)  # mask start index
     else:
-        nm = prediction.shape[1] - nc - nc2 - 4  # number of masks
-        mi = 4 + nc + nc2  # mask start index now includes nc2
+        nm = prediction.shape[1] - nc - 4  # number of masks
+        mi = 4 + nc  # mask start index
     # keep boxes where any head's confidence exceeds threshold
     xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
     time_limit = 2.0 + max_time_img * bs  # seconds to quit after
-    multi_label &= nc > 1  # multiple labels per box (adds 0.5ms/img)
 
     prediction = prediction.transpose(-1, -2)  # shape(1,84,6300) to shape(1,6300,84)
     if not rotated:
@@ -281,7 +276,7 @@ def non_max_suppression(
         # Cat apriori labels if autolabelling
         if labels and len(labels[xi]) and not rotated:
             lb = labels[xi]
-            v = torch.zeros((len(lb), nc + nc2 + nm + 4), device=x.device)
+            v = torch.zeros((len(lb), nc + nm + 4), device=x.device)
             v[:, :4] = xywh2xyxy(lb[:, 1:5])  # box
             v[range(len(lb)), lb[:, 0].long() + 4] = 1.0  # cls
             x = torch.cat((x, v), 0)
@@ -290,8 +285,6 @@ def non_max_suppression(
         if not x.shape[0]:
             continue
 
-        if multi_label:
-            raise NotImplementedError("multi_label=True is not implemented yet.")  # for dual-class models
 
         # Detections matrix nx6+ (xyxy, conf, cls, cls2, mask...)
         if is_multihead:
@@ -339,11 +332,6 @@ def non_max_suppression(
                 secondary_det = secondary_det[idx_s]
 
             x = torch.cat((primary_det, secondary_det), 0)
-        elif nc2 > 0:
-            box, cls, cls2, mask = x.split((4, nc, nc2, nm), 1)
-            conf, j = cls.max(1, keepdim=True)
-            conf2, j2 = cls2.max(1, keepdim=True)
-            x = torch.cat((box, conf, j.float(), conf2.float(), j2.float(), mask), 1)[conf.view(-1) > conf_thres]
         else:
             box, cls, mask = x.split((4, nc, nm), 1)
             conf, j = cls.max(1, keepdim=True)
