@@ -85,6 +85,8 @@ class YOLODataset(BaseDataset):
                 "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'"
             )
         with ThreadPool(NUM_THREADS) as pool:
+            # forward per-head class counts so each worker validates correctly
+            extra = repeat(self.data.get("nc_per_task")) if self.data.get("nc_per_task") else repeat(None)
             results = pool.imap(
                 func=lambda args: verify_image_label(args, min_size=self.min_size),
                 iterable=zip(
@@ -95,6 +97,7 @@ class YOLODataset(BaseDataset):
                     repeat(len(self.data["names"])),
                     repeat(nkpt),
                     repeat(ndim),
+                    extra,
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)

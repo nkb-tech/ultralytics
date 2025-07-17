@@ -528,7 +528,12 @@ class BaseTrainer:
             seconds = time.time() - self.train_time_start  # total training seconds
             LOGGER.info(f"\n{epochs} epochs completed in {seconds / 3600:.3f} hours.")
             self.final_eval()
-            self.validator.metrics.training = {"epochs": epochs, "seconds": seconds}  # add training speed
+            metrics = self.validator.metrics
+            if isinstance(metrics, list):
+                for m in metrics:
+                    m.training = {"epochs": epochs, "seconds": seconds}
+            else:
+                metrics.training = {"epochs": epochs, "seconds": seconds}
             if self.args.plots:
                 self.plot_metrics()
             self.run_callbacks("on_train_end")

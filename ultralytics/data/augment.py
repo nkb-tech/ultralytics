@@ -2928,7 +2928,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
     #         RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
     #     ]
     # )  # transforms
-    alb = Albumentations(hyp=hyp, p=1.0)
+    # alb = Albumentations(hyp=hyp, p=1.0)
     resize = LetterBox(new_shape=(imgsz, imgsz),
                        auto=False,        # строго imgsz×imgsz
                        scaleFill=False,  # паддинги вместо растяжения
@@ -2952,7 +2952,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
                    flip_idx=dataset.data.get("flip_idx", [])),
     ])
 
-    return Compose([alb, resize, rp, misc])
+    return Compose([ resize, rp, misc])
 
 
 # Classification augmentations -----------------------------------------------------------------------------------------

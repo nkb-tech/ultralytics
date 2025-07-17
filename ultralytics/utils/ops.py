@@ -300,10 +300,15 @@ def non_max_suppression(
                 clss.append(j_i.float())
                 start += 1 + nc_i
             mask = x[:, start:]
+
+            conf_mask = confs[0].view(-1) > conf_thres
+            box = box[conf_mask]
+            mask = mask[conf_mask]
+            confs = [c[conf_mask] for c in confs]
+            clss = [j_[conf_mask] for j_ in clss]
+
             # final layout becomes [box, conf0,cls0, conf1,cls1, ..., mask]
-            x = torch.cat([box] + sum([[c, j] for c, j in zip(confs, clss)], []) + [mask], 1)[
-                confs[0].view(-1) > conf_thres
-            ]
+            x = torch.cat([box] + sum([[c, j] for c, j in zip(confs, clss)], []) + [mask], 1)
             conf, j = confs[0], clss[0]
 
             # primary = rows where the first head predicts class 0

@@ -279,3 +279,14 @@ Ultralytics validators automatically support custom models with multiple detecti
 `names` as a list of lists, metrics are computed separately for each head and reported individually. A macro-average is
 also printed for quick comparison. A new `full_class_nms` option lets you enable a second NMS pass over all classes when
 validating multi-head models.
+
+### Multi-head architecture
+
+Ultralytics YOLO supports detection models with multiple classification heads.
+Specify `names` as a list of lists in your dataset YAML and omit the `nc` field.
+Each inner list defines the classes for one head. During model creation the
+`Detect` layer automatically builds one classifier per head and arranges the
+output tensor as `[bbox + conf0 + cls0 + conf1 + cls1 + ...]`. Training and
+validation follow the same format with labels containing one class index per
+head followed by normalized bounding-box coordinates.
+See `tests/test_multihead.py` for a minimal example dataset and training loop.

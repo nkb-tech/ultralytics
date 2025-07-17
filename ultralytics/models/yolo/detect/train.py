@@ -2,7 +2,8 @@
 
 import math
 import random
-from copy import copy
+from copy import copy, deepcopy
+from pathlib import Path
 
 import numpy as np
 import torch.nn as nn
@@ -10,7 +11,7 @@ import torch.nn as nn
 from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
-from ultralytics.nn.tasks import DetectionModel
+from ultralytics.nn.tasks import DetectionModel, yaml_model_load
 from ultralytics.utils import LOGGER, RANK
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
@@ -85,9 +86,16 @@ class DetectionTrainer(BaseTrainer):
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
+        if isinstance(cfg, (str, Path)):
+            cfg = yaml_model_load(cfg)
+        if self.data.get("nc_per_task") and "num_classes_per_head" not in cfg:
+            # build model heads from dataset when YAML lacks nc info
+            cfg = deepcopy(cfg)
+            cfg["num_classes_per_head"] = self.data["nc_per_task"]
+            cfg["nc"] = sum(cfg["num_classes_per_head"])
         model = DetectionModel(
             cfg,
-            nc=1 if self.args.single_cls else self.data["nc"],
+            nc=1 if self.args.single_cls else cfg.get("nc", self.data["nc"]),
             verbose=verbose and RANK == -1,
         )
         if weights:

@@ -300,6 +300,8 @@ class DetectionModel(BaseModel):
         if nc and nc != self.yaml["nc"]:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
+        self.num_classes_per_head = self.yaml.get("num_classes_per_head")
+        self.is_multihead = self.num_classes_per_head is not None
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
@@ -1042,12 +1044,14 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in (Detect, v11Detect, WorldDetect, MultiAttributeDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
-                   Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM, 
-                   Detect_DyHead_Prune, Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, 
+        elif m in (Detect, v11Detect, WorldDetect, MultiAttributeDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom,
+                   Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM,
+                   Detect_DyHead_Prune, Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH,
                    Pose, Pose_LSCD, Pose_TADDH, OBB, OBB_LSCD, OBB_TADDH, Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH,
                    Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect,v10Pose, v10Segment):
             args.append([ch[x] for x in f])
+            if m is Detect and d.get("num_classes_per_head") is not None:
+                args.append(d["num_classes_per_head"])
             if m is(Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Segment_LADH, Segment_LSCSBD):
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
                 if m in (Segment_LSCD, Segment_TADDH, Segment_LSCSBD):
@@ -1223,6 +1227,21 @@ def yaml_model_load(path):
     d = yaml_load(yaml_file)  # model dict
     d["scale"] = guess_model_scale(path)
     d["yaml_file"] = str(path)
+
+    raw_names = d.get("names")
+    if "nc" not in d:
+        # detect multi-head configs where names=[[..],[..]]
+        if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
+            d["num_classes_per_head"] = [len(n) for n in raw_names]
+            d["nc"] = sum(d["num_classes_per_head"])
+            d["names"] = [n for task in raw_names for n in task]
+        elif isinstance(raw_names, (list, dict)):
+            # standard single-head list or dict of class names
+            d["nc"] = len(raw_names) if isinstance(raw_names, list) else len(raw_names.values())
+            if isinstance(raw_names, dict):
+                d["names"] = list(raw_names.values())
+        else:
+            raise SyntaxError(emojis(f"{yaml_file} key missing ❌. either 'names' or 'nc' are required in all model YAMLs."))
     return d
 
 

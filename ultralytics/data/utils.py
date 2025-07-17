@@ -96,7 +96,12 @@ def verify_image(args, min_size=25):
 
 def verify_image_label(args, min_size=25):
     """Verify one image-label pair."""
-    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim = args
+    if len(args) == 7:
+        im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim = args
+        num_cls_per_head = None
+    else:
+        im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, num_cls_per_head = args
+    is_multihead = num_cls_per_head is not None  # dataset uses multiple heads
     # Number (missing, found, empty, corrupt), message, segments, keypoints
     nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
     try:
@@ -130,17 +135,27 @@ def verify_image_label(args, min_size=25):
                     assert lb.shape[1] == (5 + nkpt * ndim), f"labels require {(5 + nkpt * ndim)} columns each"
                     points = lb[:, 5:].reshape(-1, ndim)[:, :2]
                 else:
-                    assert lb.shape[1] == 5, f"labels require 5 columns, {lb.shape[1]} columns detected"
-                    points = lb[:, 1:]
+                    # multi-head labels have one class column per head
+                    expected = 4 + (len(num_cls_per_head) if is_multihead else 1)
+                    assert lb.shape[1] == expected, f"labels require {expected} columns, {lb.shape[1]} columns detected"
+                    points = lb[:, len(num_cls_per_head) if is_multihead else 1:]
                 assert points.max() <= 1, f"non-normalized or out of bounds coordinates {points[points > 1]}"
                 assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
 
                 # All labels
-                max_cls = lb[:, 0].max()  # max label count
-                assert max_cls <= num_cls, (
-                    f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
-                    f"Possible class labels are 0-{num_cls - 1}"
-                )
+                if is_multihead:
+                    for i, n in enumerate(num_cls_per_head):
+                        max_cls = lb[:, i].max()
+                        assert max_cls <= n - 1, (
+                            f"Label class {int(max_cls)} exceeds dataset class count {n} for head{i}. "
+                            f"Possible class labels are 0-{n - 1}"
+                        )
+                else:
+                    max_cls = lb[:, 0].max()  # max label count
+                    assert max_cls <= num_cls, (
+                        f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
+                        f"Possible class labels are 0-{num_cls - 1}"
+                    )
                 _, i = np.unique(lb, axis=0, return_index=True)
                 if len(i) < nl:  # duplicate row check
                     lb = lb[i]  # remove duplicates
@@ -158,7 +173,11 @@ def verify_image_label(args, min_size=25):
             if ndim == 2:
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
-        lb = lb[:, :5]
+        if is_multihead:
+            # drop extra class columns when returning YOLO-format labels
+            lb = np.concatenate([lb[:, :1], lb[:, len(num_cls_per_head) : len(num_cls_per_head) + 4]], 1)
+        else:
+            lb = lb[:, :5]
         return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
     except Exception as e:
         nc = 1

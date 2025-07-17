@@ -48,20 +48,35 @@ class Detect(nn.Module):
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, ch=()):
+    def __init__(self, nc=80, ch=(), num_classes_per_head=None):
         """Initializes the YOLOv8 detection layer with specified number of classes and channels."""
         super().__init__()
-        self.nc = nc  # number of classes
+        self.num_classes_per_head = num_classes_per_head
+        self.is_multihead = num_classes_per_head is not None
+        # total class count across all heads
+        self.nc = sum(num_classes_per_head) if self.is_multihead else nc
         self.nl = len(ch)  # number of detection layers
         self.reg_max = 16 # 20 DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
-        self.no = nc + self.reg_max * 4  # number of outputs per anchor
+        # bbox distribution + per-head (conf, cls) outputs
+        self.no = self.reg_max * 4 + (self.nc + len(num_classes_per_head) if self.is_multihead else self.nc)
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1))
             for x in ch
         )
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+        if self.is_multihead:
+            self.cv3 = nn.ModuleList(
+                nn.ModuleList(
+                    nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, 1 + nc_i, 1))
+                    for nc_i in num_classes_per_head
+                )
+                for x in ch
+            )
+        else:
+            self.cv3 = nn.ModuleList(
+                nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch
+            )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
         if self.end2end:
@@ -70,7 +85,13 @@ class Detect(nn.Module):
 
     def pre_forward(self, x):
         for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+            y = [self.cv2[i](x[i])]
+            if self.is_multihead:
+                # run each classification head separately
+                y += [head(x[i]) for head in self.cv3[i]]
+            else:
+                y.append(self.cv3[i](x[i]))
+            x[i] = torch.cat(y, 1)
 
         return x  # BCHW
 
@@ -97,12 +118,21 @@ class Detect(nn.Module):
                            If in training mode, returns a dictionary containing the outputs of one2many and one2one detections separately.
         """
         x_detach = [xi.detach() for xi in x]
-        one2one = [
-            torch.cat((self.one2one_cv2[i](x_detach[i]), self.one2one_cv3[i](x_detach[i])), 1)
-            for i in range(self.nl)
-        ]
+        one2one = []
         for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+            y = [self.one2one_cv2[i](x_detach[i])]
+            if self.is_multihead:
+                y += [head(x_detach[i]) for head in self.one2one_cv3[i]]
+            else:
+                y.append(self.one2one_cv3[i](x_detach[i]))
+            one2one.append(torch.cat(y, 1))
+        for i in range(self.nl):
+            y = [self.cv2[i](x[i])]
+            if self.is_multihead:
+                y += [head(x[i]) for head in self.cv3[i]]
+            else:
+                y.append(self.cv3[i](x[i]))
+            x[i] = torch.cat(y, 1)
         if self.training:  # Training path
             return {"one2many": x, "one2one": one2one}
 
@@ -120,11 +150,8 @@ class Detect(nn.Module):
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
 
-        if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
-            box = x_cat[:, : self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4 :]
-        else:
-            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
+        box = x_cat[:, : self.reg_max * 4]
+        cls = x_cat[:, self.reg_max * 4 :]
 
         if self.export and self.format in {"tflite", "edgetpu"}:
             # Precompute normalization factor to increase numerical stability
@@ -146,11 +173,20 @@ class Detect(nn.Module):
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
         for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+            if self.is_multihead:
+                # init each head assuming 0.01 object prior per class
+                for head in b:
+                    head[-1].bias.data[:] = math.log(5 / head[-1].bias.shape[0] / (640 / s) ** 2)
+            else:
+                b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)
         if self.end2end:
             for a, b, s in zip(m.one2one_cv2, m.one2one_cv3, m.stride):  # from
                 a[-1].bias.data[:] = 1.0  # box
-                b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+                if self.is_multihead:
+                    for head in b:
+                        head[-1].bias.data[:] = math.log(5 / head[-1].bias.shape[0] / (640 / s) ** 2)
+                else:
+                    b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
 
     def decode_bboxes(self, bboxes, anchors):
         """Decode bounding boxes."""
