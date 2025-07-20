@@ -253,10 +253,10 @@ class v8DetectionLoss:
         self.is_multihead = self.num_classes_per_head is not None
         if self.is_multihead:
             self.bce = nn.ModuleList(nn.BCEWithLogitsLoss(reduction="none") for _ in self.num_classes_per_head)
-            self.bce_all = nn.BCEWithLogitsLoss(reduction="none")
             self.class_offsets = [0]
             for nc_i in self.num_classes_per_head:
                 self.class_offsets.append(self.class_offsets[-1] + nc_i)
+            self.bce_obj = nn.BCEWithLogitsLoss(reduction="none")
         else:
             self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
@@ -312,12 +312,14 @@ class v8DetectionLoss:
 
         if self.is_multihead:
             start = 0
-            cls_parts = []
+            cls_parts, conf_parts = [], []
             for nc_i in self.num_classes_per_head:
-                start += 1  # skip conf
+                conf_parts.append(pred_cls_all[:, :, start : start + 1])
+                start += 1
                 cls_parts.append(pred_cls_all[:, :, start : start + nc_i])
                 start += nc_i
             pred_scores = torch.cat(cls_parts, 2)
+            pred_confs = conf_parts
         else:
             pred_scores = pred_cls_all
 
@@ -349,19 +351,25 @@ class v8DetectionLoss:
 
         target_scores_sum = max(target_scores.sum(), 1)
 
-        # cls loss
+        # cls and conf loss
         if isinstance(self.bce, (nn.BCEWithLogitsLoss, FocalLoss, nn.ModuleList)):
             if self.is_multihead:
                 start = 0
-                cls_losses = []
+                cls_losses, conf_losses = [], []
+                conf_tgt = fg_mask.float().unsqueeze(-1)
                 for i, nc_i in enumerate(self.num_classes_per_head):
+                    conf_pred = pred_confs[i]
+                    conf_pred.register_hook(lambda grad, i=i: print(f"Head {i} confidence gradients: {grad.abs().mean().item()}"))
+                    conf_loss = self.bce_obj(conf_pred, conf_tgt).sum()
                     cls_pred = pred_scores[:, :, start:start + nc_i]
                     cls_tgt = target_scores[:, :, start:start + nc_i]
                     cls_loss = self.bce[i](cls_pred, cls_tgt.to(dtype)).sum()
-                    cls_losses.append(cls_loss)
                     LOGGER.debug(f"head{i}_cls_loss: {cls_loss.item()}")
+                    print(f"Head {i} - Conf Loss: {conf_loss.item():.4f}, Class Loss: {cls_loss.item():.4f}")
+                    cls_losses.append(cls_loss)
+                    conf_losses.append(conf_loss)
                     start += nc_i
-                loss[1] = sum(cls_losses) / target_scores_sum
+                loss[1] = (sum(cls_losses) / target_scores_sum) + (sum(conf_losses) / conf_tgt.numel())
             else:
                 loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
         elif isinstance(self.bce, (VarifocalLoss, QualityfocalLoss)):
@@ -385,16 +393,22 @@ class v8DetectionLoss:
 
             if self.is_multihead:
                 start = 0
-                cls_losses = []
+                cls_losses, conf_losses = [], []
+                conf_tgt = fg_mask.float().unsqueeze(-1)
                 for i, nc_i in enumerate(self.num_classes_per_head):
+                    conf_pred = pred_confs[i]
+                    conf_pred.register_hook(lambda grad, i=i: print(f"Head {i} confidence gradients: {grad.abs().mean().item()}"))
+                    conf_loss = self.bce_obj(conf_pred, conf_tgt).sum()
                     cls_pred = pred_scores[:, :, start:start + nc_i]
                     cls_tgt = cls_iou_targets[:, :, start:start + nc_i]
                     mask = targets_onehot[:, :, start:start + nc_i]
                     cls_loss = self.bce[i](pred=cls_pred, label=cls_tgt.to(dtype), gt_target_pos_mask=mask.to(torch.bool)).sum()
-                    cls_losses.append(cls_loss)
                     LOGGER.debug(f"head{i}_cls_loss: {cls_loss.item()}")
+                    print(f"Head {i} - Conf Loss: {conf_loss.item():.4f}, Class Loss: {cls_loss.item():.4f}")
+                    cls_losses.append(cls_loss)
+                    conf_losses.append(conf_loss)
                     start += nc_i
-                loss[1] = sum(cls_losses) / max(fg_mask.sum(), 1)
+                loss[1] = (sum(cls_losses) / max(fg_mask.sum(), 1)) + (sum(conf_losses) / conf_tgt.numel())
             else:
                 loss[1] = self.bce(
                     pred=pred_scores,

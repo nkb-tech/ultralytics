@@ -8,6 +8,8 @@ from ultralytics import YOLO
 from ultralytics.data.utils import check_det_dataset
 from ultralytics.models.yolo.detect.val import DetectionValidator
 from ultralytics.utils import ops, loss
+from ultralytics.data.dataset import YOLODataset
+from ultralytics.engine.results import Boxes
 from ultralytics.utils.metrics import DetMetrics, ConfusionMatrix
 from tests import TMP
 from ultralytics.nn.tasks import yaml_model_load
@@ -241,6 +243,18 @@ def test_v8_detection_loss_singlehead():
     assert total >= 0
 
 
+def test_confidence_gradients_flow():
+    model = DummyModel(num_classes_per_head=[2, 1])
+    crit = loss.v8DetectionLoss(model)
+    x = [torch.randn(1, 8, 4, 4, requires_grad=True) for _ in range(3)]
+    preds = model.model[-1](x)
+    batch = {"batch_idx": torch.tensor([0]), "cls": torch.tensor([0]), "bboxes": torch.tensor([[0.5, 0.5, 0.2, 0.2]])}
+    total, _ = crit(preds, batch)
+    total.backward()
+    grad = model.model[-1].cv3[0][0][-1].bias.grad
+    assert grad.abs().sum() > 0
+
+
 def create_sample_dataset(num_images=5, image_size=(64, 64), multihead=True):
     root = TMP / ("multihead_data" if multihead else "singlehead_data")
     shutil.rmtree(root, ignore_errors=True)
@@ -287,6 +301,24 @@ def create_sample_dataset(num_images=5, image_size=(64, 64), multihead=True):
         open(yaml_path, "w", encoding="utf-8"),
     )
     return root, yaml_path, names
+
+
+def test_multihead_label_shape():
+    root, yaml_file, names = create_sample_dataset(num_images=1)
+    data = check_det_dataset(yaml_file, autodownload=False)
+    dataset = YOLODataset(img_path=str(root / "images/train"), imgsz=64, batch_size=1, data=data)
+    assert dataset.labels[0]["cls"].shape[1] == len(names)
+
+
+def test_results_access_multihead():
+    b = Boxes(torch.tensor([[0, 0, 10, 10, 0.9, 0, 0.8, 1]]), orig_shape=(64, 64))
+    assert b.get_head_predictions(1)[0] == b.conf2
+    assert b.get_head_predictions(1)[1] == b.cls2
+
+
+def test_results_access_singlehead():
+    b = Boxes(torch.tensor([[0, 0, 10, 10, 0.5, 1]]), orig_shape=(64, 64))
+    assert b.conf is not None and b.cls is not None
 
 
 import pytest
