@@ -18,8 +18,7 @@ Multi-head validation design
 ----------------------------
 Model output (before NMS)
   Single-head: (B, 4 + nc + nm, A)   – 4 box, nc conf/logits, nm masks
-  Multi-head : (B, 4 + Σ(1+nc_i)+nm, A)  – 4 box, then for each head:
-                                             1 conf + nc_i logits, finally nm masks
+  Multi-head : (B, 4 + Σ(nc_i)+nm, A)  – 4 box, then for each head: nc_i logits, finally nm masks
 NMS output
   Single-head: List[tensor] of shape (K, 6+nm)   – (x1,y1,x2,y2,conf,cls,masks…)
   Multi-head : List[tensor] of shape (K, 4+2H+nm) – (x1,y1,x2,y2,
@@ -112,7 +111,6 @@ class DetectionValidator(BaseValidator):
             self.tasks = [{"nc": self.nc, "names": self.names}]
 
         if self.is_multihead:
-            LOGGER.info("Multi-head model detected")
             self.metrics = [
                 DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot, names=t["names"]) for t in self.tasks
             ]
@@ -140,7 +138,7 @@ class DetectionValidator(BaseValidator):
             labels=self.lb,
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
-            num_classes_per_head=[t["nc"] for t in self.tasks] if self.is_multihead else None,
+            nc=[t["nc"] for t in self.tasks] if self.is_multihead else None,
             full_class_nms=getattr(self.args, "full_class_nms", False),
         )
 
@@ -199,10 +197,21 @@ class DetectionValidator(BaseValidator):
                 stat["target_img"] = cls.unique()
             if npr == 0:
                 if nl:
-                    for k in self.stats.keys():
-                        self.stats[k].append(stat[k])
-                    if self.args.plots:
-                        self.confusion_matrix.process_batch(detections=None, gt_bboxes=bbox, gt_cls=cls)
+                    if self.is_multihead:
+                        for t, st in enumerate(stat):
+                            for k in self.stats[t].keys():
+                                self.stats[t][k].append(st[k])
+                            if self.args.plots:
+                                self.confusion_matrix[t].process_batch(
+                                    detections=None,
+                                    gt_bboxes=bbox,
+                                    gt_cls=cls[:, t] if cls.ndim > 1 else cls,
+                                )
+                    else:
+                        for k in self.stats.keys():
+                            self.stats[k].append(stat[k])
+                        if self.args.plots:
+                            self.confusion_matrix.process_batch(detections=None, gt_bboxes=bbox, gt_cls=cls)
                 continue
 
             # Predictions
@@ -361,9 +370,12 @@ class DetectionValidator(BaseValidator):
 
     def plot_predictions(self, batch, preds, ni):
         """Plots predicted bounding boxes on input images and saves the result."""
+        det = preds
+        if self.is_multihead:
+            det = [p[:, :6] for p in preds]
         plot_images(
             batch["img"],
-            *output_to_target(preds, max_det=self.args.max_det),
+            *output_to_target(det, max_det=self.args.max_det),
             paths=batch["im_file"],
             fname=self.save_dir / f"val_batch{ni}_pred.jpg",
             names=self.names,
@@ -378,7 +390,7 @@ class DetectionValidator(BaseValidator):
             np.zeros((shape[0], shape[1]), dtype=np.uint8),
             path=None,
             names=self.names,
-            boxes=predn[:, :6],
+            boxes=predn if self.is_multihead else predn[:, :6],
         ).save_txt(file, save_conf=save_conf)
 
     def pred_to_json(self, predn, filename):
@@ -388,13 +400,20 @@ class DetectionValidator(BaseValidator):
         box = ops.xyxy2xywh(predn[:, :4])  # xywh
         box[:, :2] -= box[:, 2:] / 2  # xy center to top-left corner
         for p, b in zip(predn.tolist(), box.tolist()):
+            if self.is_multihead:
+                base = 4  # first head
+                conf_i = p[base]
+                cls_i = p[base + 1]
+            else:
+                conf_i = p[4]
+                cls_i = p[5]
             self.jdict.append(
                 {
                     "image_id": image_id,
-                    "category_id": self.class_map[int(p[5])]
+                    "category_id": self.class_map[int(cls_i)]
                     + (1 if self.is_lvis else 0),  # index starts from 1 if it's lvis
                     "bbox": [round(x, 3) for x in b],
-                    "score": round(p[4], 5),
+                    "score": round(conf_i, 5),
                 }
             )
 

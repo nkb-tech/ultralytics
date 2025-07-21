@@ -48,19 +48,24 @@ class Detect(nn.Module):
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, ch=(), num_classes_per_head=None):
+    def __init__(self, nc=80, ch=()):
         """Initializes the YOLOv8 detection layer with specified number of classes and channels."""
         super().__init__()
-        self.num_classes_per_head = num_classes_per_head
-        self.is_multihead = num_classes_per_head is not None
+        self.is_multihead = False
+        if isinstance(nc, list):
+            self.is_multihead = True
         # total class count across all heads
-        self.nc = sum(num_classes_per_head) if self.is_multihead else nc
+        self.nc = nc
         self.nl = len(ch)  # number of detection layers
         self.reg_max = 16 # 20 DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
         # bbox distribution + per-head (conf, cls) outputs
-        self.no = self.reg_max * 4 + (self.nc + len(num_classes_per_head) if self.is_multihead else self.nc)
+        self.no = self.reg_max * 4 + (sum(self.nc) if self.is_multihead else self.nc)
         self.stride = torch.zeros(self.nl)  # strides computed during build
-        c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
+        if self.is_multihead:
+            c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), [max(ch[0], min(nc_i , 100)) for nc_i in self.nc] # channels
+        else: 
+            c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
+
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1))
             for x in ch
@@ -68,8 +73,8 @@ class Detect(nn.Module):
         if self.is_multihead:
             self.cv3 = nn.ModuleList(
                 nn.ModuleList(
-                    nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, 1 + nc_i, 1))
-                    for nc_i in num_classes_per_head
+                    nn.Sequential(Conv(x, c3[i], 3), Conv(c3[i], c3[i], 3), nn.Conv2d(c3[i], self.nc[i], 1))
+                    for i in range(len(self.nc))
                 )
                 for x in ch
             )

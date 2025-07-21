@@ -124,11 +124,12 @@ def verify_image_label(args, min_size=25):
             nf = 1  # label found
             with open(lb_file) as f:
                 lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
-                if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
-                    classes = np.array([x[0] for x in lb], dtype=np.float32)
-                    segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
-                    lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
-                lb = np.array(lb, dtype=np.float32)
+            if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
+                classes = np.array([x[0] for x in lb], dtype=np.float32)
+                segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
+                lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
+            lb = np.array(lb, dtype=np.float32)
+            original_shape = lb.shape
             nl = len(lb)
             if nl:
                 if keypoint:
@@ -174,8 +175,9 @@ def verify_image_label(args, min_size=25):
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
         if is_multihead:
-            # drop extra class columns when returning YOLO-format labels
-            lb = np.concatenate([lb[:, :1], lb[:, len(num_cls_per_head) : len(num_cls_per_head) + 4]], 1)
+            processed_shape = lb.shape
+            # keep all class columns for multi-head
+            lb = lb[:, : len(num_cls_per_head) + 4]
         else:
             lb = lb[:, :5]
         return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg

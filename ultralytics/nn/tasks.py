@@ -300,10 +300,11 @@ class DetectionModel(BaseModel):
         if nc and nc != self.yaml["nc"]:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
-        self.num_classes_per_head = self.yaml.get("num_classes_per_head")
-        self.is_multihead = self.num_classes_per_head is not None
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
-        self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
+        if isinstance(self.yaml["nc"], list):
+            self.names = {i+j*self.yaml["nc"][j]: f"task_{j}_cls{i}" for j in range(len(self.yaml["nc"])) for i in range(self.yaml["nc"][j]) }  # default names dict
+        else:
+            self.names = {i: f"{i}" for i in range(self.yaml["nc"])}  # default names dict
         self.inplace = self.yaml.get("inplace", True)
         self.end2end = getattr(self.model[-1], "end2end", False)
 
@@ -959,7 +960,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         except:
             pass
         
-        nc2 = d.get("nc2", None)
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):

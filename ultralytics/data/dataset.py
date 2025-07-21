@@ -116,12 +116,21 @@ class YOLODataset(BaseDataset):
                         valid_mask = (boxes_pix[:,2] >= self.min_size) & (boxes_pix[:,3] >= self.min_size)
                         lb = lb[valid_mask]
                     
+                    num_heads = len(self.data.get("nc_per_task", []))
+                    cls_cols = lb[:, :num_heads] if num_heads else lb[:, 0:1]
+                    bboxes = lb[:, num_heads : num_heads + 4]
+                    if not x["labels"] and num_heads:
+                        print(
+                            f"Dataset contains {num_heads} heads with {self.data.get('nc_per_task')} classes each"
+                        )
+                        print(f"Sample label tensor shape: {lb.shape}")
+                        print(f"Expected shape: (N, {sum(self.data.get('nc_per_task', [])) + 4})")
                     x["labels"].append(
                         {
                             "im_file": im_file,
                             "shape": shape,
-                            "cls": lb[:, 0:1],  # n, 1
-                            "bboxes": lb[:, 1:],  # n, 4
+                            "cls": cls_cols,
+                            "bboxes": bboxes,
                             "segments": segments,
                             "keypoints": keypoint,
                             "normalized": True,

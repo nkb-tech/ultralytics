@@ -176,7 +176,6 @@ def non_max_suppression(
     max_wh=7680,
     in_place=True,
     rotated=False,
-    num_classes_per_head=None,
     full_class_nms=False,
 ):
     """
@@ -239,12 +238,12 @@ def non_max_suppression(
         # ]
         return output
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
-    is_multihead = num_classes_per_head is not None
-    nc = nc or (prediction.shape[1] - 4)  # number of classes
+    is_multihead = isinstance(nc, list)
+    nc = nc
     if is_multihead:
-        total_nc = sum(num_classes_per_head)
-        nm = prediction.shape[1] - 4 - total_nc - len(num_classes_per_head)  # masks after all heads
-        mi = 4 + total_nc + len(num_classes_per_head)  # mask start index
+        total_nc = sum(nc)
+        nm = prediction.shape[1] - 4 - total_nc
+        mi = 4 + total_nc
     else:
         nm = prediction.shape[1] - nc - 4  # number of masks
         mi = 4 + nc  # mask start index
@@ -265,7 +264,7 @@ def non_max_suppression(
     t = time.time()
     if is_multihead:
         # each head contributes two columns: conf and class
-        output = [torch.zeros((0, 4 + 2 * len(num_classes_per_head) + nm), device=prediction.device)] * bs
+        output = [torch.zeros((0, 4 + 2 * len(nc) + nm), device=prediction.device)] * bs
     else:
         output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
@@ -291,14 +290,12 @@ def non_max_suppression(
             start = 4  # index of first conf column after the box coordinates
             box = x[:, :4]
             confs, clss = [], []
-            for nc_i in num_classes_per_head:
-                conf_idx = start  # first column for this head is its confidence
-                cls_slice = x[:, conf_idx + 1 : conf_idx + 1 + nc_i]  # class logits
-                conf_i = x[:, conf_idx : conf_idx + 1]  # confidence score
-                j_i = cls_slice.max(1, keepdim=True)[1]
+            for nc_i in nc:
+                cls_slice = x[:, start: start + nc_i]  # class logits
+                conf_i, j_i = cls_slice.max(1, keepdim=True)
                 confs.append(conf_i)
                 clss.append(j_i.float())
-                start += 1 + nc_i
+                start += nc_i
             mask = x[:, start:]
 
             conf_mask = confs[0].view(-1) > conf_thres

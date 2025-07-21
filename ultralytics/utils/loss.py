@@ -249,26 +249,27 @@ class v8DetectionLoss:
         h = model.args  # hyperparameters
 
         m = model.model[-1]  # Detect() module
-        self.num_classes_per_head = getattr(m, "num_classes_per_head", None)
-        self.is_multihead = self.num_classes_per_head is not None
+        self.is_multihead = getattr(m, "is_multihead", False)
+        self.nc = m.nc
         if self.is_multihead:
-            self.bce = nn.ModuleList(nn.BCEWithLogitsLoss(reduction="none") for _ in self.num_classes_per_head)
-            self.bce_all = nn.BCEWithLogitsLoss(reduction="none")
-            self.class_offsets = [0]
-            for nc_i in self.num_classes_per_head:
-                self.class_offsets.append(self.class_offsets[-1] + nc_i)
+            self.bce = nn.ModuleList(nn.BCEWithLogitsLoss(reduction="none") for _ in self.nc)
         else:
             self.bce = nn.BCEWithLogitsLoss(reduction="none")
         self.hyp = h
         self.stride = m.stride  # model strides
-        self.nc = m.nc  # number of classes
         self.no = m.nc + m.reg_max * 4 if not self.is_multihead else m.no
         self.reg_max = m.reg_max
         self.device = device
 
         self.use_dfl = m.reg_max > 1
+        #только первая голова
+        self.assigner = TaskAlignedAssigner(
+            topk=tal_topk,
+            num_classes=self.nc[0] if self.is_multihead else self.nc,
+            alpha=0.5,
+            beta=6.0,
+        )
         
-        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
@@ -287,7 +288,7 @@ class v8DetectionLoss:
                 n = matches.sum()
                 if n:
                     out[j, :n] = targets[matches, 1:]
-            out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
+            out[..., -4:] = xywh2xyxy(out[..., -4:].mul_(scale_tensor))
         return out
 
     def bbox_decode(self, anchor_points, pred_dist):
@@ -295,8 +296,6 @@ class v8DetectionLoss:
         if self.use_dfl:
             b, a, c = pred_dist.shape  # batch, anchors, channels
             pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
-            # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
-            # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
     def __call__(self, preds, batch):
@@ -313,8 +312,7 @@ class v8DetectionLoss:
         if self.is_multihead:
             start = 0
             cls_parts = []
-            for nc_i in self.num_classes_per_head:
-                start += 1  # skip conf
+            for nc_i in self.nc:
                 cls_parts.append(pred_cls_all[:, :, start : start + nc_i])
                 start += nc_i
             pred_scores = torch.cat(cls_parts, 2)
@@ -327,82 +325,94 @@ class v8DetectionLoss:
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
-        targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+        cls_targets = batch["cls"]
+        if cls_targets.ndim == 1:
+            cls_targets = cls_targets[:, None]
+        targets = torch.cat((batch["batch_idx"].view(-1, 1), cls_targets, batch["bboxes"]), 1)
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
-        gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
-        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
 
-        # Pboxes
-        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
-        # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
-        # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
-
-        target_labels, target_bboxes, target_scores, fg_mask, _ = self.assigner(
-            # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
-            pred_scores.detach().sigmoid(),
-            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
-            anchor_points * stride_tensor,
-            gt_labels,
-            gt_bboxes,
-            mask_gt,
-        )
-
-        target_scores_sum = max(target_scores.sum(), 1)
-
-        # cls loss
-        if isinstance(self.bce, (nn.BCEWithLogitsLoss, FocalLoss, nn.ModuleList)):
-            if self.is_multihead:
-                start = 0
-                cls_losses = []
-                for i, nc_i in enumerate(self.num_classes_per_head):
-                    cls_pred = pred_scores[:, :, start:start + nc_i]
-                    cls_tgt = target_scores[:, :, start:start + nc_i]
-                    cls_loss = self.bce[i](cls_pred, cls_tgt.to(dtype)).sum()
-                    cls_losses.append(cls_loss)
-                    LOGGER.debug(f"head{i}_cls_loss: {cls_loss.item()}")
-                    start += nc_i
-                loss[1] = sum(cls_losses) / target_scores_sum
-            else:
-                loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
-        elif isinstance(self.bce, (VarifocalLoss, QualityfocalLoss)):
-            targets_onehot = torch.zeros(
-                (target_labels.shape[0], target_labels.shape[1], self.nc),
-                dtype=torch.int64,
-                device=target_labels.device,
-            )  # (b, h*w, nc)
-            cls_iou_targets = None
-            if fg_mask.sum():
-                pos_ious = bbox_iou(pred_bboxes, target_bboxes / stride_tensor, xywh=False).clamp(min=1e-6).detach()
-                # 10.0x Faster than torch.one_hot
-                targets_onehot.scatter_(2, target_labels.unsqueeze(-1), 1)
-                cls_iou_targets = pos_ious * targets_onehot
-                fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.nc)  # (b, h*w, 80)
-                cls_iou_targets = torch.where(fg_scores_mask > 0, cls_iou_targets, 0)
-                if isinstance(self.bce, QualityfocalLoss):
-                    targets_onehot = torch.where(fg_scores_mask > 0, targets_onehot, 0)
-            elif isinstance(self.bce, QualityfocalLoss):
-                cls_iou_targets = targets_onehot.clone()
-
-            if self.is_multihead:
-                start = 0
-                cls_losses = []
-                for i, nc_i in enumerate(self.num_classes_per_head):
-                    cls_pred = pred_scores[:, :, start:start + nc_i]
-                    cls_tgt = cls_iou_targets[:, :, start:start + nc_i]
-                    mask = targets_onehot[:, :, start:start + nc_i]
-                    cls_loss = self.bce[i](pred=cls_pred, label=cls_tgt.to(dtype), gt_target_pos_mask=mask.to(torch.bool)).sum()
-                    cls_losses.append(cls_loss)
-                    LOGGER.debug(f"head{i}_cls_loss: {cls_loss.item()}")
-                    start += nc_i
-                loss[1] = sum(cls_losses) / max(fg_mask.sum(), 1)
-            else:
-                loss[1] = self.bce(
-                    pred=pred_scores,
-                    label=cls_iou_targets.to(dtype),
-                    gt_target_pos_mask=targets_onehot.to(torch.bool),
-                ).sum() / max(fg_mask.sum(), 1)
+        if self.is_multihead:
+            split_idx = (cls_targets.shape[1] if self.is_multihead else 1, 4)
+            gt_labels, gt_bboxes = targets.split(split_idx, 2)  # cls, xyxy
+            mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+            
+            pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+            #для первой головы tal
+            first_head_pred_scores = pred_cls_all[:, :, :self.nc[0]]
+            first_head_gt_labels = gt_labels[..., :1]
+            
+            target_labels, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+                first_head_pred_scores.detach().sigmoid(),
+                (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+                anchor_points * stride_tensor,
+                first_head_gt_labels,
+                gt_bboxes,
+                mask_gt,
+            )
+            
+            target_scores_sum = max(target_scores.sum(), 1)
+            
+            total_cls_loss = 0
+            start_cls = 0
+            
+            for head_idx, nc_i in enumerate(self.nc):
+                head_pred_scores = pred_cls_all[:, :, start_cls:start_cls + nc_i]
+                
+                if head_idx == 0:
+                    head_target_scores = target_scores
+                else:
+                    
+                    head_gt_labels = gt_labels[..., head_idx:head_idx+1]  
+                    head_target_scores = torch.zeros_like(head_pred_scores)
+                    if fg_mask.sum() > 0:
+                        pos_indices = torch.nonzero(fg_mask, as_tuple=False)  
+                        for pos_idx in pos_indices:
+                            batch_idx, anchor_idx = pos_idx[0], pos_idx[1]
+                            gt_idx = target_labels[batch_idx, anchor_idx].long()
+                            
+                            if 0 <= gt_idx < head_gt_labels.shape[1]:
+                                class_label = head_gt_labels[batch_idx, gt_idx, 0].long()
+                                
+                                if 0 <= class_label < nc_i:
+                                    head_target_scores[batch_idx, anchor_idx, class_label] = 1.0
+                
+                
+                if isinstance(self.bce, nn.ModuleList):
+                    head_cls_loss = self.bce[head_idx](head_pred_scores, head_target_scores.to(dtype)).sum()
+                else:
+                    head_cls_loss = self.bce(head_pred_scores, head_target_scores.to(dtype)).sum()
+                
+                if head_idx == 0:
+                    head_cls_loss = head_cls_loss / target_scores_sum
+                else:
+                    head_cls_loss = head_cls_loss / max(fg_mask.sum(), 1)
+                
+                total_cls_loss += head_cls_loss
+                start_cls += nc_i
+            
+            loss[1] = total_cls_loss
+            
         else:
-            raise NotImplementedError()
+            split_idx = (1, 4)
+            gt_labels, gt_bboxes = targets.split(split_idx, 2)  # cls, xyxy
+            mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+
+            # Pboxes
+            pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+
+            target_labels, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+                pred_scores.detach().sigmoid(),
+                (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+                anchor_points * stride_tensor,
+                gt_labels,
+                gt_bboxes,
+                mask_gt,
+            )
+
+            target_scores_sum = max(target_scores.sum(), 1)
+
+            # cls loss
+            loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
 
         # Bbox loss
         if fg_mask.sum():

@@ -91,8 +91,7 @@ class DetectionTrainer(BaseTrainer):
         if self.data.get("nc_per_task") and "num_classes_per_head" not in cfg:
             # build model heads from dataset when YAML lacks nc info
             cfg = deepcopy(cfg)
-            cfg["num_classes_per_head"] = self.data["nc_per_task"]
-            cfg["nc"] = sum(cfg["num_classes_per_head"])
+            cfg["nc"] = self.data["nc_per_task"]
         model = DetectionModel(
             cfg,
             nc=1 if self.args.single_cls else cfg.get("nc", self.data["nc"]),

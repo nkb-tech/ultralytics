@@ -1003,21 +1003,37 @@ class Boxes(BaseTensor):
         if boxes.ndim == 1:
             boxes = boxes[None, :]
         n = boxes.shape[-1]
-        
-      # Standard detection format
-        if n in {6, 7}:
-            super().__init__(boxes, orig_shape)
-            self.is_track = n == 7
-            self.orig_shape = orig_shape
 
-        # Dual-class detection format
-        elif n in {8, 9}:
-            super().__init__(boxes, orig_shape)
-            self.is_track = n == 9
-            self.orig_shape = orig_shape
-
+        if (n - 4) % 2 == 0:
+            self.is_track = False
+            self.num_heads = (n - 4) // 2
+        elif (n - 5) % 2 == 0:
+            self.is_track = True
+            self.num_heads = (n - 5) // 2
         else:
-            raise AssertionError(f"Expected box data to have 6, 7, 8, or 9 columns. Got {n}")
+            raise AssertionError(f"Unexpected box column count {n}")
+        super().__init__(boxes, orig_shape)
+        self.orig_shape = orig_shape
+
+    def get_head_predictions(self, head_idx):
+        """Return confidence and class columns for a specific head."""
+        base = 4 + head_idx * 2
+        if self.is_track:
+            conf = self.data[:, base]
+            cls = self.data[:, base + 1]
+        else:
+            conf = self.data[:, base]
+            cls = self.data[:, base + 1]
+        return conf, cls
+
+    def __getattr__(self, name):
+        if name.startswith("conf") and name[4:].isdigit():
+            idx = int(name[4:])
+            return self.get_head_predictions(idx)[0]
+        if name.startswith("cls") and name[3:].isdigit():
+            idx = int(name[3:])
+            return self.get_head_predictions(idx)[1]
+        return super().__getattr__(name)
 
     @property
     def xyxy(self):
@@ -1051,7 +1067,7 @@ class Boxes(BaseTensor):
             >>> print(conf_scores)
             tensor([0.9000])
         """
-        return self.data[:, 4]
+        return self.get_head_predictions(0)[0]
 
     @property
     def cls(self):
@@ -1068,22 +1084,20 @@ class Boxes(BaseTensor):
             >>> class_ids = boxes.cls
             >>> print(class_ids)  # tensor([0., 2., 1.])
         """
-        return self.data[:, 5]
+        return self.get_head_predictions(0)[1]
 
     @property
     def conf2(self):
         """Returns secondary confidence scores (if available)."""
-        n = self.data.shape[-1]
-        if n >= 8:
-            return self.data[:, 6]
+        if self.num_heads > 1:
+            return self.get_head_predictions(1)[0]
         return None
 
     @property
     def cls2(self):
         """Returns secondary class labels (if available)."""
-        n = self.data.shape[-1]
-        if n >= 8:
-            return self.data[:, 7]
+        if self.num_heads > 1:
+            return self.get_head_predictions(1)[1]
         return None
     
     @property
@@ -1110,10 +1124,8 @@ class Boxes(BaseTensor):
             - The tracking IDs are typically used to associate detections across multiple frames in video analysis.
         """
         n = self.data.shape[-1]
-        if n == 9 and self.is_track:
-            return self.data[:, 8]
-        if n == 7 and self.is_track:
-            return self.data[:, 6]
+        if self.is_track:
+            return self.data[:, 4 + 2 * self.num_heads]
         return None
 
     @property
