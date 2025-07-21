@@ -14,7 +14,6 @@ from ultralytics.utils.torch_utils import autocast
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
 
-from glob import glob
 
 class DistillationLoss(nn.Module):
     """Criterion class for computing training losses."""
