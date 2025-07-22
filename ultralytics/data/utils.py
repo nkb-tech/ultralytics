@@ -165,7 +165,10 @@ def verify_image_label(args, min_size=25):
                     msg = f"{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed"
             else:
                 ne = 1  # label empty
-                lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
+                if is_multihead:
+                    lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 4 + len(num_cls_per_head)), dtype=np.float32)
+                else: 
+                    lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
         else:
             nm = 1  # label missing
             lb = np.zeros((0, (5 + nkpt * ndim) if keypoints else 5), dtype=np.float32)

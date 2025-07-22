@@ -2876,37 +2876,37 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         >>> transforms = v8_transforms(dataset, imgsz=640, hyp=hyp)
         >>> augmented_data = transforms(dataset[0])
     """
-    # mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic)
-    # affine = RandomPerspective(
-    #     degrees=hyp.degrees,
-    #     translate=hyp.translate,
-    #     scale=hyp.scale,
-    #     shear=hyp.shear,
-    #     perspective=hyp.perspective,
-    #     pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz)),
-    # )
-    #
-    # pre_transform = Compose([mosaic, affine])
-    # if hyp.copy_paste_mode == "flip":
-    #     pre_transform.insert(1, CopyPaste(p=hyp.copy_paste, mode=hyp.copy_paste_mode))
-    # else:
-    #     pre_transform.append(
-    #         CopyPaste(
-    #             dataset,
-    #             pre_transform=Compose([Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic), affine]),
-    #             p=hyp.copy_paste,
-    #             mode=hyp.copy_paste_mode,
-    #         )
-    #     )
-    # flip_idx = dataset.data.get("flip_idx", [])  # for keypoints augmentation
-    # if dataset.use_keypoints:
-    #     kpt_shape = dataset.data.get("kpt_shape", None)
-    #     if len(flip_idx) == 0 and hyp.fliplr > 0.0:
-    #         hyp.fliplr = 0.0
-    #         LOGGER.warning("WARNING ⚠️ No 'flip_idx' array defined in data.yaml, setting augmentation 'fliplr=0.0'")
-    #     elif flip_idx and (len(flip_idx) != kpt_shape[0]):
-    #         raise ValueError(f"data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}")
-    #
+    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic)
+    affine = RandomPerspective(
+        degrees=hyp.degrees,
+        translate=hyp.translate,
+        scale=hyp.scale,
+        shear=hyp.shear,
+        perspective=hyp.perspective,
+        pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz)),
+    )
+    
+    pre_transform = Compose([mosaic, affine])
+    if hyp.copy_paste_mode == "flip":
+        pre_transform.insert(1, CopyPaste(p=hyp.copy_paste, mode=hyp.copy_paste_mode))
+    else:
+        pre_transform.append(
+            CopyPaste(
+                dataset,
+                pre_transform=Compose([Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic), affine]),
+                p=hyp.copy_paste,
+                mode=hyp.copy_paste_mode,
+            )
+        )
+    flip_idx = dataset.data.get("flip_idx", [])  # for keypoints augmentation
+    if dataset.use_keypoints:
+        kpt_shape = dataset.data.get("kpt_shape", None)
+        if len(flip_idx) == 0 and hyp.fliplr > 0.0:
+            hyp.fliplr = 0.0
+            LOGGER.warning("WARNING ⚠️ No 'flip_idx' array defined in data.yaml, setting augmentation 'fliplr=0.0'")
+        elif flip_idx and (len(flip_idx) != kpt_shape[0]):
+            raise ValueError(f"data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}")
+    
     # albu_args = {
     #             "dropout_prob":hyp.albu_dropout_prob if hasattr(hyp, 'albu_dropout_prob') else None,
     #             "quality_lower":hyp.albu_quality_lower if hasattr(hyp, 'albu_quality_lower') else None,
@@ -2917,42 +2917,42 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
     #             "saturation":hyp.albu_saturation if hasattr(hyp, 'albu_saturation') else None,
     #             "hue":hyp.albu_hue if hasattr(hyp, 'albu_hue') else None,
     #         }
-    # return Compose(
-    #     [
-    #         pre_transform,
-    #         MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
-    #         Albumentations(p=1.0, args=albu_args),
-    #         #RandomGlitche(p=0.6),
-    #         RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
-    #         RandomFlip(direction="vertical", p=hyp.flipud),
-    #         RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
-    #     ]
-    # )  # transforms
+    return Compose(
+        [
+            pre_transform,
+            MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
+            #Albumentations(p=1.0, args=albu_args),
+            #RandomGlitche(p=0.6),
+            RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+            RandomFlip(direction="vertical", p=hyp.flipud),
+            RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
+        ]
+    )  # transforms
     # alb = Albumentations(hyp=hyp, p=1.0)
-    resize = LetterBox(new_shape=(imgsz, imgsz),
-                       auto=False,        # строго imgsz×imgsz
-                       scaleFill=False,  # паддинги вместо растяжения
-                       scaleup=True,      # допускаем upscale
-                       center=True)
+    # resize = LetterBox(new_shape=(imgsz, imgsz),
+    #                    auto=False,        # строго imgsz×imgsz
+    #                    scaleFill=False,  # паддинги вместо растяжения
+    #                    scaleup=True,      # допускаем upscale
+    #                    center=True)
 
-    rp = RandomPerspective(degrees=hyp.degrees,
-                           translate=hyp.translate,
-                           scale=hyp.scale,
-                           shear=hyp.shear,
-                           perspective=hyp.perspective,
-                           border=(0, 0),      # без мозаичных бордеров
-                           pre_transform=None) # LetterBox уже применили
+    # rp = RandomPerspective(degrees=hyp.degrees,
+    #                        translate=hyp.translate,
+    #                        scale=hyp.scale,
+    #                        shear=hyp.shear,
+    #                        perspective=hyp.perspective,
+    #                        border=(0, 0),      # без мозаичных бордеров
+    #                        pre_transform=None) # LetterBox уже применили
 
-    misc = Compose([
-        MixUp(dataset, p=hyp.mixup),
-        # CutMix(dataset, p=hyp.cutmix),
-        RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
-        RandomFlip(direction="vertical",   p=hyp.flipud),
-        RandomFlip(direction="horizontal", p=hyp.fliplr,
-                   flip_idx=dataset.data.get("flip_idx", [])),
-    ])
+    # misc = Compose([
+    #     MixUp(dataset, p=hyp.mixup),
+    #     # CutMix(dataset, p=hyp.cutmix),
+    #     RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+    #     RandomFlip(direction="vertical",   p=hyp.flipud),
+    #     RandomFlip(direction="horizontal", p=hyp.fliplr,
+    #                flip_idx=dataset.data.get("flip_idx", [])),
+    # ])
 
-    return Compose([ resize, rp, misc])
+    # return Compose([ resize, rp, misc])
 
 
 # Classification augmentations -----------------------------------------------------------------------------------------
