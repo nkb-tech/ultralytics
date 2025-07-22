@@ -249,8 +249,13 @@ def non_max_suppression(
             nc = prediction.shape[1] - 4
         nm = prediction.shape[1] - nc - 4  # number of masks
         mi = 4 + nc  # mask start index
-    # keep boxes where any head's confidence exceeds threshold
-    xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
+    if is_multihead:
+        # candidate boxes determined by first head confidence only
+        first_nc = nc[0]
+        xc = prediction[:, 4 : 4 + first_nc].amax(1) > conf_thres
+    else:
+        # keep boxes where any class confidence exceeds threshold
+        xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height

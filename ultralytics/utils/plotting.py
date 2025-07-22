@@ -1102,7 +1102,7 @@ def plot_images(
                     draw = labels
                     if conf_j is not None:
                         if multihead:
-                            draw = draw or conf_j.max() > conf_thres
+                            draw = draw or conf_j[0] > conf_thres
                         else:
                             draw = draw or conf_j > conf_thres
                     if draw:
@@ -1143,7 +1143,7 @@ def plot_images(
                     draw = labels
                     if conf_j is not None:
                         if multihead:
-                            draw = draw or conf_j.max() > conf_thres
+                            draw = draw or conf_j[0] > conf_thres
                         else:
                             draw = draw or conf_j > conf_thres
                     if draw:
@@ -1166,7 +1166,7 @@ def plot_images(
                     draw = labels
                     if conf_j is not None:
                         if multihead:
-                            draw = draw or conf_j.max() > conf_thres
+                            draw = draw or conf_j[0] > conf_thres
                         else:
                             draw = draw or conf_j > conf_thres
                     if draw:
