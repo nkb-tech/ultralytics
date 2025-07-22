@@ -91,7 +91,7 @@ class Detect(nn.Module):
     def pre_forward(self, x):
         for i in range(self.nl):
             y = [self.cv2[i](x[i])]
-            if self.is_multihead:
+            if hasattr(self, 'is_multihead') and self.is_multihead:
                 # run each classification head separately
                 y += [head(x[i]) for head in self.cv3[i]]
             else:
