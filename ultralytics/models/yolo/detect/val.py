@@ -114,6 +114,8 @@ class DetectionValidator(BaseValidator):
             self.metrics = [
                 DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot, names=t["names"]) for t in self.tasks
             ]
+            for m in self.metrics:
+                m.plot = self.args.plots
             self.confusion_matrix = [ConfusionMatrix(nc=t["nc"], conf=self.args.conf) for t in self.tasks]
             self.stats = [dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[]) for _ in self.tasks]
         else:
@@ -139,7 +141,6 @@ class DetectionValidator(BaseValidator):
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
             nc=[t["nc"] for t in self.tasks] if self.is_multihead else None,
-            full_class_nms=getattr(self.args, "full_class_nms", False),
         )
 
     def _prepare_batch(self, si, batch):
@@ -225,9 +226,10 @@ class DetectionValidator(BaseValidator):
                     stat[t]["pred_cls"] = predn[:, 5 + 2 * t]  # class index for task t
                     if nl:
                         stat[t]["tp"] = self._process_batch(predn, bbox, cls[:, t] if cls.ndim > 1 else cls, task=t)
-                        if self.args.plots and t == 0:
+                        if self.args.plots:
+                            det = predn[:, [0, 1, 2, 3, 4 + 2 * t, 5 + 2 * t]]
                             self.confusion_matrix[t].process_batch(
-                                predn[:, :6], bbox, cls[:, t] if cls.ndim > 1 else cls
+                                det, bbox, cls[:, t] if cls.ndim > 1 else cls
                             )
                     for k in self.stats[t].keys():
                         self.stats[t][k].append(stat[t][k])
@@ -276,7 +278,7 @@ class DetectionValidator(BaseValidator):
                 self.nt_per_image.append(nti)
                 stats.pop("target_img", None)
                 if len(stats) and stats["tp"].any():
-                    m.process(**stats)
+                    m.process(prefix=f"task{i}_", **stats)
                 results.update({f"task{i}_{k}": v for k, v in m.results_dict.items()})
             return results
         else:
@@ -313,8 +315,22 @@ class DetectionValidator(BaseValidator):
             if self.args.plots:
                 for normalize in True, False:
                     self.confusion_matrix.plot(
-                        save_dir=self.save_dir, names=self.names.values(), normalize=normalize, on_plot=self.on_plot
+                        save_dir=self.save_dir,
+                        names=self.names.values(),
+                        normalize=normalize,
+                        on_plot=self.on_plot,
                     )
+        else:
+            if self.args.plots:
+                for normalize in True, False:
+                    for i, cm in enumerate(self.confusion_matrix):
+                        cm.plot(
+                            save_dir=self.save_dir,
+                            names=self.tasks[i]["names"].values(),
+                            normalize=normalize,
+                            on_plot=self.on_plot,
+                            prefix=f"task{i}_",
+                        )
 
     def _process_batch(self, detections, gt_bboxes, gt_cls, task=0):
         """

@@ -134,8 +134,14 @@ def on_train_end(trainer):
         for f in files:
             _log_plot(title=f.stem, plot_path=f)
         # Report final metrics
-        for k, v in trainer.validator.metrics.results_dict.items():
-            task.get_logger().report_single_value(k, v)
+        metrics = trainer.validator.metrics
+        if isinstance(metrics, list):
+            for i, m in enumerate(metrics):
+                for k, v in m.results_dict.items():
+                    task.get_logger().report_single_value(f"task{i}_{k}", v)
+        else:
+            for k, v in metrics.results_dict.items():
+                task.get_logger().report_single_value(k, v)
         # Log the final model
         task.update_output_model(model_path=str(trainer.best), model_name=trainer.args.name, auto_delete_file=False)
 

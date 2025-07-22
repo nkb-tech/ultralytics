@@ -184,7 +184,6 @@ CFG_BOOL_KEYS = {  # boolean-only arguments
     "visualize",
     "augment",
     "agnostic_nms",
-    "full_class_nms",
     "retina_masks",
     "show_boxes",
     "keras",

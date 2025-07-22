@@ -209,11 +209,28 @@ def _create_prediction_metadata_map(model_predictions):
 
 def _log_confusion_matrix(experiment, trainer, curr_step, curr_epoch):
     """Log the confusion matrix to Comet experiment."""
-    conf_mat = trainer.validator.confusion_matrix.matrix
-    names = list(trainer.data["names"].values()) + ["background"]
-    experiment.log_confusion_matrix(
-        matrix=conf_mat, labels=names, max_categories=len(names), epoch=curr_epoch, step=curr_step
-    )
+    cm = trainer.validator.confusion_matrix
+    if isinstance(cm, list):
+        tasks = getattr(trainer.validator, "tasks", None) or []
+        for i, c in enumerate(cm):
+            names = list(tasks[i]["names"].values()) + ["background"] if i < len(tasks) else []
+            experiment.log_confusion_matrix(
+                matrix=c.matrix,
+                labels=names,
+                max_categories=len(names),
+                epoch=curr_epoch,
+                step=curr_step,
+                name=f"task{i}",
+            )
+    else:
+        names = list(trainer.data["names"].values()) + ["background"]
+        experiment.log_confusion_matrix(
+            matrix=cm.matrix,
+            labels=names,
+            max_categories=len(names),
+            epoch=curr_epoch,
+            step=curr_step,
+        )
 
 
 def _log_images(experiment, image_paths, curr_step, annotations=None):
@@ -274,7 +291,14 @@ def _log_image_predictions(experiment, validator, curr_step):
 
 def _log_plots(experiment, trainer):
     """Logs evaluation plots and label plots for the experiment."""
-    plot_filenames = [trainer.save_dir / f"{plots}.png" for plots in EVALUATION_PLOT_NAMES]
+    if getattr(trainer.validator, "is_multihead", False):
+        plot_filenames = [
+            trainer.save_dir / f"task{i}_{p}.png"
+            for i in range(len(trainer.validator.metrics))
+            for p in EVALUATION_PLOT_NAMES
+        ]
+    else:
+        plot_filenames = [trainer.save_dir / f"{plots}.png" for plots in EVALUATION_PLOT_NAMES]
     _log_images(experiment, plot_filenames, None)
 
     label_plot_filenames = [trainer.save_dir / f"{labels}.jpg" for labels in LABEL_PLOT_NAMES]
