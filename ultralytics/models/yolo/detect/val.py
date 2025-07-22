@@ -11,7 +11,7 @@ from ultralytics.engine.validator import BaseValidator
 from ultralytics.utils import LOGGER, ops, yaml_load
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
-from ultralytics.utils.plotting import output_to_target, plot_images
+from ultralytics.utils.plotting import output_to_target, output_to_target_multihead, plot_images
 
 """
 Multi-head validation design
@@ -145,7 +145,7 @@ class DetectionValidator(BaseValidator):
     def _prepare_batch(self, si, batch):
         """Prepares a batch of images and annotations for validation."""
         idx = batch["batch_idx"] == si
-        cls = batch["cls"][idx].squeeze(-1)
+        cls = batch["cls"][idx] if self.is_multihead else batch["cls"][idx].squeeze(-1)
         bbox = batch["bboxes"][idx]
         ori_shape = batch["ori_shape"][si]
         imgsz = batch["img"].shape[2:]
@@ -360,11 +360,12 @@ class DetectionValidator(BaseValidator):
         plot_images(
             batch["img"],
             batch["batch_idx"],
-            batch["cls"].squeeze(-1),
+            batch["cls"],
             batch["bboxes"],
             paths=batch["im_file"],
             fname=self.save_dir / f"val_batch{ni}_labels.jpg",
             names=self.names,
+            names_per_task=[t["names"] for t in self.tasks] if self.is_multihead else None,
             on_plot=self.on_plot,
         )
 
@@ -372,13 +373,19 @@ class DetectionValidator(BaseValidator):
         """Plots predicted bounding boxes on input images and saves the result."""
         det = preds
         if self.is_multihead:
-            det = [p[:, :6] for p in preds]
+            bi, cls, boxes, conf = output_to_target_multihead(det, len(self.tasks), max_det=self.args.max_det)
+        else:
+            bi, cls, boxes, conf = output_to_target(det, max_det=self.args.max_det)
         plot_images(
             batch["img"],
-            *output_to_target(det, max_det=self.args.max_det),
+            bi,
+            cls,
+            boxes,
+            conf,
             paths=batch["im_file"],
             fname=self.save_dir / f"val_batch{ni}_pred.jpg",
             names=self.names,
+            names_per_task=[t["names"] for t in self.tasks] if self.is_multihead else None,
             on_plot=self.on_plot,
         )  # pred
 

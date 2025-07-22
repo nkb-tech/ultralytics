@@ -245,6 +245,8 @@ def non_max_suppression(
         nm = prediction.shape[1] - 4 - total_nc
         mi = 4 + total_nc
     else:
+        if nc is None:
+            nc = prediction.shape[1] - 4
         nm = prediction.shape[1] - nc - 4  # number of masks
         mi = 4 + nc  # mask start index
     # keep boxes where any head's confidence exceeds threshold

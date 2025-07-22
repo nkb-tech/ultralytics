@@ -977,6 +977,7 @@ def plot_images(
     paths: Optional[List[str]] = None,
     fname: str = "images.jpg",
     names: Optional[Dict[int, str]] = None,
+    names_per_task: Optional[List[Dict[int, str]]] = None,
     on_plot: Optional[Callable] = None,
     max_size: int = 1920,
     max_subplots: int = 16,
@@ -997,6 +998,8 @@ def plot_images(
         paths: List of file paths for each image in the batch.
         fname: Output filename for the plotted image grid.
         names: Dictionary mapping class indices to class names.
+        names_per_task: Optional list of dictionaries of class names per head
+            used when drawing multi-head annotations.
         on_plot: Optional callback function to be called after saving the plot.
         max_size: Maximum size of the output image grid.
         max_subplots: Maximum number of subplots in the image grid.
@@ -1022,7 +1025,9 @@ def plot_images(
         kpts = kpts.cpu().numpy()
     if isinstance(batch_idx, torch.Tensor):
         batch_idx = batch_idx.cpu().numpy()
-
+    multihead = names_per_task is not None
+    if not multihead and cls.shape[-1]==1:
+        cls = cls.squeeze(-1)
     bs, _, h, w = images.shape  # batch size, _, height, width
     bs = min(bs, max_subplots)  # limit plot images
     ns = np.ceil(bs**0.5)  # number of subplots (square)
@@ -1054,7 +1059,7 @@ def plot_images(
             idx = batch_idx == i
             classes = cls[idx].astype("int")
             labels = confs is None
-
+            
             if len(bboxes):
                 boxes = bboxes[idx]
                 conf = confs[idx] if confs is not None else None  # check for confidence presence (label vs pred)
@@ -1070,19 +1075,57 @@ def plot_images(
                 boxes = ops.xywhr2xyxyxyxy(boxes) if is_obb else ops.xywh2xyxy(boxes)
                 for j, box in enumerate(boxes.astype(np.int64).tolist()):
                     c = classes[j]
-                    if isinstance(c, (list, tuple, np.ndarray)):
-                        c = c[0]
-                    color = colors(int(c))
-                    c = names.get(int(c), c) if names else c
-                    if labels or conf[j] > conf_thres:
-                        label = f"{c}" if labels else f"{c} {conf[j]:.1f}"
+                    if multihead:
+                        color = colors(int(c[0]))
+                        parts = []
+                        for t, ct in enumerate(c):
+                            name_dict = None
+                            if names_per_task and t < len(names_per_task):
+                                name_dict = names_per_task[t]
+                            name = (
+                                name_dict.get(int(ct), int(ct)) if isinstance(name_dict, dict) else names.get(int(ct), int(ct))
+                            )
+                            if labels or conf is None:
+                                parts.append(f"{name}")
+                            else:
+                                conf_t = conf[j, t]
+                                if labels or conf_t > conf_thres:
+                                    parts.append(f"{name} {conf_t:.1f}")
+                        label = "|".join(parts)
+                    else:
+                        if isinstance(c, (list, tuple, np.ndarray)):
+                            c = c[0]
+                        color = colors(int(c))
+                        name = names.get(int(c), c) if names else c
+                        label = f"{name}" if labels else f"{name} {conf[j]:.1f}"
+                    conf_j = conf[j] if conf is not None else None
+                    draw = labels
+                    if conf_j is not None:
+                        if multihead:
+                            draw = draw or conf_j.max() > conf_thres
+                        else:
+                            draw = draw or conf_j > conf_thres
+                    if draw:
                         annotator.box_label(box, label, color=color, rotated=is_obb)
 
             elif len(classes):
                 for c in classes:
-                    color = colors(c)
-                    c = names.get(c, c) if names else c
-                    annotator.text((x, y), f"{c}", txt_color=color, box_style=True)
+                    if classes.ndim == 2:
+                        color = colors(int(c[0]))
+                        parts = []
+                        for t, ct in enumerate(c):
+                            name_dict = None
+                            if names_per_task and t < len(names_per_task):
+                                name_dict = names_per_task[t]
+                            name = (
+                                name_dict.get(int(ct), int(ct)) if isinstance(name_dict, dict) else names.get(int(ct), int(ct))
+                            )
+                            parts.append(str(name))
+                        c_str = "|".join(parts)
+                    else:
+                        color = colors(c)
+                        c_str = names.get(c, c) if names else c
+                    annotator.text((x, y), f"{c_str}", txt_color=color, box_style=True)
 
             # Plot keypoints
             if len(kpts):
@@ -1096,7 +1139,14 @@ def plot_images(
                 kpts_[..., 0] += x
                 kpts_[..., 1] += y
                 for j in range(len(kpts_)):
-                    if labels or conf[j] > conf_thres:
+                    conf_j = conf[j] if conf is not None else None
+                    draw = labels
+                    if conf_j is not None:
+                        if multihead:
+                            draw = draw or conf_j.max() > conf_thres
+                        else:
+                            draw = draw or conf_j > conf_thres
+                    if draw:
                         annotator.kpts(kpts_[j], conf_thres=conf_thres)
 
             # Plot masks
@@ -1112,7 +1162,14 @@ def plot_images(
 
                 im = np.asarray(annotator.im).copy()
                 for j in range(len(image_masks)):
-                    if labels or conf[j] > conf_thres:
+                    conf_j = conf[j] if conf is not None else None
+                    draw = labels
+                    if conf_j is not None:
+                        if multihead:
+                            draw = draw or conf_j.max() > conf_thres
+                        else:
+                            draw = draw or conf_j > conf_thres
+                    if draw:
                         color = colors(classes[j])
                         mh, mw = image_masks[j].shape
                         if mh != h or mw != w:
@@ -1292,6 +1349,35 @@ def output_to_target(output, max_det=300):
         targets.append(torch.cat((j, cls, ops.xyxy2xywh(box), conf), 1))
     targets = torch.cat(targets, 0).numpy()
     return targets[:, 0], targets[:, 1], targets[:, 2:-1], targets[:, -1]
+
+
+def output_to_target_multihead(output, num_heads=1, max_det=300):
+    """Convert multi-head model output to target format for plotting."""
+    targets = []
+    for i, o in enumerate(output):
+        o = o[:max_det].cpu()
+        boxes = ops.xyxy2xywh(o[:, :4])
+        head_cols = []
+        for h in range(num_heads):
+            conf = o[:, 4 + 2 * h : 5 + 2 * h]
+            cls = o[:, 5 + 2 * h : 6 + 2 * h]
+            head_cols.append(torch.cat((conf, cls), 1))  # conf then cls
+        j = torch.full((boxes.shape[0], 1), i)
+        targets.append(torch.cat((j, boxes, *head_cols), 1))
+    if not targets:
+        return (
+            np.zeros(0),
+            np.zeros((0, num_heads)),
+            np.zeros((0, 4)),
+            np.zeros((0, num_heads)),
+        )
+    targets = torch.cat(targets, 0).numpy()
+    batch = targets[:, 0]
+    boxes = targets[:, 1:5]
+    head_data = targets[:, 5 : 5 + 2 * num_heads]
+    conf = head_data[:, ::2]
+    cls = head_data[:, 1::2]
+    return batch, cls, boxes, conf
 
 
 def output_to_rotated_target(output, max_det=300):

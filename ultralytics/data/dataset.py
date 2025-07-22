@@ -124,7 +124,6 @@ class YOLODataset(BaseDataset):
                             f"Dataset contains {num_heads} heads with {self.data.get('nc_per_task')} classes each"
                         )
                         print(f"Sample label tensor shape: {lb.shape}")
-                        print(f"Expected shape: (N, {sum(self.data.get('nc_per_task', [])) + 4})")
                     x["labels"].append(
                         {
                             "im_file": im_file,

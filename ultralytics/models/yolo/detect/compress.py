@@ -468,10 +468,11 @@ class DetectionCompressor(BaseTrainer):
         """Plots training samples with their annotations."""
         plot_images(images=batch['img'],
                     batch_idx=batch['batch_idx'],
-                    cls=batch['cls'].squeeze(-1),
+                    cls=batch['cls'],
                     bboxes=batch['bboxes'],
                     paths=batch['im_file'],
                     fname=self.save_dir / f'train_batch{ni}.jpg',
+                    names_per_task=self.data.get('names_per_task'),
                     on_plot=self.on_plot)
 
     def plot_metrics(self):
@@ -482,7 +483,12 @@ class DetectionCompressor(BaseTrainer):
         """Create a labeled training plot of the YOLO model."""
         boxes = np.concatenate([lb['bboxes'] for lb in self.train_loader.dataset.labels], 0)
         cls = np.concatenate([lb['cls'] for lb in self.train_loader.dataset.labels], 0)
-        plot_labels(boxes, cls.squeeze(), names=self.data['names'], save_dir=self.save_dir, on_plot=self.on_plot)
+        if cls.ndim == 2:
+            offsets = np.cumsum([0] + self.data.get('nc_per_task', [])[:-1])
+            cls = cls + offsets
+            boxes = np.repeat(boxes, cls.shape[1], axis=0)
+            cls = cls.reshape(-1)
+        plot_labels(boxes, cls, names=self.data['names'], save_dir=self.save_dir, on_plot=self.on_plot)
 
     def save_model(self):
         """Save model training checkpoints with additional metadata."""
