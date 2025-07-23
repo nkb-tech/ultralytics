@@ -2293,6 +2293,7 @@ class Albumentations:
                     A.PixelDropout(
                         dropout_prob=self.hyp.pixel_dropout_prob,
                         drop_value=self.hyp.pixel_drop_value,
+                        per_channel=True,
                         p=0.3
                     ),
 
@@ -2482,11 +2483,19 @@ class Albumentations:
                 labels["instances"].convert_bbox("xywh")
                 labels["instances"].normalize(*im.shape[:2][::-1])
                 bboxes = labels["instances"].bboxes
-                # TODO: add supports of segments and keypoints
-                new = self.transform(image=im, bboxes=bboxes, class_labels=cls)  # transformed
+                # print(f"[DEBUG!] {bboxes}")
+                # print(f"[DEBUG!!] {cls}")
+                multihead = cls.ndim > 1
+                class_labels = [tuple(c) if multihead else float(c) for c in cls]
+                # print(f"[DEBUG!!1] {class_labels}")
+
+                new = self.transform(image=im, bboxes=bboxes, class_labels=class_labels)
                 if len(new["class_labels"]) > 0:  # skip update if no bbox in new im
                     labels["img"] = new["image"]
-                    labels["cls"] = np.array(new["class_labels"])
+                    cls_new = np.array(new["class_labels"], dtype=np.float32)
+                    if multihead and cls_new.ndim == 1:
+                        cls_new = cls_new.reshape(-1, cls.shape[1])
+                    labels["cls"] = cls_new
                     bboxes = np.array(new["bboxes"], dtype=np.float32)
                 labels["instances"].update(bboxes=bboxes)
         else:
@@ -2907,21 +2916,21 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         elif flip_idx and (len(flip_idx) != kpt_shape[0]):
             raise ValueError(f"data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}")
     
-    # albu_args = {
-    #             "dropout_prob":hyp.albu_dropout_prob if hasattr(hyp, 'albu_dropout_prob') else None,
-    #             "quality_lower":hyp.albu_quality_lower if hasattr(hyp, 'albu_quality_lower') else None,
-    #             "max_factor":hyp.albu_max_factor if hasattr(hyp, 'albu_max_factor') else None,
-    #             "clip_limit":hyp.albu_clip_limit if hasattr(hyp, 'albu_clip_limit') else None,
-    #             "brightness":hyp.albu_brightness if hasattr(hyp, 'albu_brightness') else None,
-    #             "contrast":hyp.albu_contrast if hasattr(hyp, 'albu_contrast') else None,
-    #             "saturation":hyp.albu_saturation if hasattr(hyp, 'albu_saturation') else None,
-    #             "hue":hyp.albu_hue if hasattr(hyp, 'albu_hue') else None,
-    #         }
+    albu_args = {
+                "dropout_prob":hyp.albu_dropout_prob if hasattr(hyp, 'albu_dropout_prob') else None,
+                "quality_lower":hyp.albu_quality_lower if hasattr(hyp, 'albu_quality_lower') else None,
+                "max_factor":hyp.albu_max_factor if hasattr(hyp, 'albu_max_factor') else None,
+                "clip_limit":hyp.albu_clip_limit if hasattr(hyp, 'albu_clip_limit') else None,
+                "brightness":hyp.albu_brightness if hasattr(hyp, 'albu_brightness') else None,
+                "contrast":hyp.albu_contrast if hasattr(hyp, 'albu_contrast') else None,
+                "saturation":hyp.albu_saturation if hasattr(hyp, 'albu_saturation') else None,
+                "hue":hyp.albu_hue if hasattr(hyp, 'albu_hue') else None,
+            }
     return Compose(
         [
             pre_transform,
             MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
-            #Albumentations(p=1.0, args=albu_args),
+            Albumentations(hyp=hyp, p=1.0, args=albu_args),
             #RandomGlitche(p=0.6),
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
             RandomFlip(direction="vertical", p=hyp.flipud),
