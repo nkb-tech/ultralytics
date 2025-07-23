@@ -99,14 +99,21 @@ class DetectionValidator(BaseValidator):
         self.names = model.names
         self.nc = len(model.names)
 
-        # Determine multi-head configuration from dataset YAML. A list of lists
-        # signals one label space per detection head.
-        names_raw = yaml_load(self.data.get("yaml_file", "")).get("names", self.data.get("names"))
-        if isinstance(names_raw, dict):
-            names_raw = list(names_raw.values())
-        if isinstance(names_raw, list) and names_raw and isinstance(names_raw[0], (list, tuple)):
+       
+        names_per_task = self.data.get("names_per_task")
+        if names_per_task is None:
+            names_raw = yaml_load(self.data.get("yaml_file", "")).get("names", self.data.get("names"))
+            if isinstance(names_raw, dict):
+                names_raw = list(names_raw.values())
+            if isinstance(names_raw, list) and names_raw and isinstance(names_raw[0], (list, tuple)):
+                names_per_task = names_raw
+
+        if names_per_task:
             self.is_multihead = True
-            self.tasks = [{"nc": len(n), "names": {i: name for i, name in enumerate(n)}} for n in names_raw]
+            self.tasks = [
+                {"nc": len(n), "names": {i: name for i, name in enumerate(n.values())}}
+                for n in names_per_task
+            ]
         else:
             self.tasks = [{"nc": self.nc, "names": self.names}]
 

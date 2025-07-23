@@ -92,6 +92,11 @@ class DetectionTrainer(BaseTrainer):
             offset = self.data["nc_per_task"][0]
             for i, n in enumerate(names_list[offset:], start=1):
                 self.model.names[i] = n
+            if self.data.get("names_per_task"):
+                first = next(iter(self.data["names_per_task"][0].values()))
+                self.data["names_per_task"][0] = {0: first}
+                flat = [n for t in self.data["names_per_task"] for n in t.values()]
+                self.data["names"] = {i: name for i, name in enumerate(flat)}
         else:
             self.model.nc = 1 if self.args.single_cls else self.data["nc"]  # attach number of classes to model
             self.model.names = {0: 0} if self.args.single_cls else self.data["names"]  # attach class names to model

@@ -62,6 +62,16 @@ class YOLODataset(BaseDataset):
         self.use_obb = task == "obb"
         self.data = data
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
+
+        if kwargs.get("single_cls") and self.data and self.data.get("nc_per_task"):
+            self.data["nc_per_task"][0] = 1
+            if self.data.get("names_per_task"):
+                first = next(iter(self.data["names_per_task"][0].values()))
+                self.data["names_per_task"][0] = {0: first}
+                flat = [n for t in self.data["names_per_task"] for n in t.values()]
+                self.data["names"] = {i: name for i, name in enumerate(flat)}
+            self.data["nc"] = sum(self.data["nc_per_task"])
+
         super().__init__(*args, **kwargs)
 
     def cache_labels(self, path=Path("./labels.cache")):
@@ -98,6 +108,7 @@ class YOLODataset(BaseDataset):
                     repeat(nkpt),
                     repeat(ndim),
                     extra,
+                    repeat(self.single_cls),
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)

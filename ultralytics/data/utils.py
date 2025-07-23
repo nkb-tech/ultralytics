@@ -98,9 +98,12 @@ def verify_image_label(args, min_size=25):
     """Verify one image-label pair."""
     if len(args) == 7:
         im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim = args
-        num_cls_per_head = None
-    else:
+        num_cls_per_head, single_cls = None, False
+    elif len(args) == 8:
         im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, num_cls_per_head = args
+        single_cls = False
+    else:
+        im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, num_cls_per_head, single_cls = args
     is_multihead = num_cls_per_head is not None  # dataset uses multiple heads
     # Number (missing, found, empty, corrupt), message, segments, keypoints
     nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
@@ -145,6 +148,8 @@ def verify_image_label(args, min_size=25):
 
                 # All labels
                 if is_multihead:
+                    if single_cls:
+                        lb[:, 0] = 0
                     for i, n in enumerate(num_cls_per_head):
                         max_cls = lb[:, i].max()
                         assert max_cls <= n - 1, (
