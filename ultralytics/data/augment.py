@@ -2237,6 +2237,30 @@ class Albumentations:
                         ),
                         A.Sharpen(p=self.hyp.p_sharpen),
                         A.ToGray(p=self.hyp.p_gray),
+                        A.RGBShift(
+                                r_shift_limit=[-10, 10],
+                                g_shift_limit=[-10, 10],
+                                b_shift_limit=[-10, 10],
+                                        p=0.15,
+                            ),
+                        A.Emboss(
+                            alpha=(0.2, 0.5), 
+                            strength=(0.2, 0.6),
+                            p=0.2,
+                        ),    
+                        A.FancyPCA(
+                            alpha=2, 
+                            p=0.1,
+                        ),    
+                        A.ShotNoise(
+                        scale_range=(0.01, 0.06),
+                        p=0.15 ,
+                        ),
+                        A.UnsharpMask(
+                        blur_limit=(3, 5),
+                        sigma_limit=(0.5, 1.0),
+                        p=0.1,
+                        )
                     ]
 
                 # Compose transforms
