@@ -1,28 +1,21 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
-
 import math
 import random
 from copy import deepcopy
-from typing import Tuple, Union, Any
+from typing import Tuple, Union
 
 import cv2
 import numpy as np
 import torch
 from PIL import Image
 
-from numba import njit
+from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils import LOGGER, colorstr
 from ultralytics.utils.checks import check_version
 from ultralytics.utils.instance import Instances
 from ultralytics.utils.metrics import bbox_ioa
 from ultralytics.utils.ops import segment2box, xyxyxyxy2xywhr
-from ultralytics.utils.ops import masks2segments, resample_segments, segment2box
-from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils.torch_utils import TORCHVISION_0_10, TORCHVISION_0_11, TORCHVISION_0_13
-
-from albumentations import AtLeastOneBBoxRandomCrop
-from albumentations.core.transforms_interface import DualTransform
-from albumentations.augmentations.crops.transforms import CropSizeError
 
 # from .glitche import Ntsc, VHSSpeed, NumpyRandom
 
@@ -34,84 +27,10 @@ ALBU_AVAILABLE = False
 
 try:
     import albumentations as A
+
     ALBU_AVAILABLE = True
 except:
     ALBU_AVAILABLE = False
-
-class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
-    """Гарантированный кроп size×size c хотя бы одним bbox внутри.
-    Не применяется, если изображение меньше заданного размера."""
-    
-    def __init__(
-        self,
-        size: int = 640,
-        erosion_factor: float = 0.0,
-        p: float = 1.0,
-    ):
-        super().__init__(
-            height=size,
-            width=size,
-            erosion_factor=erosion_factor,
-            p=p,
-        )
-
-    def get_params_dependent_on_data(
-        self,
-        params: dict[str, Any],
-        data: dict[str, Any],
-    ) -> dict[str, Any]:
-        image_height, image_width = params["shape"][:2]
-        if image_height < self.height or image_width < self.width:
-            return {"crop_coords": (0, 0, image_width, image_height)}
-        return super().get_params_dependent_on_data(params, data)
-
-class RandomCropLarge(DualTransform):
-    """
-    Срабатывает с вероятностью p, НО только если картинка ≥ `threshold` по обеим осям.
-    """
-
-    def __init__(
-        self,
-        crop_size: int = 640,
-        threshold: int = 1024,
-        erosion_factor: float = 0.0,
-        p: float = 1.0
-    ):
-        super().__init__(p=p)
-        self.crop_size = crop_size
-        self.threshold = threshold
-        self.random_crop = A.RandomCrop(height=crop_size, width=crop_size, p=1.0)
-        self.safe_fixed_crop = SafeFixedRandomCrop(
-            size=crop_size,
-            erosion_factor=erosion_factor,
-            p=1.0
-        )
-        
-    def apply(self, img, **params):
-        height, width = img.shape[:2]
-        if height > self.threshold or width > self.threshold:
-            return self.random_crop.apply(img, **params)
-        else:
-            return self.safe_fixed_crop.apply(img, **params)
-
-    def apply_to_bboxes(self, bboxes: list[list[float]], **params) -> list[list[float]]:
-        image_shape = params["shape"]
-        if image_shape[0] > self.threshold or image_shape[1] > self.threshold:
-            return self.random_crop.apply_to_bboxes(bboxes, **params)
-        else:
-            return self.safe_fixed_crop.apply_to_bboxes(bboxes, **params)
-
-    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
-        image_shape = params["shape"]
-        height, width = image_shape[:2]
-
-        if height > self.threshold or width > self.threshold:
-            return self.random_crop.get_params_dependent_on_data(params, data)
-        else:
-            return self.safe_fixed_crop.get_params_dependent_on_data(params, data)
-
-    def get_transform_init_args_names(self):
-        return ("crop_size", "threshold")
 
 
 class BaseTransform:
@@ -143,7 +62,6 @@ class BaseTransform:
         Examples:
             >>> transform = BaseTransform()
         """
-        pass
 
     def apply_image(self, labels):
         """
@@ -166,7 +84,6 @@ class BaseTransform:
             >>> print(transformed_labels)
             [1, 2, 3]
         """
-        pass
 
     def apply_instances(self, labels):
         """
@@ -187,7 +104,6 @@ class BaseTransform:
             >>> labels = {"instances": Instances(xyxy=torch.rand(5, 4), cls=torch.randint(0, 80, (5,)))}
             >>> transformed_labels = transform.apply_instances(labels)
         """
-        pass
 
     def apply_semantic(self, labels):
         """
@@ -207,7 +123,6 @@ class BaseTransform:
             >>> semantic_mask = np.zeros((100, 100), dtype=np.uint8)
             >>> transformed_mask = transform.apply_semantic(semantic_mask)
         """
-        pass
 
     def __call__(self, labels):
         """
@@ -1074,7 +989,17 @@ class RandomPerspective:
     """
 
     def __init__(
-        self, degrees=0.0, translate=0.1, scale=0.5, shear=0.0, perspective=0.0, border=(0, 0), pre_transform=None
+        self,
+        degrees=0.0,
+        translate=0.1,
+        scale=0.5,
+        shear=0.0,
+        perspective=0.0,
+        border=(0, 0),
+        aspect_ratio_thr=100,
+        wh_thr=2,
+        area_thr=0.1,
+        pre_transform=None,
     ):
         """
         Initializes RandomPerspective object with transformation parameters.
@@ -1091,6 +1016,9 @@ class RandomPerspective:
             border (Tuple[int, int]): Tuple specifying mosaic border (top/bottom, left/right).
             pre_transform (Callable | None): Function/transform to apply to the image before starting the random
                 transformation.
+            aspect_ratio_thr (float): Пороговое значение для соотношения сторон bounding box'а.
+            wh_thr (float): Порог ширины и высоты (в пикселях) для фильтрации слишком маленьких box'ов.
+            area_thr (float): Пороговое отношение площадей (после/до) для фильтрации чрезмерно обрезанных box'ов.
 
         Examples:
             >>> transform = RandomPerspective(degrees=10.0, translate=0.1, scale=0.5, shear=5.0)
@@ -1103,6 +1031,9 @@ class RandomPerspective:
         self.perspective = perspective
         self.border = border  # mosaic border
         self.pre_transform = pre_transform
+        self.aspect_ratio_thr = aspect_ratio_thr
+        self.wh_thr = wh_thr
+        self.area_thr = area_thr
 
     def affine_transform(self, img, border):
         """
@@ -1341,9 +1272,7 @@ class RandomPerspective:
         # Filter instances
         instances.scale(scale_w=scale, scale_h=scale, bbox_only=True)
         # Make the bboxes have the same scale with new_bboxes
-        i = self.box_candidates(
-            box1=instances.bboxes.T, box2=new_instances.bboxes.T, area_thr=0.01 if len(segments) else 0.10
-        )
+        i = self.box_candidates(box1=instances.bboxes.T, box2=new_instances.bboxes.T)
         labels["instances"] = new_instances[i]
         labels["cls"] = cls[i]
         labels["img"] = img
@@ -1354,7 +1283,7 @@ class RandomPerspective:
         # print(f"[Albumentations end]   {labels['img'].shape[0]}x{labels['img'].shape[1]}")
         return labels
 
-    def box_candidates(self, box1, box2, wh_thr=2, ar_thr=100, area_thr=0.1, eps=1e-16):
+    def box_candidates(self, box1, box2, eps=1e-16):
         """
         Compute candidate boxes for further processing based on size and aspect ratio criteria.
 
@@ -1390,7 +1319,13 @@ class RandomPerspective:
         w1, h1 = box1[2] - box1[0], box1[3] - box1[1]
         w2, h2 = box2[2] - box2[0], box2[3] - box2[1]
         ar = np.maximum(w2 / (h2 + eps), h2 / (w2 + eps))  # aspect ratio
-        return (w2 > wh_thr) & (h2 > wh_thr) & (w2 * h2 / (w1 * h1 + eps) > area_thr) & (ar < ar_thr)  # candidates
+        return (
+            (w2 > self.wh_thr)
+            & (h2 > self.wh_thr)
+            & (w2 * h2 / (w1 * h1 + eps) > self.area_thr)
+            & (ar < self.aspect_ratio_thr)
+        )  # candidates
+
 
 class CutMix(BaseMixTransform):
     """
@@ -1501,7 +1436,6 @@ class CutMix(BaseMixTransform):
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], axis=0)
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         return labels
-
 
 
 class RandomHSV:
@@ -1703,7 +1637,7 @@ class RandomHSV:
 #         if isinstance(labels, dict):
 #             frame1 = labels["img"]
 #             is_pil = False
-            
+
 #         elif isinstance(labels, Image.Image):
 #             frame1 = np.asarray(labels)
 #             is_pil = True
@@ -1745,7 +1679,7 @@ class RGB2TIR:
         >>> augmented_image = augmented_labels["img"]
     """
 
-    def __init__(self, gamma=2.0, alpha=1.0, beta=0, clahe_clip=2.0, clahe_tile=(8,8), p=0.5):
+    def __init__(self, gamma=2.0, alpha=1.0, beta=0, clahe_clip=2.0, clahe_tile=(8, 8), p=0.5):
         self.gamma = gamma
         self.alpha = alpha
         self.beta = beta
@@ -1786,26 +1720,25 @@ class RGB2TIR:
 
         # Step 1: Convert RGB image to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
+
         # Step 2: Apply CLAHE to enhance local contrast
         gray_clahe = self.clahe.apply(gray)
-        
+
         # Step 3: Normalize the CLAHE output to span the full 0-255 range
         gray_normalized = cv2.normalize(gray_clahe, None, 0, 255, cv2.NORM_MINMAX)
-        
+
         # Step 4: Apply gamma correction to adjust luminance
         if self.gamma != 1.0:
             inv_gamma = 1.0 / self.gamma
             # Create a lookup table for gamma correction
-            table = np.array([((i / 255.0) ** inv_gamma) * 255 
-                            for i in np.arange(256)]).astype("uint8")
+            table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in np.arange(256)]).astype("uint8")
             gray_corrected = cv2.LUT(gray_normalized, table)
         else:
             gray_corrected = gray_normalized.copy()
-        
+
         # Step 5: Apply contrast and brightness adjustments
         gray_adjusted = cv2.convertScaleAbs(gray_corrected, alpha=self.alpha, beta=self.beta)
-        
+
         # Step 6: Apply the chosen colormap for thermal visualization
         infrared = cv2.applyColorMap(gray_adjusted, cv2.COLORMAP_INFERNO)
 
@@ -2179,20 +2112,21 @@ class Albumentations:
     compression.
     """
 
-    def __init__(self, hyp, p=1.0, task='detect', args=None):
+    def __init__(self, hyp, p=1.0, task="detect", args=None, transforms=None, crop_bg: bool = False):
         """Initialize the transform object for YOLO bbox formatted params."""
         self.p = p
         self.hyp = hyp
         self.transform = None
-        assert task in ('detect', 'classify', 'segment', 'pose'), f'Got {task}, expected yolo-like tasks.'
+        self.crop_bg = crop_bg
+        assert task in ("detect", "classify", "segment", "pose"), f"Got {task}, expected yolo-like tasks."
         prefix = colorstr(f"albumentations for {task}: ")
 
         if ALBU_AVAILABLE:
             try:
-                from albumentations.core.composition import TransformsSeqType, TransformType, BaseCompose
+                from albumentations.core.composition import BaseCompose, TransformsSeqType, TransformType
                 from albumentations.core.transforms_interface import BasicTransform
 
-                check_version(A.__version__, "1.0.3", hard=True)  # version requirement
+                check_version(A.__version__, ">2.0.1", hard=True)  # version requirement
 
                 # List of possible spatial transforms
                 spatial_transforms = {
@@ -2242,6 +2176,7 @@ class Albumentations:
 
                 composition_transforms = {
                     "Compose",
+                    "ReplayCompose",
                     "OneOf",
                     "OneOrOther",
                     "SelectiveChannelTransform",
@@ -2263,67 +2198,56 @@ class Albumentations:
 
                 # Transforms
                 default_params = {
-                        "dropout_prob":0.1,
-                        "quality_lower": 75, 
-                        "max_factor": 1.1,
-                        "clip_limit": 2,
-                        "brightness": 0.3,
-                        "contrast":0.4, 
-                        "saturation":0.3, 
-                        "hue":0.3
-                    }
+                    "dropout_prob": 0.1,
+                    "quality_lower": 75,
+                    "max_factor": 1.1,
+                    "clip_limit": 2,
+                    "brightness": 0.3,
+                    "contrast": 0.4,
+                    "saturation": 0.3,
+                    "hue": 0.3,
+                }
                 self.augs_params = default_params
                 if args is not None:
-                    self.aug_params = {args.get(k,None) if args.get(k,None) is not None else default_params[k] for k in default_params.keys()}
-
-                T = [
-
-                    A.OneOf([
-                        RandomCropLarge(
-                            crop_size=self.hyp.crop_size,
-                            threshold=1024,
-                            p=0.1
+                    self.aug_params = {
+                        args.get(k, None) if args.get(k, None) is not None else default_params[k]
+                        for k in default_params.keys()
+                    }
+                if transforms is not None:
+                    T = [transforms] if not isinstance(transforms, list) else transforms
+                else:
+                    T = [
+                        A.PixelDropout(
+                            dropout_prob=self.hyp.pixel_dropout_prob,
+                            drop_value=self.hyp.pixel_drop_value,
+                            p=self.hyp.p_pixeldrop,
+                            per_channel=True,
                         ),
-                        SafeFixedRandomCrop(
-                            size=self.hyp.crop_size,
-                            p=0.9
+                        A.OneOf(
+                            [
+                                A.RandomRain(p=self.hyp.p_rain),
+                                A.RandomSnow(p=self.hyp.p_snow, brightness_coeff=2, snow_point_range=(0, 0.15)),
+                            ],
+                            p=0.1,
                         ),
-                    ], p=1.0),
-
-                    A.PixelDropout(
-                        dropout_prob=self.hyp.pixel_dropout_prob,
-                        drop_value=self.hyp.pixel_drop_value,
-                        per_channel=True,
-                        p=0.3
-                    ),
-
-                    A.RandomSnow(
-                        snow_point_range=(0.1, self.hyp.snow_max),
-                        brightness_coeff=self.hyp.snow_bright,
-                        p=self.hyp.p_fog_snow,
-                    ),
-
-                    A.OneOf([
-                        A.CLAHE(clip_limit=self.hyp.clahe_clip, p=1.0),
                         A.RandomBrightnessContrast(
-                            brightness_limit=(-self.hyp.bright_limit, self.hyp.bright_limit),
-                            contrast_limit=(-self.hyp.contrast_limit, self.hyp.contrast_limit),
-                            p=1.0,
+                            brightness_limit=self.hyp.bright_limit,
+                            contrast_limit=self.hyp.contrast_limit,
+                            p=self.hyp.p_bricon,
                         ),
-                    ], p=self.hyp.p_color),
-
-                    A.ToGray(p=self.hyp.p_gray),
-                ]
+                        A.Sharpen(p=self.hyp.p_sharpen),
+                        A.ToGray(p=self.hyp.p_gray),
+                    ]
 
                 # Compose transforms
-                self.contains_spatial = False if task == 'classify' else check_contains_spatial(T)
+                self.contains_spatial = False if task == "classify" else check_contains_spatial(T)
                 self.transform = (
-                    # A.Compose(
-                    #     T,
-                    #     bbox_params=A.BboxParams(format="yolo", label_fields=["class_labels"], min_visibility=0.6),
-                    #     keypoint_params=A.KeypointParams(format="xy", remove_invisible=True),
-                    # )
-                    A.Compose(T, bbox_params=A.BboxParams(format="yolo", filter_invalid_bboxes=True, label_fields=["class_labels"], min_visibility=0.5))
+                    A.Compose(
+                        T,
+                        bbox_params=A.BboxParams(
+                            format="yolo", label_fields=["class_labels"], min_visibility=0.5, filter_invalid_bboxes=True
+                        ),
+                    )
                     if self.contains_spatial
                     else A.Compose(T)
                 )
@@ -2333,113 +2257,6 @@ class Albumentations:
                 LOGGER.info(f"{prefix}{e}")
         else:
             LOGGER.info("Albumentations is not installed, skip.")
-           
-    # def __call__(self, labels):
-    #     # Generates object detections and returns a dictionary with detection results.
-    #     if self.transform is None or random.random() > self.p:
-    #         return labels
-
-    #     if not self.contains_spatial:
-    #         labels["img"] = self.transform(image=labels["img"])["image"]
-    #         return labels
-
-    #     cls = labels["cls"]
-    #     if len(cls) == 0:
-    #         return labels
-
-    #     im = labels["img"]
-    #     h, w = im.shape[:2]
-    #     instances = labels["instances"]
-    #     masks = self._get_masks(instances, h, w)
-    #     keypoints, n_obj, _, points = self._get_keypoints(instances,  h, w)
-    #     instances.convert_bbox("xywh")
-    #     instances.normalize(*im.shape[:2][::-1])
-    #     bboxes = instances.bboxes
-
-    #     if keypoints is not None:
-    #         new = self.transform(
-    #             image=im, bboxes=bboxes, masks=masks, class_labels=cls, keypoints=keypoints, indices=np.arange(len(bboxes)))
-    #     else:
-    #         new = self.transform(
-    #             image=im, bboxes=bboxes, masks=masks, class_labels=cls, indices=np.arange(len(bboxes)))
-
-    #     if len(new['class_labels']) > 0:
-    #         labels = self._update_labels(labels, new, n_obj, points, h, w)
-            
-    #     return labels
-
-    # def _get_masks(self, instances, h, w):
-    #     # Get masks of images from  instances. 
-    #     if len(instances.segments) > 0:
-    #         return polygons2masks((h, w), instances.segments, color=1, downsample_ratio=1)
-    #     return None
-
-    # def _get_keypoints(self, instances, h, w):
-    #     # Get keypoints of images from  instances. 
-    #     if instances.keypoints is not None:
-    #         keypoints = np.copy(instances.keypoints)
-    #         keypoints =  self._shift_keypoints(keypoints, h, w)
-    #         n_obj, num_kps, points = keypoints.shape
-    #         keypoints = keypoints.reshape(-1, 3)
-    #         return keypoints,  n_obj, num_kps, points
-    #     return None, None, None, None
-    
-    # @staticmethod
-    # @njit(fastmath=True) 
-    # def _shift_keypoints(keypoints, height, width):
-        
-    #     keypoints[...,0] = np.clip(keypoints[...,0], 0, width - 1) 
-    #     keypoints[...,1] = np.clip(keypoints[...,1], 0, height - 1) 
-        
-    #     return keypoints
-    
-    # @staticmethod
-    # @njit(fastmath=True) 
-    # def _bounding_segments(segments_out):
-    #     bboxes = np.empty((segments_out.shape[0], 4), dtype=np.float64)
-    #     for i, polygon in enumerate(segments_out):
-    #         x_min, y_min = np.min(polygon[:,0]), np.min(polygon[:,1])
-    #         x_max, y_max = np.max(polygon[:,0]), np.max(polygon[:,1])
-            
-    #         w = x_max - x_min
-    #         h = y_max - y_min
-    #         x_center, y_center = (x_max+x_min)/2, (y_max+y_min)/2
-            
-    #         bboxes[i] = [x_center, y_center, w, h]
-    #     return bboxes
-
-    # def _update_labels(self, labels, new, n_obj, points, h, w):
-    #     # Update labels with transforms. 
-    #     labels['img'] =  new["image"]
-    #     labels['cls'] = np.array(new['class_labels'])
-    #     bboxes_new = np.array(new['bboxes'], dtype=np.float32)
-    #     segments_out = []
-    #     if new['masks'] is not None:
-    #         masks_new = np.array(new['masks'])[new['indices']]
-    #         segments_new = masks2segments(masks_new, strategy='largest') if masks_new is not None else []
-    #         non_empty = [s.shape[0] != 0 for s in segments_new]
-    #         segments_out = [segment for segment, flag in zip(segments_new, non_empty) if flag]
-    #         bboxes_out = bboxes_new[non_empty]        
-    #     else:
-    #         bboxes_out = bboxes_new
-
-    #     if len(segments_out) > 0:
-    #         segments_out = resample_segments(segments_out)
-    #         segments_out = np.stack(segments_out, axis=0)
-    #         segments_out /= (w, h)
-            
-    #         # change bounding of bboxes
-    #         correct_bboxes = self._bounding_segments(segments_out)
-    #         labels["instances"].update(bboxes=correct_bboxes, segments=segments_out)
-    #         return labels
-            
-    #     if n_obj is None:
-    #         labels["instances"].update(bboxes=bboxes_out)
-    #     else:
-    #         keypoints = np.array(new['keypoints'], dtype=np.float32).reshape(n_obj, -1, points)
-    #         labels["instances"].update(bboxes=bboxes_out, keypoints=keypoints)
-
-    #     return labels
 
     def __call__(self, labels):
         """
@@ -2505,6 +2322,7 @@ class Albumentations:
                 labels = Image.fromarray(self.transform(image=np.asarray(labels))["image"])
             else:
                 raise TypeError(type(labels))
+        # print(f"[Albumentations end]   {labels['img'].shape[0]}x{labels['img'].shape[1]}")
 
         return labels
 
@@ -2892,9 +2710,12 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         scale=hyp.scale,
         shear=hyp.shear,
         perspective=hyp.perspective,
+        aspect_ratio_thr=hyp.aspect_ratio_thr,
+        wh_thr=hyp.wh_thr,
+        area_thr=hyp.area_thr,
         pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz)),
     )
-    
+
     pre_transform = Compose([mosaic, affine])
     if hyp.copy_paste_mode == "flip":
         pre_transform.insert(1, CopyPaste(p=hyp.copy_paste, mode=hyp.copy_paste_mode))
@@ -2915,53 +2736,28 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
             LOGGER.warning("WARNING ⚠️ No 'flip_idx' array defined in data.yaml, setting augmentation 'fliplr=0.0'")
         elif flip_idx and (len(flip_idx) != kpt_shape[0]):
             raise ValueError(f"data.yaml flip_idx={flip_idx} length must be equal to kpt_shape[0]={kpt_shape[0]}")
-    
+
     albu_args = {
-                "dropout_prob":hyp.albu_dropout_prob if hasattr(hyp, 'albu_dropout_prob') else None,
-                "quality_lower":hyp.albu_quality_lower if hasattr(hyp, 'albu_quality_lower') else None,
-                "max_factor":hyp.albu_max_factor if hasattr(hyp, 'albu_max_factor') else None,
-                "clip_limit":hyp.albu_clip_limit if hasattr(hyp, 'albu_clip_limit') else None,
-                "brightness":hyp.albu_brightness if hasattr(hyp, 'albu_brightness') else None,
-                "contrast":hyp.albu_contrast if hasattr(hyp, 'albu_contrast') else None,
-                "saturation":hyp.albu_saturation if hasattr(hyp, 'albu_saturation') else None,
-                "hue":hyp.albu_hue if hasattr(hyp, 'albu_hue') else None,
-            }
+        "dropout_prob": hyp.albu_dropout_prob if hasattr(hyp, "albu_dropout_prob") else None,
+        "quality_lower": hyp.albu_quality_lower if hasattr(hyp, "albu_quality_lower") else None,
+        "max_factor": hyp.albu_max_factor if hasattr(hyp, "albu_max_factor") else None,
+        "clip_limit": hyp.albu_clip_limit if hasattr(hyp, "albu_clip_limit") else None,
+        "brightness": hyp.albu_brightness if hasattr(hyp, "albu_brightness") else None,
+        "contrast": hyp.albu_contrast if hasattr(hyp, "albu_contrast") else None,
+        "saturation": hyp.albu_saturation if hasattr(hyp, "albu_saturation") else None,
+        "hue": hyp.albu_hue if hasattr(hyp, "albu_hue") else None,
+    }
     return Compose(
         [
             pre_transform,
             MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
-            Albumentations(hyp=hyp, p=1.0, args=albu_args),
-            #RandomGlitche(p=0.6),
+            Albumentations(p=1.0, hyp=hyp, args=albu_args),
+            # RandomGlitche(p=0.6),
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
             RandomFlip(direction="vertical", p=hyp.flipud),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
         ]
     )  # transforms
-    # alb = Albumentations(hyp=hyp, p=1.0)
-    # resize = LetterBox(new_shape=(imgsz, imgsz),
-    #                    auto=False,        # строго imgsz×imgsz
-    #                    scaleFill=False,  # паддинги вместо растяжения
-    #                    scaleup=True,      # допускаем upscale
-    #                    center=True)
-
-    # rp = RandomPerspective(degrees=hyp.degrees,
-    #                        translate=hyp.translate,
-    #                        scale=hyp.scale,
-    #                        shear=hyp.shear,
-    #                        perspective=hyp.perspective,
-    #                        border=(0, 0),      # без мозаичных бордеров
-    #                        pre_transform=None) # LetterBox уже применили
-
-    # misc = Compose([
-    #     MixUp(dataset, p=hyp.mixup),
-    #     # CutMix(dataset, p=hyp.cutmix),
-    #     RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
-    #     RandomFlip(direction="vertical",   p=hyp.flipud),
-    #     RandomFlip(direction="horizontal", p=hyp.fliplr,
-    #                flip_idx=dataset.data.get("flip_idx", [])),
-    # ])
-
-    # return Compose([ resize, rp, misc])
 
 
 # Classification augmentations -----------------------------------------------------------------------------------------
@@ -3003,7 +2799,6 @@ def classify_transforms(
     # else:
     #     scale_size = math.floor(size / crop_fraction)
     #     scale_size = (scale_size, scale_size)
-
     # # Aspect ratio is preserved, crops center within image, no borders are added, image is lost
     # if scale_size[0] == scale_size[1]:
     #     # Simple case, use torchvision built-in Resize with the shortest edge mode (scalar size arg)
@@ -3041,14 +2836,14 @@ def classify_augmentations(
     force_color_jitter=False,
     erasing=0.0,
     interpolation="BILINEAR",
-    albu_dropout_prob = 0.1,
-    albu_quality_lower = 75,
-    albu_max_factor = 1.1,
-    albu_clip_limit = 2,
-    albu_brightness = 0.3,
-    albu_contrast = 0.4,
-    albu_saturation = 0.3 ,
-    albu_hue = 0.3,
+    albu_dropout_prob=0.1,
+    albu_quality_lower=75,
+    albu_max_factor=1.1,
+    albu_clip_limit=2,
+    albu_brightness=0.3,
+    albu_contrast=0.4,
+    albu_saturation=0.3,
+    albu_hue=0.3,
 ):
     """
     Creates a composition of image augmentation transforms for classification tasks.
@@ -3097,7 +2892,10 @@ def classify_augmentations(
     ratio = tuple(ratio or (3.0 / 4.0, 4.0 / 3.0))  # default imagenet ratio range
     interpolation = getattr(T.InterpolationMode, interpolation)
     size = (size, size) if isinstance(size, int) else size
-    primary_tfl = [ClassifyLetterBox(size), T.RandomResizedCrop(size, scale=scale, ratio=ratio, interpolation=interpolation)]
+    primary_tfl = [
+        ClassifyLetterBox(size),
+        T.RandomResizedCrop(size, scale=scale, ratio=ratio, interpolation=interpolation),
+    ]
     # primary_tfl = [T.Resize(size), T.RandomResizedCrop(size, scale=scale, ratio=ratio, interpolation=interpolation)]
     if hflip > 0.0:
         primary_tfl.append(T.RandomHorizontalFlip(p=hflip))
@@ -3139,19 +2937,19 @@ def classify_augmentations(
     if not disable_color_jitter:
         secondary_tfl.append(T.ColorJitter(brightness=hsv_v, contrast=hsv_v, saturation=hsv_s, hue=hsv_h))
 
-    albu_args = {
-                "dropout_prob":albu_dropout_prob,
-                "quality_lower":albu_quality_lower,
-                "max_factor":albu_max_factor,
-                "clip_limit":albu_clip_limit,
-                "brightness":albu_brightness,
-                "contrast":albu_contrast,
-                "saturation":albu_saturation,
-                "hue":albu_hue,
-            }
+    # albu_args = {
+    #     "dropout_prob": albu_dropout_prob,
+    #     "quality_lower": albu_quality_lower,
+    #     "max_factor": albu_max_factor,
+    #     "clip_limit": albu_clip_limit,
+    #     "brightness": albu_brightness,
+    #     "contrast": albu_contrast,
+    #     "saturation": albu_saturation,
+    #     "hue": albu_hue,
+    # }
     final_tfl = [
         # T.RandomChoice([RandomGlitche(p=1), Albumentations(p=1., task='classify', args=albu_args)], p=[1,1]),
-        #T.RandomApply([RandomGlitche(p=1)], p=0.5),
+        # T.RandomApply([RandomGlitche(p=1)], p=0.5),
         T.RandomApply([T.Grayscale(num_output_channels=3)], p=0.5),
         T.ToTensor(),
         T.Normalize(mean=torch.tensor(mean), std=torch.tensor(std)),
