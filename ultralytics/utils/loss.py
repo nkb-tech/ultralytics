@@ -243,32 +243,34 @@ class KeypointLoss(nn.Module):
 class v8DetectionLoss:
     """Criterion class for computing training losses."""
 
-    def __init__(self, model, tal_topk=10):  # model must be de-paralleled
+    def __init__(self, model, tal_topk=10, clf_loss_weights: list[list[float]] | None = None):  # model must be de-paralleled
         """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
 
         m = model.model[-1]  # Detect() module
-        self.num_classes_per_head = getattr(m, "num_classes_per_head", None)
-        self.is_multihead = self.num_classes_per_head is not None
-        if self.is_multihead:
-            self.bce = nn.ModuleList(nn.BCEWithLogitsLoss(reduction="none") for _ in self.num_classes_per_head)
-            self.bce_all = nn.BCEWithLogitsLoss(reduction="none")
-            self.class_offsets = [0]
-            for nc_i in self.num_classes_per_head:
-                self.class_offsets.append(self.class_offsets[-1] + nc_i)
-        else:
-            self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.nc: list[int] = m.nc
+        assert len(self.nc) >= 1, "nc must be at least 1."
+        assert all(weight > 0 for weight in clf_loss_weights), "Loss weights must be positive."
+        assert clf_loss_weights is None or len(clf_loss_weights) == len(self.nc), \
+            f"Loss weights must be provided for each class, got {len(clf_loss_weights)} weights for {len(self.nc)} classes."
+        self.clf_loss_weights = clf_loss_weights if clf_loss_weights is not None else [1.0] * len(self.nc)
+        self.bce = nn.ModuleList(
+            nn.BCEWithLogitsLoss(
+                reduction="none",
+                weight=torch.tensor(self.clf_loss_weights[i], device=device),
+            )
+            for i in range(self.nc)
+        )
         self.hyp = h
         self.stride = m.stride  # model strides
-        self.nc = m.nc  # number of classes
-        self.no = m.nc + m.reg_max * 4 if not self.is_multihead else m.no
+        self.no = sum(self.nc) + m.reg_max * 4
         self.reg_max = m.reg_max
         self.device = device
 
         self.use_dfl = m.reg_max > 1
         
-        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
+        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc[0], alpha=0.5, beta=6.0)
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
@@ -276,18 +278,18 @@ class v8DetectionLoss:
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""
         nl, ne = targets.shape
         if nl == 0:
-            out = torch.zeros(batch_size, 0, ne - 1, device=self.device)
+            out = torch.zeros(batch_size, 0, ne - 1, device=self.device, dtype=targets.dtype)
         else:
             i = targets[:, 0]  # image index
             _, counts = i.unique(return_counts=True)
             counts = counts.to(dtype=torch.int32)
-            out = torch.zeros(batch_size, counts.max(), ne - 1, device=self.device)
+            out = torch.zeros(batch_size, counts.max(), ne - 1, device=self.device, dtype=targets.dtype)
             for j in range(batch_size):
                 matches = i == j
                 n = matches.sum()
                 if n:
                     out[j, :n] = targets[matches, 1:]
-            out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
+            out[..., -4:] = xywh2xyxy(out[..., -4:].mul_(scale_tensor))
         return out
 
     def bbox_decode(self, anchor_points, pred_dist):
@@ -299,27 +301,42 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
+    def cls_loss(self, pred_scores, target_scores):
+        """Calculate the classification loss."""
+        if isinstance(self.bce, nn.ModuleList):
+            start = 0
+            cls_losses = []
+            for clf_loss_fn, nc_i in zip(self.bce, self.nc):
+                cls_loss = clf_loss_fn(
+                    input=pred_scores[:, :, start:start + nc_i],
+                    target=target_scores[:, :, nc_i:nc_i + 1],
+                ).sum()
+                cls_losses.append(cls_loss)
+                start += nc_i
+        else:
+            raise NotImplementedError(f"self.bce must be a nn.ModuleList, got {type(self.bce)}")
+
+        return sum(cls_losses)
+
     def __call__(self, preds, batch):
-        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
+        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size.
+
+        Args:
+            preds: list of tensors, each tensor is a feature map. (B, C, reg_max * 4 + sum(1 + nc_i))
+            batch: dict, containing batch information.
+
+        Returns:
+            loss: tensor, the sum of the loss for box, cls and dfl multiplied by batch size
+        
+        """
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
         feats = preds[1] if isinstance(preds, tuple) else preds
-        x_cat = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2)
-        pred_distri = x_cat[:, : self.reg_max * 4]
-        pred_cls_all = x_cat[:, self.reg_max * 4 :]
+        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.reg_max * 4, self.nc), 1
+        )
 
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
-        pred_cls_all = pred_cls_all.permute(0, 2, 1).contiguous()
-
-        if self.is_multihead:
-            start = 0
-            cls_parts = []
-            for nc_i in self.num_classes_per_head:
-                start += 1  # skip conf
-                cls_parts.append(pred_cls_all[:, :, start : start + nc_i])
-                start += nc_i
-            pred_scores = torch.cat(cls_parts, 2)
-        else:
-            pred_scores = pred_cls_all
 
         dtype = pred_scores.dtype
         batch_size = pred_scores.shape[0]
@@ -339,7 +356,7 @@ class v8DetectionLoss:
 
         target_labels, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
-            pred_scores.detach().sigmoid(),
+            pred_scores[:, :, :self.nc[0]].detach().sigmoid(), # take only the first class scores
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
             gt_labels,
@@ -348,61 +365,9 @@ class v8DetectionLoss:
         )
 
         target_scores_sum = max(target_scores.sum(), 1)
+        target_scores = target_scores.to(dtype)
 
-        # cls loss
-        if isinstance(self.bce, (nn.BCEWithLogitsLoss, FocalLoss, nn.ModuleList)):
-            if self.is_multihead:
-                start = 0
-                cls_losses = []
-                for i, nc_i in enumerate(self.num_classes_per_head):
-                    cls_pred = pred_scores[:, :, start:start + nc_i]
-                    cls_tgt = target_scores[:, :, start:start + nc_i]
-                    cls_loss = self.bce[i](cls_pred, cls_tgt.to(dtype)).sum()
-                    cls_losses.append(cls_loss)
-                    LOGGER.debug(f"head{i}_cls_loss: {cls_loss.item()}")
-                    start += nc_i
-                loss[1] = sum(cls_losses) / target_scores_sum
-            else:
-                loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
-        elif isinstance(self.bce, (VarifocalLoss, QualityfocalLoss)):
-            targets_onehot = torch.zeros(
-                (target_labels.shape[0], target_labels.shape[1], self.nc),
-                dtype=torch.int64,
-                device=target_labels.device,
-            )  # (b, h*w, nc)
-            cls_iou_targets = None
-            if fg_mask.sum():
-                pos_ious = bbox_iou(pred_bboxes, target_bboxes / stride_tensor, xywh=False).clamp(min=1e-6).detach()
-                # 10.0x Faster than torch.one_hot
-                targets_onehot.scatter_(2, target_labels.unsqueeze(-1), 1)
-                cls_iou_targets = pos_ious * targets_onehot
-                fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.nc)  # (b, h*w, 80)
-                cls_iou_targets = torch.where(fg_scores_mask > 0, cls_iou_targets, 0)
-                if isinstance(self.bce, QualityfocalLoss):
-                    targets_onehot = torch.where(fg_scores_mask > 0, targets_onehot, 0)
-            elif isinstance(self.bce, QualityfocalLoss):
-                cls_iou_targets = targets_onehot.clone()
-
-            if self.is_multihead:
-                start = 0
-                cls_losses = []
-                for i, nc_i in enumerate(self.num_classes_per_head):
-                    cls_pred = pred_scores[:, :, start:start + nc_i]
-                    cls_tgt = cls_iou_targets[:, :, start:start + nc_i]
-                    mask = targets_onehot[:, :, start:start + nc_i]
-                    cls_loss = self.bce[i](pred=cls_pred, label=cls_tgt.to(dtype), gt_target_pos_mask=mask.to(torch.bool)).sum()
-                    cls_losses.append(cls_loss)
-                    LOGGER.debug(f"head{i}_cls_loss: {cls_loss.item()}")
-                    start += nc_i
-                loss[1] = sum(cls_losses) / max(fg_mask.sum(), 1)
-            else:
-                loss[1] = self.bce(
-                    pred=pred_scores,
-                    label=cls_iou_targets.to(dtype),
-                    gt_target_pos_mask=targets_onehot.to(torch.bool),
-                ).sum() / max(fg_mask.sum(), 1)
-        else:
-            raise NotImplementedError()
+        loss[1] = self.cls_loss(pred_scores, target_scores) / target_scores_sum
 
         # Bbox loss
         if fg_mask.sum():
@@ -432,21 +397,13 @@ class v8SegmentationLoss(v8DetectionLoss):
         feats, pred_masks, proto = preds if len(preds) == 3 else preds[1]
         batch_size, _, mask_h, mask_w = proto.shape  # batch size, number of masks, mask height, mask width
         x_cat = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2)
-        pred_distri = x_cat[:, : self.reg_max * 4]
-        pred_cls_all = x_cat[:, self.reg_max * 4 :]
+        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.reg_max * 4, self.nc), 1
+        )
 
+        # B, grids, ..
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
-        pred_cls_all = pred_cls_all.permute(0, 2, 1).contiguous()
-        if self.is_multihead:
-            start = 0
-            cls_parts = []
-            for nc_i in self.num_classes_per_head:
-                start += 1
-                cls_parts.append(pred_cls_all[:, :, start : start + nc_i])
-                start += nc_i
-            pred_scores = torch.cat(cls_parts, 2)
-        else:
-            pred_scores = pred_cls_all
         pred_masks = pred_masks.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
@@ -473,7 +430,7 @@ class v8SegmentationLoss(v8DetectionLoss):
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
 
         _, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
-            pred_scores.detach().sigmoid(),
+            pred_score[:, :, :self.nc[0]].detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
             gt_labels,
@@ -482,22 +439,7 @@ class v8SegmentationLoss(v8DetectionLoss):
         )
 
         target_scores_sum = max(target_scores.sum(), 1)
-
-        # Cls loss
-        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        if self.is_multihead:
-            start = 0
-            cls_losses = []
-            for i, nc_i in enumerate(self.num_classes_per_head):
-                cls_pred = pred_scores[:, :, start:start + nc_i]
-                cls_tgt = target_scores[:, :, start:start + nc_i]
-                cls_loss = self.bce[i](cls_pred, cls_tgt.to(dtype)).sum()
-                cls_losses.append(cls_loss)
-                LOGGER.debug(f"head{i}_cls_loss: {cls_loss.item()}")
-                start += nc_i
-            loss[2] = sum(cls_losses) / target_scores_sum
-        else:
-            loss[2] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss[1] = self.cls_loss(pred_scores, target_scores) / target_scores_sum
 
         if fg_mask.sum():
             # Bbox loss
@@ -639,22 +581,13 @@ class v8PoseLoss(v8DetectionLoss):
         """Calculate the total loss and detach it."""
         loss = torch.zeros(5, device=self.device)  # box, cls, dfl, kpt_location, kpt_visibility
         feats, pred_kpts = preds if isinstance(preds[0], list) else preds[1]
-        x_cat = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2)
-        pred_distri = x_cat[:, : self.reg_max * 4]
-        pred_cls_all = x_cat[:, self.reg_max * 4 :]
+        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.reg_max * 4, self.nc), 1
+        )
 
+        # B, grids, ..
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
-        pred_cls_all = pred_cls_all.permute(0, 2, 1).contiguous()
-        if self.is_multihead:
-            start = 0
-            cls_parts = []
-            for nc_i in self.num_classes_per_head:
-                start += 1
-                cls_parts.append(pred_cls_all[:, :, start : start + nc_i])
-                start += nc_i
-            pred_scores = torch.cat(cls_parts, 2)
-        else:
-            pred_scores = pred_cls_all
         pred_kpts = pred_kpts.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
@@ -674,7 +607,7 @@ class v8PoseLoss(v8DetectionLoss):
         pred_kpts = self.kpts_decode(anchor_points, pred_kpts.view(batch_size, -1, *self.kpt_shape))  # (b, h*w, 17, 3)
 
         _, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
-            pred_scores.detach().sigmoid(),
+            pred_scores[:, :, :self.nc[0]].detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
             gt_labels,
@@ -683,22 +616,7 @@ class v8PoseLoss(v8DetectionLoss):
         )
 
         target_scores_sum = max(target_scores.sum(), 1)
-
-        # Cls loss
-        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        if self.is_multihead:
-            start = 0
-            cls_losses = []
-            for i, nc_i in enumerate(self.num_classes_per_head):
-                cls_pred = pred_scores[:, :, start:start + nc_i]
-                cls_tgt = target_scores[:, :, start:start + nc_i]
-                cls_loss = self.bce[i](cls_pred, cls_tgt.to(dtype)).sum()
-                cls_losses.append(cls_loss)
-                LOGGER.debug(f"head{i}_cls_loss: {cls_loss.item()}")
-                start += nc_i
-            loss[3] = sum(cls_losses) / target_scores_sum
-        else:
-            loss[3] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss[3] = self.cls_loss(pred_scores, target_scores) / target_scores_sum
 
         # Bbox loss
         if fg_mask.sum():
@@ -798,7 +716,7 @@ class v8PoseLoss(v8DetectionLoss):
 
         return kpts_loss, kpts_obj_loss
 
-
+# TODO: support mutlti-task classification loss
 class v8ClassificationLoss:
     """Criterion class for computing training losses."""
     def __init__(self, weights = None):
@@ -841,22 +759,13 @@ class v8OBBLoss(v8DetectionLoss):
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
         feats, pred_angle = preds if isinstance(preds[0], list) else preds[1]
         batch_size = pred_angle.shape[0]  # batch size, number of masks, mask height, mask width
-        x_cat = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2)
-        pred_distri = x_cat[:, : self.reg_max * 4]
-        pred_cls_all = x_cat[:, self.reg_max * 4 :]
+        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.reg_max * 4, self.nc), 1
+        )
 
+        # b, grids, ..
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
-        pred_cls_all = pred_cls_all.permute(0, 2, 1).contiguous()
-        if self.is_multihead:
-            start = 0
-            cls_parts = []
-            for nc_i in self.num_classes_per_head:
-                start += 1
-                cls_parts.append(pred_cls_all[:, :, start : start + nc_i])
-                start += nc_i
-            pred_scores = torch.cat(cls_parts, 2)
-        else:
-            pred_scores = pred_cls_all
         pred_angle = pred_angle.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
@@ -888,7 +797,7 @@ class v8OBBLoss(v8DetectionLoss):
         # Only the first four elements need to be scaled
         bboxes_for_assigner[..., :4] *= stride_tensor
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
-            pred_scores.detach().sigmoid(),
+            pred_scores[:, :, :self.nc[0]].detach().sigmoid(), # take only the first class scores
             bboxes_for_assigner.type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
             gt_labels,
@@ -897,22 +806,7 @@ class v8OBBLoss(v8DetectionLoss):
         )
 
         target_scores_sum = max(target_scores.sum(), 1)
-
-        # Cls loss
-        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        if self.is_multihead:
-            start = 0
-            cls_losses = []
-            for i, nc_i in enumerate(self.num_classes_per_head):
-                cls_pred = pred_scores[:, :, start:start + nc_i]
-                cls_tgt = target_scores[:, :, start:start + nc_i]
-                cls_loss = self.bce[i](cls_pred, cls_tgt.to(dtype)).sum()
-                cls_losses.append(cls_loss)
-                LOGGER.debug(f"head{i}_cls_loss: {cls_loss.item()}")
-                start += nc_i
-            loss[1] = sum(cls_losses) / target_scores_sum
-        else:
-            loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss[1] = self.cls_loss(pred_scores, target_scores) / target_scores_sum
 
         # Bbox loss
         if fg_mask.sum():

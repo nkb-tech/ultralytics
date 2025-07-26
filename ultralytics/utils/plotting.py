@@ -325,63 +325,136 @@ class Annotator:
             lineType=cv2.LINE_AA,
         )
 
-    def box_label(self, box, label="", color=(128, 128, 128), txt_color=(255, 255, 255), rotated=False):
+    def box_label(
+        self,
+        box,
+        labels: list[str]=["", ],
+        color: tuple[int, int, int]=(128, 128, 128),
+        txt_color: tuple[int, int, int]=(255, 255, 255),
+        pix_gap: int=1,
+    ):
         """
-        Draws a bounding box to image with label.
+        Draws a bounding box to image with multiple labels.
 
         Args:
             box (tuple): The bounding box coordinates (x1, y1, x2, y2).
-            label (str): The text label to be displayed.
+            labels (list[str]): List of the text labels to be displayed.
             color (tuple, optional): The background color of the rectangle (B, G, R).
             txt_color (tuple, optional): The color of the text (R, G, B).
-            rotated (bool, optional): Variable used to check if task is OBB
+            pix_gap (int, optional): The gap between the labels in pixels.
+
+        Examples:
+            >>> from ultralytics.utils.plotting import Annotator
+            >>> im0 = cv2.imread("test.png")
+            >>> annotator = Annotator(im0, line_width=10)
+            >>> annotator.box_label(box=[10, 20, 30, 40], labels=["person", "car"])
+            >>> annotator.show()
         """
         txt_color = self.get_txt_color(color, txt_color)
         if isinstance(box, torch.Tensor):
             box = box.tolist()
-        if self.pil or not is_ascii(label):
-            if rotated:
-                p1 = box[0]
-                self.draw.polygon([tuple(b) for b in box], width=self.lw, outline=color)  # PIL requires tuple box
-            else:
-                p1 = (box[0], box[1])
-                self.draw.rectangle(box, width=self.lw, outline=color)  # box
-            if label:
-                w, h = self.font.getsize(label)  # text width, height
-                outside = p1[1] >= h  # label fits outside box
-                if p1[0] > self.im.size[0] - w:  # size is (w, h), check if label extend beyond right side of image
-                    p1 = self.im.size[0] - w, p1[1]
-                self.draw.rectangle(
-                    (p1[0], p1[1] - h if outside else p1[1], p1[0] + w + 1, p1[1] + 1 if outside else p1[1] + h + 1),
-                    fill=color,
-                )
-                # self.draw.text((box[0], box[1]), label, fill=txt_color, font=self.font, anchor='ls')  # for PIL>8.0
-                self.draw.text((p1[0], p1[1] - h if outside else p1[1]), label, fill=txt_color, font=self.font)
-        else:  # cv2
-            if rotated:
-                p1 = [int(b) for b in box[0]]
-                cv2.polylines(self.im, [np.asarray(box, dtype=int)], True, color, self.lw)  # cv2 requires nparray box
-            else:
-                p1, p2 = (int(box[0]), int(box[1])), (int(box[2]), int(box[3]))
-                cv2.rectangle(self.im, p1, p2, color, thickness=self.lw, lineType=cv2.LINE_AA)
-            if label:
-                w, h = cv2.getTextSize(label, 0, fontScale=self.sf, thickness=self.tf)[0]  # text width, height
-                h += 3  # add pixels to pad text
-                outside = p1[1] >= h  # label fits outside box
-                if p1[0] > self.im.shape[1] - w:  # shape is (h, w), check if label extend beyond right side of image
-                    p1 = self.im.shape[1] - w, p1[1]
-                p2 = p1[0] + w, p1[1] - h if outside else p1[1] + h
-                cv2.rectangle(self.im, p1, p2, color, -1, cv2.LINE_AA)  # filled
-                cv2.putText(
-                    self.im,
-                    label,
-                    (p1[0], p1[1] - 2 if outside else p1[1] + h - 1),
-                    0,
-                    self.sf,
-                    txt_color,
-                    thickness=self.tf,
-                    lineType=cv2.LINE_AA,
-                )
+
+        multi_points = isinstance(box[0], list)  # multiple points with shape (n, 2)
+        p1 = [int(b) for b in box[0]] if multi_points else (int(box[0]), int(box[1]))
+
+        # Draw bounding box
+        if self.pil:
+            self.draw.polygon(
+                [tuple(b) for b in box],
+                width=self.lw,
+                outline=color,
+            ) if multi_points else self.draw.rectangle(
+                xy=box,
+                width=self.lw,
+                outline=color,
+            )
+        else:
+            cv2.polylines(
+                img=self.im,
+                pts=[np.asarray(box, dtype=int)],
+                isClosed=True,
+                color=color,
+                thickness=self.lw,
+                lineType=cv2.LINE_AA,
+            ) if multi_points else cv2.rectangle(
+                img=self.im,
+                pt1=p1,
+                pt2=(int(box[2]), int(box[3])),
+                color=color,
+                thickness=self.lw,
+                lineType=cv2.LINE_AA,
+            )
+
+        # Draw labels
+        if labels:
+            current_y = p1[1]  # start at top edge of the box
+
+            for label in labels:
+                # Measure text size
+                if self.pil:
+                    w, h = self.font.getsize(label)
+                else:
+                    (w, h), _ = cv2.getTextSize(
+                        text=label,
+                        fontFace=0,
+                        fontScale=self.sf,
+                        thickness=self.tf,
+                    )
+                    h += 3  # add pixels for cv2 baseline
+
+                # Position label above previous one with gap
+                label_y = current_y - h - pix_gap
+                rect_y1 = label_y
+                rect_y2 = label_y + h + 1
+
+                # Prevent drawing outside top of image
+                if rect_y1 < 0:
+                    shift = -rect_y1
+                    rect_y1 += shift
+                    rect_y2 += shift
+                    label_y += shift
+
+                # Clamp X so text stays in image bounds
+                max_x = self.im.size[0] if self.pil else self.im.shape[1]
+                label_x = min(p1[0], max_x - w - 1)
+
+                if self.pil:
+                    # Draw background rectangle and text using PIL
+                    self.draw.rectangle(
+                        xy=(label_x, rect_y1),
+                        width=w + 1,
+                        height=rect_y2 - rect_y1,
+                        fill=color,
+                    )
+                    self.draw.text(
+                        xy=(label_x, label_y),
+                        text=label,
+                        fill=txt_color,
+                        font=self.font,
+                    )
+                else:
+                    # Draw background rectangle and text using cv2
+                    cv2.rectangle(
+                        img=self.im,
+                        pt1=(label_x, rect_y1),
+                        pt2=(label_x + w, rect_y2),
+                        color=color,
+                        thickness=-1,
+                        lineType=cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        img=self.im,
+                        text=label,
+                        org=(label_x, label_y + h - 1),
+                        fontFace=0,
+                        fontScale=self.sf,
+                        color=txt_color,
+                        thickness=self.tf,
+                        lineType=cv2.LINE_AA,
+                    )
+
+                # Update current_y for next label
+                current_y = rect_y1
 
     def masks(self, masks, colors, im_gpu, alpha=0.5, retina_masks=False):
         """
@@ -976,7 +1049,7 @@ def plot_images(
     kpts: Union[torch.Tensor, np.ndarray] = np.zeros((0, 51), dtype=np.float32),
     paths: Optional[List[str]] = None,
     fname: str = "images.jpg",
-    names: Optional[Dict[int, str]] = None,
+    names: Optional[List[Dict[int, str]]] = None,
     on_plot: Optional[Callable] = None,
     max_size: int = 1920,
     max_subplots: int = 16,
@@ -989,14 +1062,14 @@ def plot_images(
     Args:
         images: Batch of images to plot. Shape: (batch_size, channels, height, width).
         batch_idx: Batch indices for each detection. Shape: (num_detections,).
-        cls: Class labels for each detection. Shape: (num_detections,).
+        cls: Class labels for each detection. Shape: (num_detections, n_tasks) for multi-task classification.
         bboxes: Bounding boxes for each detection. Shape: (num_detections, 4) or (num_detections, 5) for rotated boxes.
-        confs: Confidence scores for each detection. Shape: (num_detections,).
+        confs: Confidence scores for each detection. Shape: (num_detections, n_tasks) for multi-task classification.
         masks: Instance segmentation masks. Shape: (num_detections, height, width) or (1, height, width).
         kpts: Keypoints for each detection. Shape: (num_detections, 51).
         paths: List of file paths for each image in the batch.
         fname: Output filename for the plotted image grid.
-        names: Dictionary mapping class indices to class names.
+        names: List of dictionary mapping class indices to class names.
         on_plot: Optional callback function to be called after saving the plot.
         max_size: Maximum size of the output image grid.
         max_subplots: Maximum number of subplots in the image grid.
@@ -1070,13 +1143,16 @@ def plot_images(
                 boxes = ops.xywhr2xyxyxyxy(boxes) if is_obb else ops.xywh2xyxy(boxes)
                 for j, box in enumerate(boxes.astype(np.int64).tolist()):
                     c = classes[j]
-                    if isinstance(c, (list, tuple, np.ndarray)):
-                        c = c[0]
-                    color = colors(int(c))
-                    c = names.get(int(c), c) if names else c
-                    if labels or conf[j] > conf_thres:
-                        label = f"{c}" if labels else f"{c} {conf[j]:.1f}"
-                        annotator.box_label(box, label, color=color, rotated=is_obb)
+                    n_tasks = c.shape[0]
+                    # plot labels for each task
+                    labels = []
+                    for task_idx in range(n_tasks):
+                        color = colors(c[task_idx])
+                        c = names[task_idx].get(c[task_idx], c[task_idx]) if names else c[task_idx]
+                        if labels or conf[j] > conf_thres:
+                            label = f"{c}" if labels else f"{c} {conf[j]:.1f}"
+                            labels.append(label)
+                    annotator.box_label(box, labels, color=color)
 
             elif len(classes):
                 for c in classes:

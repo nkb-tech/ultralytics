@@ -94,95 +94,94 @@ def verify_image(args, min_size=25):
     return (im_file, cls), nf, nc, msg
 
 
-def verify_image_label(args, min_size=25):
+def verify_image_label(args, min_imgsz=9):
     """Verify one image-label pair."""
-    if len(args) == 7:
-        im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim = args
-        num_cls_per_head = None
-    else:
-        im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, num_cls_per_head = args
-    is_multihead = num_cls_per_head is not None  # dataset uses multiple heads
+    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls, nc = args
+    # nc is a list with number of classes for each attribute (multi-head support)
+    if not isinstance(nc, (list, tuple)):
+        raise ValueError("'nc' must be a list specifying number of classes per attribute (multi-head labels)")
     # Number (missing, found, empty, corrupt), message, segments, keypoints
-    nm, nf, ne, nc, msg, segments, keypoints = 0, 0, 0, 0, "", [], None
+    nm, nf, ne, ncpt, msg, segments, keypoints, nattrs = 0, 0, 0, 0, "", [], None, len(nc)
     try:
         # Verify images
         im = Image.open(im_file)
         im.verify()  # PIL verify
         shape = exif_size(im)  # image size
         shape = (shape[1], shape[0])  # hw
-        assert (shape[0] >= min_size) & (shape[1] >= min_size), f"image size {shape} <{min_size} pixels"
+        assert (shape[0] > min_imgsz) & (shape[1] > min_imgsz), f"image size {shape} <{min_imgsz} pixels"
         assert im.format.lower() in IMG_FORMATS, f"invalid image format {im.format}. {FORMATS_HELP_MSG}"
         if im.format.lower() in {"jpg", "jpeg"}:
             with open(im_file, "rb") as f:
                 f.seek(-2, 2)
                 if f.read() != b"\xff\xd9":  # corrupt JPEG
                     ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
-                    msg = f"{prefix}WARNING ⚠️ {im_file}: corrupt JPEG restored and saved"
+                    msg = f"{prefix}{im_file}: corrupt JPEG restored and saved"
 
         # Verify labels
         if os.path.isfile(lb_file):
             nf = 1  # label found
-            with open(lb_file) as f:
+            with open(lb_file, encoding="utf-8") as f:
                 lb = [x.split() for x in f.read().strip().splitlines() if len(x)]
-                if any(len(x) > 6 for x in lb) and (not keypoint):  # is segment
-                    classes = np.array([x[0] for x in lb], dtype=np.float32)
-                    segments = [np.array(x[1:], dtype=np.float32).reshape(-1, 2) for x in lb]  # (cls, xy1...)
-                    lb = np.concatenate((classes.reshape(-1, 1), segments2boxes(segments)), 1)  # (cls, xywh)
-                lb = np.array(lb, dtype=np.float32)
-            nl = len(lb)
-            if nl:
-                if keypoint:
-                    assert lb.shape[1] == (5 + nkpt * ndim), f"labels require {(5 + nkpt * ndim)} columns each"
-                    points = lb[:, 5:].reshape(-1, ndim)[:, :2]
+                # Detect segment format: minimum 3 points per polygon (3*2 - 1 = 5)
+                if any(len(x) > nattrs + 5 for x in lb) and (not keypoint):
+                    classes = np.array([x[:nattrs] for x in lb], dtype=np.float32)
+                    segments = [np.array(x[nattrs:], dtype=np.float32).reshape(-1, 2) for x in lb]  # polygon
+                    lb = np.concatenate((classes, segments2boxes(segments)), 1)  # concat classes + xywh
                 else:
-                    # multi-head labels have one class column per head
-                    expected = 4 + (len(num_cls_per_head) if is_multihead else 1)
-                    assert lb.shape[1] == expected, f"labels require {expected} columns, {lb.shape[1]} columns detected"
-                    points = lb[:, len(num_cls_per_head) if is_multihead else 1:]
-                assert points.max() <= 1, f"non-normalized or out of bounds coordinates {points[points > 1]}"
-                assert lb.min() >= 0, f"negative label values {lb[lb < 0]}"
+                    lb = np.array(lb, dtype=np.float32)
+            if nl := len(lb):
+                if keypoint:
+                    expected_cols = nattrs + 4 + nkpt * ndim
+                    assert lb.shape[1] == expected_cols, (
+                        f"labels require {expected_cols} columns each (got {lb.shape[1]}). "
+                        f"Expected {nattrs} class attrs, 4 bbox, {nkpt*ndim} keypoint values"
+                    )
+                    points = lb[:, nattrs + 4:].reshape(-1, ndim)[:, :2]
+                else:
+                    expected_cols = nattrs + 4
+                    assert lb.shape[1] == expected_cols, (
+                        f"labels require {expected_cols} columns (got {lb.shape[1]}). "
+                        f"Expected {nattrs} class attrs + 4 bbox coords"
+                    )
+                    points = lb[:, nattrs : nattrs + 4]
+                # Coordinate points check with 1% tolerance
+                assert points.max() <= 1.01, f"non-normalized or out of bounds coordinates {points[points > 1.01]}"
+                assert lb.min() >= -0.01, f"negative class labels {lb[lb < -0.01]}"
 
                 # All labels
-                if is_multihead:
-                    for i, n in enumerate(num_cls_per_head):
-                        max_cls = lb[:, i].max()
-                        assert max_cls <= n - 1, (
-                            f"Label class {int(max_cls)} exceeds dataset class count {n} for head{i}. "
-                            f"Possible class labels are 0-{n - 1}"
-                        )
-                else:
-                    max_cls = lb[:, 0].max()  # max label count
-                    assert max_cls <= num_cls, (
-                        f"Label class {int(max_cls)} exceeds dataset class count {num_cls}. "
-                        f"Possible class labels are 0-{num_cls - 1}"
+                for i, nc_i in enumerate(nc):
+                    # TODO make single cls work with multi-head labels
+                    if single_cls:
+                        lb[:, i] = 0
+                    max_cls = lb[:, i].max()
+                    assert max_cls < nc_i, (
+                        f"Label class {int(max_cls)} for attribute {i} exceeds dataset class count {nc_i}. "
+                        f"Allowed range: 0-{nc_i - 1}"
                     )
+                # remove duplicate rows
                 _, i = np.unique(lb, axis=0, return_index=True)
-                if len(i) < nl:  # duplicate row check
-                    lb = lb[i]  # remove duplicates
+                if len(i) < nl:
+                    lb = lb[i]
                     if segments:
                         segments = [segments[x] for x in i]
-                    msg = f"{prefix}WARNING ⚠️ {im_file}: {nl - len(i)} duplicate labels removed"
+                    msg = f"{prefix}{im_file}: {nl - len(i)} duplicate labels removed"
             else:
                 ne = 1  # label empty
-                lb = np.zeros((0, (5 + nkpt * ndim) if keypoint else 5), dtype=np.float32)
+                lb = np.zeros((0, nattrs + 4 + (nkpt * ndim if keypoint else 0)), dtype=np.float32)
         else:
             nm = 1  # label missing
-            lb = np.zeros((0, (5 + nkpt * ndim) if keypoints else 5), dtype=np.float32)
+            lb = np.zeros((0, nattrs + 4 + (nkpt * ndim if keypoint else 0)), dtype=np.float32)
         if keypoint:
-            keypoints = lb[:, 5:].reshape(-1, nkpt, ndim)
+            keypoints = lb[:, nattrs + 4 :].reshape(-1, nkpt, ndim)
             if ndim == 2:
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
-        if is_multihead:
-            # drop extra class columns when returning YOLO-format labels
-            lb = np.concatenate([lb[:, :1], lb[:, len(num_cls_per_head) : len(num_cls_per_head) + 4]], 1)
-        else:
-            lb = lb[:, :5]
-        return im_file, lb, shape, segments, keypoints, nm, nf, ne, nc, msg
+        lb = lb[:, : nattrs + 4]
+        return im_file, lb, shape, segments, keypoints, nm, nf, ne, ncpt, msg
     except Exception as e:
-        nc = 1
-        msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
-        return [None, None, None, None, None, nm, nf, ne, nc, msg]
+        ncpt = 1
+        msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
+        return [None, None, None, None, None, nm, nf, ne, ncpt, msg]
 
 
 def polygon2mask(imgsz, polygons, color=1, downsample_ratio=1):
@@ -307,22 +306,22 @@ def check_det_dataset(dataset, autodownload=True):
             data["val"] = data.pop("validation")  # replace 'validation' key with 'val' key
     if "names" not in data and "nc" not in data:
         raise SyntaxError(emojis(f"{dataset} key missing ❌.\n either 'names' or 'nc' are required in all data YAMLs."))
-    if "names" in data and "nc" in data and len(data["names"]) != data["nc"]:
-        raise SyntaxError(emojis(f"{dataset} 'names' length {len(data['names'])} and 'nc: {data['nc']}' must match."))
-    raw_names = data.get("names")
-    if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
-        # list of lists → multi-head model
-        data["names_per_task"] = [check_class_names(n) for n in raw_names]
-        data["nc_per_task"] = [len(n) for n in raw_names]
-        flat_names = [n for task in raw_names for n in task]
-        data["names"] = check_class_names(flat_names)
-        data["nc"] = len(flat_names)
-    else:
-        if "names" not in data:
-            data["names"] = [f"class_{i}" for i in range(data["nc"])]
+    if "names" in data and "nc" in data and \
+        (len(data["names"]) != len(data["nc"]) or \
+        not all(len(names) == len(nci) for names, nci in zip(data["names"], data["nc"]))):
+        raise SyntaxError(emojis(f"{dataset} 'names' length {data['names']} and 'nc: {data['nc']}' must match."))
+    if "names" in data:
+        raw_names = data.get("names")
+        if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
+            data["names"] = [check_class_names(n) for n in raw_names]
         else:
-            data["nc"] = len(data["names"])
-        data["names"] = check_class_names(data["names"])
+            raise SyntaxError(emojis(f"{dataset} 'names' must be a list of lists or a dictionary."))
+    elif "nc" in data:
+        nc = data["nc"]
+        if isinstance(nc, list):
+            data["names"] = [[{i: f"class_{i}" for i in range(nci)}] for nci in nc]
+        else:
+            raise SyntaxError(emojis(f"{dataset} 'nc' must be a list."))
 
     # Resolve paths
     path = Path(extract_dir or data.get("path") or Path(data.get("yaml_file", "")).parent)  # dataset root

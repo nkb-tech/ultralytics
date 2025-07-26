@@ -168,6 +168,7 @@ def non_max_suppression(
     iou_thres=0.45,
     classes=None,
     agnostic=False,
+    multi_label=False,
     labels=(),
     max_det=300,
     nc=0,  # number of classes (optional)
@@ -176,17 +177,8 @@ def non_max_suppression(
     max_wh=7680,
     in_place=True,
     rotated=False,
-    num_classes_per_head=None,
-    full_class_nms=False,
 ):
     """
-    Tensor layout diagram
-    Single-head: [x1,y1,x2,y2, c0,c1,…,cn, m0,m1,…]
-    Multi-head : [x1,y1,x2,y2, conf0,cls0, conf1,cls1, ..., masks…]
-    Offsets:
-      conf_t = 4 + 2*t
-      cls_t  = 5 + 2*t
-
     Perform non-maximum suppression (NMS) on a set of boxes, with support for masks and multiple labels per box.
 
     Args:
@@ -200,6 +192,7 @@ def non_max_suppression(
         classes (List[int]): A list of class indices to consider. If None, all classes will be considered.
         agnostic (bool): If True, the model is agnostic to the number of classes, and all
             classes will be considered as one.
+        multi_label (bool): If True, each box may have multiple labels.
         labels (List[List[Union[int, float, torch.Tensor]]]): A list of lists, where each inner
             list contains the apriori labels for a given image. The list should be in the format
             output by a dataloader, with each label being a tuple of (class_index, x1, y1, x2, y2).
@@ -210,8 +203,6 @@ def non_max_suppression(
         max_wh (int): The maximum box width and height in pixels.
         in_place (bool): If True, the input prediction tensor will be modified in place.
         rotated (bool): If Oriented Bounding Boxes (OBB) are being passed for NMS.
-        num_classes_per_head (List[int], optional): Number of classes for each head in a multi-head model.
-        full_class_nms (bool): When True, perform a second NMS pass across all classes.
 
     Returns:
         (List[torch.Tensor]): A list of length batch_size, where each element is a tensor of
@@ -238,22 +229,17 @@ def non_max_suppression(
         #     for pred in output
         # ]
         return output
+
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
-    is_multihead = num_classes_per_head is not None
     nc = nc or (prediction.shape[1] - 4)  # number of classes
-    if is_multihead:
-        total_nc = sum(num_classes_per_head)
-        nm = prediction.shape[1] - 4 - total_nc - len(num_classes_per_head)  # masks after all heads
-        mi = 4 + total_nc + len(num_classes_per_head)  # mask start index
-    else:
-        nm = prediction.shape[1] - nc - 4  # number of masks
-        mi = 4 + nc  # mask start index
-    # keep boxes where any head's confidence exceeds threshold
+    nm = prediction.shape[1] - nc - 4  # number of masks
+    mi = 4 + nc  # mask start index
     xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
     time_limit = 2.0 + max_time_img * bs  # seconds to quit after
+    multi_label &= nc > 1  # multiple labels per box (adds 0.5ms/img)
 
     prediction = prediction.transpose(-1, -2)  # shape(1,84,6300) to shape(1,6300,84)
     if not rotated:
@@ -263,11 +249,7 @@ def non_max_suppression(
             prediction = torch.cat((xywh2xyxy(prediction[..., :4]), prediction[..., 4:]), dim=-1)  # xywh to xyxy
 
     t = time.time()
-    if is_multihead:
-        # each head contributes two columns: conf and class
-        output = [torch.zeros((0, 4 + 2 * len(num_classes_per_head) + nm), device=prediction.device)] * bs
-    else:
-        output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
+    output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[:, 2:4] < min_wh) | (x[:, 2:4] > max_wh)).any(1), 4] = 0  # width-height
@@ -285,60 +267,13 @@ def non_max_suppression(
         if not x.shape[0]:
             continue
 
+        # Detections matrix nx6 (xyxy, conf, cls)
+        box, cls, mask = x.split((4, nc, nm), 1)
 
-        # Detections matrix nx6+ (xyxy, conf, cls, cls2, mask...)
-        if is_multihead:
-            start = 4  # index of first conf column after the box coordinates
-            box = x[:, :4]
-            confs, clss = [], []
-            for nc_i in num_classes_per_head:
-                conf_idx = start  # first column for this head is its confidence
-                cls_slice = x[:, conf_idx + 1 : conf_idx + 1 + nc_i]  # class logits
-                conf_i = x[:, conf_idx : conf_idx + 1]  # confidence score
-                j_i = cls_slice.max(1, keepdim=True)[1]
-                confs.append(conf_i)
-                clss.append(j_i.float())
-                start += 1 + nc_i
-            mask = x[:, start:]
-
-            conf_mask = confs[0].view(-1) > conf_thres
-            box = box[conf_mask]
-            mask = mask[conf_mask]
-            confs = [c[conf_mask] for c in confs]
-            clss = [j_[conf_mask] for j_ in clss]
-
-            # final layout becomes [box, conf0,cls0, conf1,cls1, ..., mask]
-            x = torch.cat([box] + sum([[c, j] for c, j in zip(confs, clss)], []) + [mask], 1)
-            conf, j = confs[0], clss[0]
-
-            # primary = rows where the first head predicts class 0
-            primary_mask = j.view(-1) == 0
-            primary_det = x[primary_mask]
-
-            # Run NMS on the primary class only
-            if primary_det.shape[0] > 0:
-                boxes_p = primary_det[:, :4]
-                scores_p = primary_det[:, 4]
-                idx_p = torchvision.ops.nms(boxes_p, scores_p, iou_thres)
-                primary_det = primary_det[idx_p]
-
-            # secondary detections are not class 0
-            secondary_det = x[~primary_mask]
-            if primary_det.shape[0] > 0 and secondary_det.shape[0] > 0:
-                ious = box_iou(secondary_det[:, :4], primary_det[:, :4])
-                keep = ious.max(1).values <= iou_thres
-                secondary_det = secondary_det[keep]
-
-            if full_class_nms and secondary_det.shape[0] > 0:
-                c = secondary_det[:, 5:6] * (0 if agnostic else max_wh)
-                scores_s = secondary_det[:, 4]
-                boxes_s = secondary_det[:, :4] + c
-                idx_s = torchvision.ops.nms(boxes_s, scores_s, iou_thres)
-                secondary_det = secondary_det[idx_s]
-
-            x = torch.cat((primary_det, secondary_det), 0)
-        else:
-            box, cls, mask = x.split((4, nc, nm), 1)
+        if multi_label:
+            i, j = torch.where(cls > conf_thres)
+            x = torch.cat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
+        else:  # best class only
             conf, j = cls.max(1, keepdim=True)
             x = torch.cat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]
 
@@ -353,18 +288,16 @@ def non_max_suppression(
         if n > max_nms:  # excess boxes
             x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
 
-        if is_multihead and not full_class_nms:
-            i = torch.arange(n, device=x.device)[:max_det]
+        # Batched NMS
+        c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
+        scores = x[:, 4]  # scores
+        if rotated:
+            boxes = torch.cat((x[:, :2] + c, x[:, 2:4], x[:, -1:]), dim=-1)  # xywhr
+            i = nms_rotated(boxes, scores, iou_thres)
         else:
-            c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
-            scores = x[:, 4]  # scores
-            if rotated:
-                boxes = torch.cat((x[:, :2] + c, x[:, 2:4], x[:, -1:]), dim=-1)  # xywhr
-                i = nms_rotated(boxes, scores, iou_thres)
-            else:
-                boxes = x[:, :4] + c  # boxes (offset by class)
-                i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
-            i = i[:max_det]  # limit detections
+            boxes = x[:, :4] + c  # boxes (offset by class)
+            i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+        i = i[:max_det]  # limit detections
 
         # # Experimental
         # merge = False  # use merge-NMS

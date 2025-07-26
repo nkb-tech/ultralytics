@@ -24,7 +24,6 @@ class DetectionPredictor(BasePredictor):
         """Post-processes predictions and returns a list of Results objects."""
         if not self.nms:
             m = self.model.model.model[-1]
-            num_heads = getattr(m, "num_classes_per_head", None)
             preds = ops.non_max_suppression(
                 preds,
                 self.args.conf,
@@ -33,7 +32,6 @@ class DetectionPredictor(BasePredictor):
                 max_det=self.args.max_det,
                 classes=self.args.classes,
                 nc=m.nc,
-                num_classes_per_head=num_heads,
             )
         elif self.engine:
             preds = ops.process_nms_trt_results(preds, self.output_names)

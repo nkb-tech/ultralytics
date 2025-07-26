@@ -13,25 +13,6 @@ from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
 from ultralytics.utils.plotting import output_to_target, plot_images
 
-"""
-Multi-head validation design
-----------------------------
-Model output (before NMS)
-  Single-head: (B, 4 + nc + nm, A)   – 4 box, nc conf/logits, nm masks
-  Multi-head : (B, 4 + Σ(1+nc_i)+nm, A)  – 4 box, then for each head:
-                                             1 conf + nc_i logits, finally nm masks
-NMS output
-  Single-head: List[tensor] of shape (K, 6+nm)   – (x1,y1,x2,y2,conf,cls,masks…)
-  Multi-head : List[tensor] of shape (K, 4+2H+nm) – (x1,y1,x2,y2,
-                                                     conf0,cls0, conf1,cls1, …,
-                                                     masks…)
-Hard-coded indices
-  conf_t  = 4 + 2*t
-  cls_t   = 5 + 2*t
-These offsets are valid because the model builder guarantees the above layout.
-Changing the order would require updating these constants and the NMS logic.
-"""
-
 
 class DetectionValidator(BaseValidator):
     """
@@ -58,7 +39,7 @@ class DetectionValidator(BaseValidator):
         self.is_multihead = False
         self.tasks = []
         self.args.task = "detect"
-        self.metrics = DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot)
+        self.metrics: list[DetMetrics] = [DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot), ]
         self.iouv = torch.linspace(0.5, 0.95, 10)  # IoU vector for mAP@0.5:0.95
         self.niou = self.iouv.numel()
         self.lb = []  # for autolabelling
@@ -97,32 +78,14 @@ class DetectionValidator(BaseValidator):
         self.is_lvis = isinstance(val, str) and "lvis" in val and not self.is_coco  # is LVIS
         self.class_map = converter.coco80_to_coco91_class() if self.is_coco else list(range(len(model.names)))
         self.args.save_json |= (self.is_coco or self.is_lvis) and not self.training  # run on final val if training COCO
-        self.names = model.names
-        self.nc = len(model.names)
-
-        # Determine multi-head configuration from dataset YAML. A list of lists
-        # signals one label space per detection head.
-        names_raw = yaml_load(self.data.get("yaml_file", "")).get("names", self.data.get("names"))
-        if isinstance(names_raw, dict):
-            names_raw = list(names_raw.values())
-        if isinstance(names_raw, list) and names_raw and isinstance(names_raw[0], (list, tuple)):
-            self.is_multihead = True
-            self.tasks = [{"nc": len(n), "names": {i: name for i, name in enumerate(n)}} for n in names_raw]
-        else:
-            self.tasks = [{"nc": self.nc, "names": self.names}]
-
-        if self.is_multihead:
-            LOGGER.info("Multi-head model detected")
-            self.metrics = [
-                DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot, names=t["names"]) for t in self.tasks
-            ]
-            self.confusion_matrix = [ConfusionMatrix(nc=t["nc"], conf=self.args.conf) for t in self.tasks]
-            self.stats = [dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[]) for _ in self.tasks]
-        else:
-            self.metrics.names = self.names
-            self.metrics.plot = self.args.plots
-            self.confusion_matrix = ConfusionMatrix(nc=self.nc, conf=self.args.conf)
-            self.stats = dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
+        self.names: list[dict[int, str]] = model.names
+        self.nc: list[int] = [len(model.names[i]) for i in range(len(model.names))]
+        self.metrics = [
+            DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot, names=names)
+            for names in self.names
+        ]
+        self.confusion_matrix = [ConfusionMatrix(nc=nc_i, conf=self.args.conf) for nc_i in self.nc]
+        self.stats = [dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[]) for _ in self.nc]
 
         self.seen = 0
         self.jdict = []
@@ -133,6 +96,8 @@ class DetectionValidator(BaseValidator):
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
+        # TODO: implement multi-head NMS
+        import ipdb; ipdb.set_trace()
         return ops.non_max_suppression(
             preds,
             self.args.conf,
@@ -140,8 +105,6 @@ class DetectionValidator(BaseValidator):
             labels=self.lb,
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
-            num_classes_per_head=[t["nc"] for t in self.tasks] if self.is_multihead else None,
-            full_class_nms=getattr(self.args, "full_class_nms", False),
         )
 
     def _prepare_batch(self, si, batch):

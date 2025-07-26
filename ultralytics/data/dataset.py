@@ -61,6 +61,8 @@ class YOLODataset(BaseDataset):
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
         self.data = data
+        self.min_bbox = data.get("min_bbox", 10)
+        self.nc = data.get("nc")
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         super().__init__(*args, **kwargs)
 
@@ -75,7 +77,7 @@ class YOLODataset(BaseDataset):
             (dict): labels.
         """
         x = {"labels": []}
-        nm, nf, ne, nc, msgs = 0, 0, 0, 0, []  # number missing, found, empty, corrupt, messages
+        nm, nf, ne, ncpt, fb, ab, msgs = 0, 0, 0, 0, 0, 0, []  # number missing, found, empty, corrupt, filtered boxes, all boxes, messages
         desc = f"{self.prefix}Scanning {path.parent / path.stem}..."
         total = len(self.im_files)
         nkpt, ndim = self.data.get("kpt_shape", (0, 0))
@@ -86,9 +88,8 @@ class YOLODataset(BaseDataset):
             )
         with ThreadPool(NUM_THREADS) as pool:
             # forward per-head class counts so each worker validates correctly
-            extra = repeat(self.data.get("nc_per_task")) if self.data.get("nc_per_task") else repeat(None)
             results = pool.imap(
-                func=lambda args: verify_image_label(args, min_size=self.min_size),
+                func=lambda args: verify_image_label(args, min_imgsz=self.min_imgsz),
                 iterable=zip(
                     self.im_files,
                     self.label_files,
@@ -97,31 +98,34 @@ class YOLODataset(BaseDataset):
                     repeat(len(self.data["names"])),
                     repeat(nkpt),
                     repeat(ndim),
-                    extra,
+                    repeat(self.single_cls),
+                    repeat(self.nc),
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
-            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, nc_f, msg in pbar:
+            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, ncpt_f, msg in pbar:
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
-                nc += nc_f
+                ncpt += ncpt_f
                 if im_file:
                     # Filter out small boxes
                     if len(lb):
-                        boxes_pix = lb[:, 1:].copy()
-                        boxes_pix[:, [2,3]] *= shape[1], shape[0]
+                        ab += len(lb)  # count total boxes before filtering
+                        boxes_pix = lb[:, -4:].copy()
+                        boxes_pix[:, [2, 3]] *= shape[1], shape[0]
                         
-                        # Keep boxes with width and height >= 20 pixels
-                        valid_mask = (boxes_pix[:,2] >= self.min_size) & (boxes_pix[:,3] >= self.min_size)
+                        # Keep boxes with width and height >= min_bbox pixels
+                        valid_mask = (boxes_pix[:, 2] >= self.min_bbox) & (boxes_pix[:, 3] >= self.min_bbox)
                         lb = lb[valid_mask]
-                    
+                        fb += len(lb)  # count boxes after filtering
+
                     x["labels"].append(
                         {
                             "im_file": im_file,
                             "shape": shape,
-                            "cls": lb[:, 0:1],  # n, 1
-                            "bboxes": lb[:, 1:],  # n, 4
+                            "cls": lb[:, 0:-4],  # n, 1
+                            "bboxes": lb[:, -4:],  # n, 4
                             "segments": segments,
                             "keypoints": keypoint,
                             "normalized": True,
@@ -130,7 +134,7 @@ class YOLODataset(BaseDataset):
                     )
                 if msg:
                     msgs.append(msg)
-                pbar.desc = f"{desc} {nf} images, {nm + ne} backgrounds, {nc} corrupt"
+                pbar.desc = f"{desc} {nf} images, {nm + ne} backgrounds, {ncpt} corrupt, {fb}/{ab} boxes"
             pbar.close()
 
         if msgs:
@@ -138,7 +142,7 @@ class YOLODataset(BaseDataset):
         if nf == 0:
             LOGGER.warning(f"{self.prefix}WARNING ⚠️ No labels found in {path}. {HELP_URL}")
         x["hash"] = get_hash(self.label_files + self.im_files)
-        x["results"] = nf, nm, ne, nc, len(self.im_files)
+        x["results"] = nf, nm, ne, ncpt, len(self.im_files)
         x["msgs"] = msgs  # warnings
         save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
         return x

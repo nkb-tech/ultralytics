@@ -36,7 +36,7 @@ class BaseDataset(Dataset):
         single_cls (bool, optional): If True, single class training is used. Defaults to False.
         classes (list): List of included classes. Default is None.
         fraction (float): Fraction of dataset to utilize. Default is 1.0 (use all data).
-        min_size (int, optional): Minimum bbox size. Defaults to 20.
+        min_imgsz (int, optional): Minimum image size. Defaults to 20.
         pre_resize (bool, optional): If True, images are resized before augmentation to speed up training. Defaults to False.
 
 
@@ -64,14 +64,14 @@ class BaseDataset(Dataset):
         single_cls=False,
         classes=None,
         fraction=1.0,
-        min_size=20,
+        min_imgsz=20,
         pre_resize=False,
     ):
         """Initialize BaseDataset with given configuration and options."""
         super().__init__()
         self.img_path = img_path
         self.imgsz = imgsz
-        self.min_size = min_size
+        self.min_imgsz = min_imgsz
         self.augment = augment
         self.single_cls = single_cls
         self.prefix = prefix
