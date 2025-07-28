@@ -351,22 +351,19 @@ class BaseTrainer:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
         # Weighted loss (for classify task)
-        if self.args.weighted_loss and self.args.task=="classify":
+        if self.args.weighted_loss and self.args.task == "classify":
             weights = self.train_loader.dataset.calculate_weights(0.5)
             weights = torch.tensor([weights[k] for k in sorted(weights)], device=self.device, dtype=torch.float)
-            LOGGER.info(f'loss weights = {weights}')
+            LOGGER.info(f'Classify loss weights = {weights}')
             if world_size > 1:
                 self.model.criterion = self.model.module.init_criterion(weights)
             else:
                 self.model.criterion = self.model.init_criterion(weights)
 
-
         nb = len(self.train_loader)  # number of batches
         nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup iterations
         last_opt_step = -1
-        self.epoch_time = None
-        self.epoch_time_start = time.time()
-        self.train_time_start = time.time()
+        self.epoch_time, self.epoch_time_start, self.train_time_start = None, time.time(), time.time()
         self.run_callbacks("on_train_start")
         LOGGER.info(
             f'Image sizes {self.args.imgsz} train, {self.args.imgsz} val\n'
@@ -473,7 +470,7 @@ class BaseTrainer:
                         % (
                             f"{epoch + 1}/{self.epochs}",
                             f"{self._get_memory():.3g}G",  # (GB) GPU memory util
-                            *(self.tloss if loss_length > 1 else torch.unsqueeze(self.tloss, 0)),  # losses
+                            *(self.tloss if loss_length > 1 else self.tloss.unsqueeze(0)),  # losses
                             batch["cls"].shape[0],  # batch size, i.e. 8
                             batch["img"].shape[-1],  # imgsz, i.e 640
                         )

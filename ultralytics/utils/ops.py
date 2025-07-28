@@ -171,7 +171,7 @@ def non_max_suppression(
     multi_label=False,
     labels=(),
     max_det=300,
-    nc=0,  # number of classes (optional)
+    nc=[0],  # number of classes (optional)
     max_time_img=0.05,
     max_nms=30000,
     max_wh=7680,
@@ -182,14 +182,15 @@ def non_max_suppression(
     Perform non-maximum suppression (NMS) on a set of boxes, with support for masks and multiple labels per box.
 
     Args:
-        prediction (torch.Tensor): A tensor of shape (batch_size, num_classes + 4 + num_masks, num_boxes)
+        prediction (torch.Tensor): A tensor of shape (batch_size, num_classes + 4 + num_masks/kpts, num_boxes)
             containing the predicted boxes, classes, and masks. The tensor should be in the format
             output by a model, such as YOLO.
         conf_thres (float): The confidence threshold below which boxes will be filtered out.
             Valid values are between 0.0 and 1.0.
         iou_thres (float): The IoU threshold below which boxes will be filtered out during NMS.
             Valid values are between 0.0 and 1.0.
-        classes (List[int]): A list of class indices to consider. If None, all classes will be considered.
+        classes (List[int]): A list of class indices to consider.
+            If None, all classes will be considered.
         agnostic (bool): If True, the model is agnostic to the number of classes, and all
             classes will be considered as one.
         multi_label (bool): If True, each box may have multiple labels.
@@ -197,7 +198,7 @@ def non_max_suppression(
             list contains the apriori labels for a given image. The list should be in the format
             output by a dataloader, with each label being a tuple of (class_index, x1, y1, x2, y2).
         max_det (int): The maximum number of boxes to keep after NMS.
-        nc (int, optional): The number of classes output by the model. Any indices after this will be considered masks.
+        nc (List[int], optional): The number of classes output by the model. Any indices after this will be considered masks.
         max_time_img (float): The maximum time (seconds) for processing one image.
         max_nms (int): The maximum number of boxes into torchvision.ops.nms().
         max_wh (int): The maximum box width and height in pixels.
@@ -231,15 +232,15 @@ def non_max_suppression(
         return output
 
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
-    nc = nc or (prediction.shape[1] - 4)  # number of classes
-    nm = prediction.shape[1] - nc - 4  # number of masks
-    mi = 4 + nc  # mask start index
-    xc = prediction[:, 4:mi].amax(1) > conf_thres  # candidates
+    nm = prediction.shape[1] - 4 - sum(nc)
+
+    # candidate boxes determined by first head confidence only
+    first_nc = nc[0]
+    xc = prediction[:, 4 : 4 + first_nc].amax(1) > conf_thres
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
     time_limit = 2.0 + max_time_img * bs  # seconds to quit after
-    multi_label &= nc > 1  # multiple labels per box (adds 0.5ms/img)
 
     prediction = prediction.transpose(-1, -2)  # shape(1,84,6300) to shape(1,6300,84)
     if not rotated:
@@ -249,7 +250,8 @@ def non_max_suppression(
             prediction = torch.cat((xywh2xyxy(prediction[..., :4]), prediction[..., 4:]), dim=-1)  # xywh to xyxy
 
     t = time.time()
-    output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
+    # each head contributes two columns: conf and class
+    output = [torch.zeros((0, 4 + 2 * len(nc) + nm), device=prediction.device)] * bs
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[:, 2:4] < min_wh) | (x[:, 2:4] > max_wh)).any(1), 4] = 0  # width-height
@@ -267,19 +269,31 @@ def non_max_suppression(
         if not x.shape[0]:
             continue
 
-        # Detections matrix nx6 (xyxy, conf, cls)
-        box, cls, mask = x.split((4, nc, nm), 1)
+        # Detections matrix nx6+ (xyxy, conf, cls, cls2, mask...)
+        start = 4  # index of first conf column after the box coordinates
+        box = x[:, :4]
+        confs, clss = [], []
+        for nc_i in nc:
+            cls_slice = x[:, start : start + nc_i]
+            conf_i, j_i = cls_slice.max(1, keepdim=True)
+            confs.append(conf_i)
+            clss.append(j_i.float())
+            start += nc_i
+        mask = x[:, start:]
 
-        if multi_label:
-            i, j = torch.where(cls > conf_thres)
-            x = torch.cat((box[i], x[i, 4 + j, None], j[:, None].float(), mask[i]), 1)
-        else:  # best class only
-            conf, j = cls.max(1, keepdim=True)
-            x = torch.cat((box, conf, j.float(), mask), 1)[conf.view(-1) > conf_thres]
+        conf_mask = confs[0].view(-1) > conf_thres
+        box = box[conf_mask]
+        mask = mask[conf_mask]
+        confs = [c[conf_mask] for c in confs]
+        clss = [j_[conf_mask] for j_ in clss]
+
+        # final layout becomes [box, conf0,cls0, conf1,cls1, ..., mask]
+        x = torch.cat([box] + sum([[c, j] for c, j in zip(confs, clss)], []) + [mask], 1)
+        conf, j = confs[0].view(-1), clss[0].view(-1)
 
         # Filter by class
         if classes is not None:
-            x = x[(x[:, 5:6] == classes).any(1)]
+            x = x[(j.view(-1, 1) == classes).any(1)]
 
         # Check shape
         n = x.shape[0]  # number of boxes
@@ -288,9 +302,9 @@ def non_max_suppression(
         if n > max_nms:  # excess boxes
             x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
 
-        # Batched NMS
-        c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
-        scores = x[:, 4]  # scores
+        c = j.view(-1, 1) * (0 if agnostic else max_wh)
+        scores = conf
+
         if rotated:
             boxes = torch.cat((x[:, :2] + c, x[:, 2:4], x[:, -1:]), dim=-1)  # xywhr
             i = nms_rotated(boxes, scores, iou_thres)

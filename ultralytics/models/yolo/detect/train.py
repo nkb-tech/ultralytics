@@ -2,7 +2,7 @@
 
 import math
 import random
-from copy import copy, deepcopy
+from copy import copy
 from pathlib import Path
 
 import numpy as np
@@ -138,11 +138,12 @@ class DetectionTrainer(BaseTrainer):
         plot_images(
             images=batch["img"],
             batch_idx=batch["batch_idx"],
-            cls=batch["cls"].squeeze(-1),
+            cls=batch["cls"],
             bboxes=batch["bboxes"],
             paths=batch["im_file"],
             fname=self.save_dir / f"train_batch{ni}.jpg",
             on_plot=self.on_plot,
+            names=self.data["names"],
         )
 
     def plot_metrics(self):

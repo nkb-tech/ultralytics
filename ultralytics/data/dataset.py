@@ -96,7 +96,6 @@ class YOLODataset(BaseDataset):
                     self.label_files,
                     repeat(self.prefix),
                     repeat(self.use_keypoints),
-                    repeat(len(self.data["names"])),
                     repeat(nkpt),
                     repeat(ndim),
                     repeat(self.single_cls),
@@ -208,6 +207,7 @@ class YOLODataset(BaseDataset):
                 mask_ratio=hyp.mask_ratio,
                 mask_overlap=hyp.overlap_mask,
                 bgr=hyp.bgr if self.augment else 0.0,  # only affect training.
+                n_cls_tasks=len(self.nc),
             )
         )
         return transforms

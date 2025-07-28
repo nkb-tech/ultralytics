@@ -2541,6 +2541,7 @@ class Format:
         mask_overlap=True,
         batch_idx=True,
         bgr=0.0,
+        n_cls_tasks=1,
     ):
         """
         Initializes the Format class with given parameters for image and instance annotation formatting.
@@ -2558,6 +2559,7 @@ class Format:
             mask_overlap (bool): If True, allows mask overlap.
             batch_idx (bool): If True, keeps batch indexes.
             bgr (float): Probability of returning BGR images instead of RGB.
+            n_cls_tasks (int): Number of classification tasks.
 
         Attributes:
             bbox_format (str): Format for bounding boxes.
@@ -2569,6 +2571,7 @@ class Format:
             mask_overlap (bool): Whether masks can overlap.
             batch_idx (bool): Whether to keep batch indexes.
             bgr (float): The probability to return BGR images.
+            n_cls_tasks (int): Number of classification tasks.
 
         Examples:
             >>> format = Format(bbox_format="xyxy", return_mask=True, return_keypoint=False)
@@ -2584,6 +2587,7 @@ class Format:
         self.mask_overlap = mask_overlap
         self.batch_idx = batch_idx  # keep the batch indexes
         self.bgr = bgr
+        self.n_cls_tasks = n_cls_tasks
 
     def __call__(self, labels):
         """
@@ -2632,7 +2636,7 @@ class Format:
                 )
             labels["masks"] = masks
         labels["img"] = self._format_img(img)
-        labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl)
+        labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl, self.n_cls_tasks)
         labels["bboxes"] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
         if self.return_keypoint:
             labels["keypoints"] = torch.from_numpy(instances.keypoints)
@@ -2952,7 +2956,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
                    flip_idx=dataset.data.get("flip_idx", [])),
     ])
 
-    return Compose([ resize, rp, misc])
+    return Compose([resize, rp, misc])
 
 
 # Classification augmentations -----------------------------------------------------------------------------------------

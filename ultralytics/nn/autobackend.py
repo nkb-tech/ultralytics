@@ -145,7 +145,7 @@ class AutoBackend(nn.Module):
             if hasattr(model, "kpt_shape"):
                 kpt_shape = model.kpt_shape  # pose-only
             stride = max(int(model.stride.max()), 32)  # model stride
-            names = model.module.names if hasattr(model, "module") else model.names  # get class names
+            names = model.module.names if hasattr(model, "module") else model.names
             model.half() if fp16 else model.float()
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
             pt = True
@@ -160,7 +160,7 @@ class AutoBackend(nn.Module):
             if hasattr(model, "kpt_shape"):
                 kpt_shape = model.kpt_shape  # pose-only
             stride = max(int(model.stride.max()), 32)  # model stride
-            names = model.module.names if hasattr(model, "module") else model.names  # get class names
+            names = model.module.names if hasattr(model, "module") else model.names
             model.half() if fp16 else model.float()
             self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
 
@@ -426,7 +426,10 @@ class AutoBackend(nn.Module):
         # Check names
         if "names" not in locals():  # names missing
             names = default_class_names(data)
-        names = check_class_names(names)
+        
+        # TODO: Remove this once we have a better way to handle names
+        if not(isinstance(names, list) and all(isinstance(n, dict) for n in names)):
+            names = check_class_names(names)
 
         # Disable gradients
         if pt:

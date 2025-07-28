@@ -421,9 +421,8 @@ class Annotator:
                 if self.pil:
                     # Draw background rectangle and text using PIL
                     self.draw.rectangle(
-                        xy=(label_x, rect_y1),
-                        width=w + 1,
-                        height=rect_y2 - rect_y1,
+                        xy=(label_x, rect_y1, label_x + w, rect_y2),
+                        width=self.lw,
                         fill=color,
                     )
                     self.draw.text(
@@ -1123,6 +1122,7 @@ def plot_images(
         annotator.rectangle([x, y, x + w, y + h], None, (255, 255, 255), width=2)  # borders
         if paths:
             annotator.text((x + 5, y + 5), text=Path(paths[i]).name[:40], txt_color=(220, 220, 220))  # filenames
+
         if len(cls) > 0:
             idx = batch_idx == i
             classes = cls[idx].astype("int")
@@ -1142,15 +1142,14 @@ def plot_images(
                 is_obb = boxes.shape[-1] == 5  # xywhr
                 boxes = ops.xywhr2xyxyxyxy(boxes) if is_obb else ops.xywh2xyxy(boxes)
                 for j, box in enumerate(boxes.astype(np.int64).tolist()):
-                    c = classes[j]
-                    n_tasks = c.shape[0]
+                    classes_task = classes[j]
                     # plot labels for each task
                     plot_labels = []
-                    for task_idx in range(n_tasks):
-                        color = colors(c[task_idx])
-                        c = names[task_idx].get(c[task_idx], c[task_idx]) if names else c[task_idx]
-                        if labels or conf[j] > conf_thres:
-                            label = f"{c}" if labels else f"{c} {conf[j]:.1f}"
+                    for k, class_task in enumerate(classes_task):
+                        color = colors(class_task)
+                        class_name = names[k].get(class_task, class_task) if names else class_task
+                        if labels or conf[j, k] > conf_thres:
+                            label = f"{class_name}" if labels else f"{class_name} {conf[j, k]:.1f}"
                             plot_labels.append(label)
                     annotator.box_label(box, plot_labels, color=color)
 
@@ -1360,14 +1359,48 @@ def plot_tune_results(csv_file="tune_results.csv"):
 
 
 def output_to_target(output, max_det=300):
-    """Convert model output to target format [batch_id, class_id, x, y, w, h, conf] for plotting."""
-    targets = []
-    for i, o in enumerate(output):
-        box, conf, cls = o[:max_det, :6].cpu().split((4, 1, 1), 1)
-        j = torch.full((conf.shape[0], 1), i)
-        targets.append(torch.cat((j, cls, ops.xyxy2xywh(box), conf), 1))
-    targets = torch.cat(targets, 0).numpy()
-    return targets[:, 0], targets[:, 1], targets[:, 2:-1], targets[:, -1]
+    """Convert multi-task model output to target format for plotting.
+
+    Every detection row is expected to look like:
+        [x1, y1, x2, y2, conf0, cls0, conf1, cls1, …]
+
+    Returns
+    -------
+    batch_idx : (N,)          ─ image index for each detection
+    cls       : (N, T)        ─ class indices for the T classification tasks
+    bboxes    : (N, 4)        ─ boxes in xywh format
+    conf      : (N, T)        ─ confidence scores for the T tasks
+    """
+
+    batch_idx_list, cls_list, box_list, conf_list = [], [], [], []
+
+    for img_i, det in enumerate(output):
+        det = det[:max_det].cpu()
+
+        # split coordinates and the rest
+        boxes = det[:, :4]
+        rest  = det[:, 4:]  # (conf, cls) pairs
+
+        conf = rest[:, 0::2] if rest.shape[1] else torch.empty((boxes.shape[0], 0))
+        cls  = rest[:, 1::2].int() if rest.shape[1] else torch.empty((boxes.shape[0], 0), dtype=torch.int)
+
+        batch_idx_list.append(torch.full((boxes.shape[0],), img_i))
+        box_list.append(ops.xyxy2xywh(boxes))
+        conf_list.append(conf)
+        cls_list.append(cls)
+
+    if batch_idx_list:        # concatenate everything
+        batch_idx = torch.cat(batch_idx_list).numpy()
+        bboxes    = torch.cat(box_list).numpy()
+        conf      = torch.cat(conf_list).numpy()
+        cls       = torch.cat(cls_list).numpy()
+    else:                      # empty batch – keep shapes consistent
+        batch_idx = np.empty(0, dtype=int)
+        cls       = np.empty((0, 0), dtype=int)
+        bboxes    = np.empty((0, 4))
+        conf      = np.empty((0, 0))
+
+    return batch_idx, cls, bboxes, conf
 
 
 def output_to_rotated_target(output, max_det=300):

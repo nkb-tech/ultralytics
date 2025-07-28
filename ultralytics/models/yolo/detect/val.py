@@ -31,13 +31,9 @@ class DetectionValidator(BaseValidator):
     def __init__(self, dataloader=None, save_dir=None, pbar=None, args=None, _callbacks=None):
         """Initialize detection model with necessary variables and settings."""
         super().__init__(dataloader, save_dir, pbar, args, _callbacks)
-        self.nt_per_class = None
-        self.nt_per_image = None
         self.is_coco = False
         self.is_lvis = False
         self.class_map = None
-        self.is_multihead = False
-        self.tasks = []
         self.args.task = "detect"
         self.metrics: list[DetMetrics] = [DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot), ]
         self.iouv = torch.linspace(0.5, 0.95, 10)  # IoU vector for mAP@0.5:0.95
@@ -80,12 +76,12 @@ class DetectionValidator(BaseValidator):
         self.args.save_json |= (self.is_coco or self.is_lvis) and not self.training  # run on final val if training COCO
         self.names: list[dict[int, str]] = model.names
         self.nc: list[int] = [len(model.names[i]) for i in range(len(model.names))]
-        import ipdb; ipdb.set_trace()
+        self.num_tasks = len(self.nc)
         self.metrics = [
             DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot, names=names)
             for names in self.names
         ]
-        self.confusion_matrix = [ConfusionMatrix(nc=nc_i, conf=self.args.conf) for nc_i in self.nc]
+        self.confusion_matrices = [ConfusionMatrix(nc=nc_i, conf=self.args.conf) for nc_i in self.nc]
         self.stats = [dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[]) for _ in self.nc]
 
         self.seen = 0
@@ -97,21 +93,20 @@ class DetectionValidator(BaseValidator):
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
-        main_cls = self.nc[0]
         return ops.non_max_suppression(
-            preds[0][:, :4 + main_cls] if isinstance(preds, (tuple, list)) else preds[:, :4 + main_cls],
+            preds,
             self.args.conf,
             self.args.iou,
             labels=self.lb,
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
-            nc=main_cls,
+            nc=[1] if self.args.single_cls else self.nc,
         )
 
     def _prepare_batch(self, si, batch):
         """Prepares a batch of images and annotations for validation."""
         idx = batch["batch_idx"] == si
-        cls = batch["cls"][idx].squeeze(-1)
+        cls = batch["cls"][idx]
         bbox = batch["bboxes"][idx]
         ori_shape = batch["ori_shape"][si]
         imgsz = batch["img"].shape[2:]
@@ -134,68 +129,50 @@ class DetectionValidator(BaseValidator):
         for si, pred in enumerate(preds):
             self.seen += 1
             npr = len(pred)
-            if self.is_multihead:
-                stat = [
-                    dict(
-                        conf=torch.zeros(0, device=self.device),
-                        pred_cls=torch.zeros(0, device=self.device),
-                        tp=torch.zeros(npr, self.niou, dtype=torch.bool, device=self.device),
-                    )
-                    for _ in self.tasks
-                ]
-            else:
-                stat = dict(
+            stat = [
+                dict(
                     conf=torch.zeros(0, device=self.device),
                     pred_cls=torch.zeros(0, device=self.device),
                     tp=torch.zeros(npr, self.niou, dtype=torch.bool, device=self.device),
                 )
+                for _ in range(self.num_tasks)
+            ]
 
             pbatch = self._prepare_batch(si, batch)
             cls, bbox = pbatch.pop("cls"), pbatch.pop("bbox")
             nl = len(cls)
-            if self.is_multihead:
-                for t in range(len(self.tasks)):
-                    gt_cls = cls[:, t] if cls.ndim > 1 else cls
-                    stat[t]["target_cls"] = gt_cls
-                    stat[t]["target_img"] = gt_cls.unique()
-            else:
-                stat["target_cls"] = cls
-                stat["target_img"] = cls.unique()
+
+            for t in range(self.num_tasks):
+                gt_cls = cls[:, t]
+                stat[t]["target_cls"] = gt_cls
+                stat[t]["target_img"] = gt_cls.unique()
+            
             if npr == 0:
                 if nl:
-                    for k in self.stats.keys():
-                        self.stats[k].append(stat[k])
-                    if self.args.plots:
-                        self.confusion_matrix.process_batch(detections=None, gt_bboxes=bbox, gt_cls=cls)
+                    for t in range(self.num_tasks):
+                        for k in self.stats[t].keys():
+                            self.stats[t][k].append(stat[t][k])
+                        if self.args.plots:
+                            self.confusion_matrices[t].process_batch(detections=None, gt_bboxes=bbox, gt_cls=cls[:, t])
                 continue
 
             # Predictions
             if self.args.single_cls:
                 pred[:, 5] = 0
             predn = self._prepare_pred(pred, pbatch)
-            if self.is_multihead:
-                for t in range(len(self.tasks)):
-                    # prediction columns are arranged as [x1,y1,x2,y2, conf0,cls0, conf1,cls1, ...]
-                    stat[t]["conf"] = predn[:, 4 + 2 * t]  # confidence for task t
-                    stat[t]["pred_cls"] = predn[:, 5 + 2 * t]  # class index for task t
-                    if nl:
-                        stat[t]["tp"] = self._process_batch(predn, bbox, cls[:, t] if cls.ndim > 1 else cls, task=t)
-                        if self.args.plots and t == 0:
-                            self.confusion_matrix[t].process_batch(
-                                predn[:, :6], bbox, cls[:, t] if cls.ndim > 1 else cls
-                            )
-                    for k in self.stats[t].keys():
-                        self.stats[t][k].append(stat[t][k])
-            else:
-                stat["conf"] = predn[:, 4]
-                stat["pred_cls"] = predn[:, 5]
-
+            for t in range(self.num_tasks):
+                # prediction columns are arranged as [x1,y1,x2,y2, conf0,cls0, conf1,cls1, ...]
+                stat[t]["conf"] = predn[..., 4 + 2 * t]  # confidence for task t
+                stat[t]["pred_cls"] = predn[..., 5 + 2 * t]  # class index for task t
                 if nl:
-                    stat["tp"] = self._process_batch(predn, bbox, cls)
+                    stat[t]["tp"] = self._process_batch(predn, bbox, cls[:, t], task=t)
                     if self.args.plots:
-                        self.confusion_matrix.process_batch(predn, bbox, cls)
-                for k in self.stats.keys():
-                    self.stats[k].append(stat[k])
+                        det = predn[..., [0, 1, 2, 3, 4 + 2 * t, 5 + 2 * t]]
+                        self.confusion_matrix[t].process_batch(
+                            det, bbox, cls[:, t]
+                        )
+                for k in self.stats[t].keys():
+                    self.stats[t][k].append(stat[t][k])
 
             # Save
             if self.args.save_json:
@@ -210,65 +187,49 @@ class DetectionValidator(BaseValidator):
 
     def finalize_metrics(self, *args, **kwargs):
         """Set final values for metrics speed and confusion matrix."""
-        if self.is_multihead:
-            for m, cm in zip(self.metrics, self.confusion_matrix):
-                m.speed = self.speed
-                m.confusion_matrix = cm
-        else:
-            self.metrics.speed = self.speed
-            self.metrics.confusion_matrix = self.confusion_matrix
+        for m, cm in zip(self.metrics, self.confusion_matrices):
+            m.speed = self.speed
+            m.confusion_matrix = cm
 
     def get_stats(self):
         """Returns metrics statistics and results dictionary."""
-        if self.is_multihead:
-            results = {}
-            self.nt_per_class, self.nt_per_image = [], []
-            for i, (m, st) in enumerate(zip(self.metrics, self.stats)):
-                stats = {k: torch.cat(v, 0).cpu().numpy() for k, v in st.items()}
-                ntc = np.bincount(stats["target_cls"].astype(int), minlength=self.tasks[i]["nc"])
-                nti = np.bincount(stats["target_img"].astype(int), minlength=self.tasks[i]["nc"])
-                self.nt_per_class.append(ntc)
-                self.nt_per_image.append(nti)
-                stats.pop("target_img", None)
-                if len(stats) and stats["tp"].any():
-                    m.process(**stats)
-                results.update({f"task{i}_{k}": v for k, v in m.results_dict.items()})
-            return results
-        else:
-            stats = {k: torch.cat(v, 0).cpu().numpy() for k, v in self.stats.items()}  # to numpy
-            self.nt_per_class = np.bincount(stats["target_cls"].astype(int), minlength=self.nc)
-            self.nt_per_image = np.bincount(stats["target_img"].astype(int), minlength=self.nc)
+        results = {}
+        self.nt_per_class, self.nt_per_image = [], []
+        for i, (m, st) in enumerate(zip(self.metrics, self.stats)):
+            stats = {k: torch.cat(v, 0).cpu().numpy() for k, v in st.items()}
+            ntc = np.bincount(stats["target_cls"].astype(int), minlength=self.nc[i])
+            nti = np.bincount(stats["target_img"].astype(int), minlength=self.nc[i])
+            self.nt_per_class.append(ntc)
+            self.nt_per_image.append(nti)
             stats.pop("target_img", None)
             if len(stats) and stats["tp"].any():
-                self.metrics.process(**stats)
-            return self.metrics.results_dict
+                m.process(**stats)
+            results.update({f"task{i}_{k}": v for k, v in m.results_dict.items()})
+        return results
 
     def print_results(self):
         """Prints training/validation set metrics per class."""
-        metrics_keys = self.metrics[0].keys if self.is_multihead else self.metrics.keys
+        metrics_keys = self.metrics[0].keys
         pf = "%22s" + "%11i" * 2 + "%11.3g" * len(metrics_keys)
-        if self.is_multihead:
-            for i, m in enumerate(self.metrics):
-                LOGGER.info(pf % (f"task{i}", self.seen, self.nt_per_class[i].sum(), *m.mean_results()))
-        else:
-            LOGGER.info(pf % ("all", self.seen, self.nt_per_class.sum(), *self.metrics.mean_results()))
-            if self.nt_per_class.sum() == 0:
+        for i, m in enumerate(self.metrics):
+            LOGGER.info(pf % (f"task{i}", self.seen, self.nt_per_class[i].sum(), *m.mean_results()))
+            if self.nt_per_class[i].sum() == 0:
                 LOGGER.warning(
-                    f"WARNING ⚠️ no labels found in {self.args.task} set, can not compute metrics without labels"
-                )
+                f"WARNING ⚠️ no labels found in {self.args.task} set, can not compute metrics without labels"
+            )
 
         # Print results per class
-        if not self.is_multihead:
-            if self.args.verbose and not self.training and self.nc > 1 and len(self.stats):
-                for i, c in enumerate(self.metrics.ap_class_index):
+        for t in range(self.num_tasks):
+            if self.args.verbose and not self.training and self.nc[t] > 1 and len(self.stats[t]):
+                for i, c in enumerate(self.metrics[t].ap_class_index):
                     LOGGER.info(
-                        pf % (self.names[c], self.nt_per_image[c], self.nt_per_class[c], *self.metrics.class_result(i))
+                        pf % (self.names[t][c], self.nt_per_image[t][c], self.nt_per_class[t][c], *self.metrics[t].class_result(i))
                     )
 
             if self.args.plots:
                 for normalize in True, False:
-                    self.confusion_matrix.plot(
-                        save_dir=self.save_dir, names=self.names.values(), normalize=normalize, on_plot=self.on_plot
+                    self.confusion_matrices[t].plot(
+                        save_dir=self.save_dir, names=self.names[t].values(), normalize=normalize, on_plot=self.on_plot
                     )
 
     def _process_batch(self, detections, gt_bboxes, gt_cls, task=0):
@@ -291,8 +252,7 @@ class DetectionValidator(BaseValidator):
         """
         iou = box_iou(gt_bboxes, detections[:, :4])
         # each detection head contributes two columns: conf and class
-        cls_col = 5 + 2 * task  # column containing the predicted class for this task
-        return self.match_predictions(detections[:, cls_col], gt_cls, iou)
+        return self.match_predictions(detections[:, 5 + 2 * task], gt_cls, iou)
 
     def build_dataset(self, img_path, mode="val", batch=None):
         """
@@ -315,7 +275,7 @@ class DetectionValidator(BaseValidator):
         plot_images(
             batch["img"],
             batch["batch_idx"],
-            batch["cls"].squeeze(-1),
+            batch["cls"],
             batch["bboxes"],
             paths=batch["im_file"],
             fname=self.save_dir / f"val_batch{ni}_labels.jpg",

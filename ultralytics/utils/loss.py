@@ -271,12 +271,7 @@ class v8DetectionLoss:
 
         self.use_dfl = m.reg_max > 1
         
-        self.assigner = TaskAlignedAssigner(
-            topk=tal_topk, 
-            num_classes=self.nc[0], 
-            alpha=0.5, 
-            beta=6.0,
-        ) # use main class for the assigner
+        self.assigner = TaskAlignedAssigner(topk=tal_topk, alpha=0.5, beta=6.0) # use main class for the assigner
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
@@ -307,68 +302,6 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
-    def cls_loss(
-        self,
-        pred_scores: torch.Tensor,
-        gt_labels: torch.Tensor,
-        target_gt_idx: torch.Tensor,
-        fg_mask: torch.Tensor,
-        align_main_scores: torch.Tensor,
-    ) -> torch.Tensor:
-        """Compute multi-task classification loss.
-
-        Args:
-            pred_scores (Tensor): Predicted logits of shape (B, N, sum(self.nc)).
-            gt_labels (Tensor): Ground-truth labels of shape (B, max_num_obj, n_tasks).
-            target_gt_idx (Tensor): Index of the assigned gt for each anchor, shape (B, N).
-            fg_mask (Tensor): Foreground mask (positive anchors), shape (B, N).
-            align_main_scores (Tensor): Alignment scores computed for the *main* task, shape (B, N, nc[0]).
-
-        Returns:
-            Tensor: Total classification loss over all tasks.
-        """
-
-        if not isinstance(self.bce, nn.ModuleList):
-            raise NotImplementedError(
-                f"self.bce must be a nn.ModuleList, got {type(self.bce)}"
-            )
-
-        # Per-anchor weighting derived from the main task alignment metric (sum over classes).
-        # Shape: (B, N, 1)
-        pos_w = align_main_scores.sum(-1).unsqueeze(-1)
-
-        total_cls_loss = 0.0
-        offset = 0
-
-        # Iterate over each classification task/head.
-        for task_idx, (clf_loss_fn, n_cls_task) in enumerate(zip(self.bce, self.nc)):
-            # Predicted logits slice for current task: (B, N, n_cls_task)
-            pred_task = pred_scores[..., offset: offset + n_cls_task]
-
-            # Prepare target scores tensor.
-            target_task = torch.zeros_like(pred_task)
-
-            if fg_mask.any():
-                # Extract gt labels for this task: (B, max_num_obj)
-                gt_labels_task = gt_labels[..., task_idx]
-
-                # Map assigned gt indices to labels: (B, N)
-                anchor_labels = torch.gather(gt_labels_task, 1, target_gt_idx)
-
-                # Scatter the weights into the correct class positions for positive anchors.
-                target_task.scatter_(
-                    dim=2,
-                    index=anchor_labels.unsqueeze(-1).long(),
-                    src=pos_w,
-                )
-
-            # BCE loss for current task.
-            total_cls_loss += clf_loss_fn(pred_task, target_task).sum()
-
-            offset += n_cls_task
-
-        return total_cls_loss
-
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size.
 
@@ -398,7 +331,6 @@ class v8DetectionLoss:
         # Targets
         targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"], batch["bboxes"]), 1)
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
-        print(targets.shape, "Targets")
         gt_labels, gt_bboxes = targets.split((self.n_tasks, 4), dim=2)  # cls, xyxy
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
 
@@ -407,32 +339,46 @@ class v8DetectionLoss:
         # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
         # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
 
-        target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
+        norm_align_metric, fg_mask, target_gt_idx = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores[..., :self.nc[0]].detach().sigmoid(), # take only the first class scores
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
-            gt_labels[..., :1], # take only the first class labels
+            gt_labels[..., 0, None], # take only the first class labels
             gt_bboxes,
             mask_gt,
         )
 
-        target_scores_sum = max(target_scores.sum(), 1)
-        target_scores = target_scores.to(dtype)
+        target_bboxes = self.assigner.get_bboxes(gt_bboxes, target_gt_idx, fg_mask)
 
-        loss[1] = self.cls_loss(
-            pred_scores=pred_scores,
-            gt_labels=gt_labels,
-            target_gt_idx=target_gt_idx,
-            fg_mask=fg_mask,
-            align_main_scores=target_scores,
-        ) / target_scores_sum
+        target_scores_sum = max(norm_align_metric.sum(), 1)
+
+        offset = 0
+
+        # Iterate over each classification task/head.
+        for task_idx, (clf_loss_fn, n_cls_task) in enumerate(zip(self.bce, self.nc)):
+            # Predicted logits slice for current task: (B, N, n_cls_task)
+            pred_scores_task = pred_scores[..., offset: offset + n_cls_task]
+
+            _, target_scores_task = self.assigner.get_scores(
+                gt_labels=gt_labels[..., task_idx, None],
+                target_gt_idx=target_gt_idx,
+                fg_mask=fg_mask,
+                num_classes=self.nc[task_idx],
+            )
+
+            target_scores_task = target_scores_task * norm_align_metric
+
+            # BCE loss for current task.
+            loss[1] += clf_loss_fn(pred_scores_task, target_scores_task).sum() / target_scores_sum
+
+            offset += n_cls_task
 
         # Bbox loss
         if fg_mask.sum():
             target_bboxes /= stride_tensor
             loss[0], loss[2] = self.bbox_loss(
-                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
+                pred_distri, pred_bboxes, anchor_points, target_bboxes, norm_align_metric, target_scores_sum, fg_mask
             )
 
         loss[0] *= self.hyp.box  # box gain

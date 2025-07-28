@@ -96,7 +96,7 @@ def verify_image(args, min_imgsz=25):
 
 def verify_image_label(args, min_imgsz=9):
     """Verify one image-label pair."""
-    im_file, lb_file, prefix, keypoint, num_cls, nkpt, ndim, single_cls, nc = args
+    im_file, lb_file, prefix, keypoint, nkpt, ndim, single_cls, nc = args
     # nc is a list with number of classes for each attribute (multi-head support)
     if not isinstance(nc, (list, tuple)):
         raise ValueError("'nc' must be a list specifying number of classes per attribute (multi-head labels)")
