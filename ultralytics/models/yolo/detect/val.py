@@ -80,6 +80,7 @@ class DetectionValidator(BaseValidator):
         self.args.save_json |= (self.is_coco or self.is_lvis) and not self.training  # run on final val if training COCO
         self.names: list[dict[int, str]] = model.names
         self.nc: list[int] = [len(model.names[i]) for i in range(len(model.names))]
+        import ipdb; ipdb.set_trace()
         self.metrics = [
             DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot, names=names)
             for names in self.names
@@ -96,15 +97,15 @@ class DetectionValidator(BaseValidator):
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
-        # TODO: implement multi-head NMS
-        import ipdb; ipdb.set_trace()
+        main_cls = self.nc[0]
         return ops.non_max_suppression(
-            preds,
+            preds[0][:, :4 + main_cls] if isinstance(preds, (tuple, list)) else preds[:, :4 + main_cls],
             self.args.conf,
             self.args.iou,
             labels=self.lb,
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
+            nc=main_cls,
         )
 
     def _prepare_batch(self, si, batch):

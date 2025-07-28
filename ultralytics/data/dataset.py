@@ -62,6 +62,7 @@ class YOLODataset(BaseDataset):
         self.use_obb = task == "obb"
         self.data = data
         self.min_bbox = data.get("min_bbox", 10)
+        self.min_imgsz = data.get("min_imgsz", 25)
         self.nc = data.get("nc")
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         super().__init__(*args, **kwargs)
@@ -554,7 +555,7 @@ class ClassificationDataset:
         self.root = self.base.root
 
         # Initialize attributes
-        self.min_size = args.min_size
+        self.min_imgsz = args.min_imgsz
         if augment and args.fraction < 1.0:  # reduce training fraction
             self.samples = self.samples[: round(len(self.samples) * args.fraction)]
         self.prefix = colorstr(f"{prefix}: ") if prefix else ""
@@ -670,7 +671,7 @@ class ClassificationDataset:
         nf, nc, msgs, samples, x = 0, 0, [], [], {}
         with ThreadPool(NUM_THREADS) as pool:
             results = pool.imap(
-                func=lambda args: verify_image(args, min_size=self.min_size), 
+                func=lambda args: verify_image(args, min_imgsz=self.min_imgsz), 
                 iterable=zip(self.samples, repeat(self.prefix))
             )
             pbar = TQDM(results, desc=desc, total=len(self.samples))

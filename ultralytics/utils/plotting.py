@@ -1145,14 +1145,14 @@ def plot_images(
                     c = classes[j]
                     n_tasks = c.shape[0]
                     # plot labels for each task
-                    labels = []
+                    plot_labels = []
                     for task_idx in range(n_tasks):
                         color = colors(c[task_idx])
                         c = names[task_idx].get(c[task_idx], c[task_idx]) if names else c[task_idx]
                         if labels or conf[j] > conf_thres:
                             label = f"{c}" if labels else f"{c} {conf[j]:.1f}"
-                            labels.append(label)
-                    annotator.box_label(box, labels, color=color)
+                            plot_labels.append(label)
+                    annotator.box_label(box, plot_labels, color=color)
 
             elif len(classes):
                 for c in classes:

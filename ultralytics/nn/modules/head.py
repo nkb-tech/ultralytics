@@ -67,9 +67,9 @@ class Detect(nn.Module):
         self.cv3 = nn.ModuleList(
             nn.ModuleList(
                 nn.Sequential(Conv(x, c3[i], 3), Conv(c3[i], c3[i], 3), nn.Conv2d(c3[i], nc[i], 1))
-                for i in len(nc)
+                for x in ch
             )
-            for x in ch
+            for i in range(len(nc))
         )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
@@ -80,7 +80,8 @@ class Detect(nn.Module):
     def pre_forward(self, x):
         for i in range(self.nl):
             y = [self.cv2[i](x[i])]
-            y += [head(x[i]) for head in self.cv3[i]]
+            for head in self.cv3:
+                y.append(head[i](x[i]))
             x[i] = torch.cat(y, dim=1)
 
         return x  # BCHW
@@ -111,12 +112,14 @@ class Detect(nn.Module):
         one2one = []
         for i in range(self.nl):
             y = [self.one2one_cv2[i](x_detach[i])]
-            y += [head(x_detach[i]) for head in self.one2one_cv3[i]]
+            for head in self.one2one_cv3:
+                y.append(head[i](x_detach[i]))
             one2one.append(torch.cat(y, dim=1))
 
         for i in range(self.nl):
             y = [self.cv2[i](x[i])]
-            y += [head(x[i]) for head in self.cv3[i]]
+            for head in self.cv3:
+                y.append(head[i](x[i]))
             x[i] = torch.cat(y, dim=1)
 
         if self.training:  # Training path
@@ -157,17 +160,17 @@ class Detect(nn.Module):
         m = self  # self.model[-1]  # Detect() module
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
-        for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
+        for i, (a, s) in enumerate(zip(m.cv2, m.stride)):  # from
             a[-1].bias.data[:] = 1.0  # box
             # init each head assuming 0.01 object prior per class
-            for i in len(m.nc):
-                b[i][-1].bias.data[:, m.nc[i]] = math.log(5 / m.nc[i] / (640 / s) ** 2)
+            for b, nc_i in zip(m.cv3, m.nc):
+                b[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)
     
         if self.end2end:
-            for a, b, s in zip(m.one2one_cv2, m.one2one_cv3, m.stride):  # from
+            for i, (a, s) in zip(m.one2one_cv2, m.stride):  # from
                 a[-1].bias.data[:] = 1.0  # box
-                for i in len(m.nc):
-                    b[i][-1].bias.data[:, m.nc[i]] = math.log(5 / m.nc[i] / (640 / s) ** 2)  # cls (.01 objects, nc_i classes, 640 img)
+                for b, nc_i in zip(m.one2one_cv3, m.nc):
+                    b[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)  # cls (.01 objects, nc_i classes, 640 img)
 
     def decode_bboxes(self, bboxes, anchors):
         """Decode bounding boxes."""

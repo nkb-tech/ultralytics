@@ -69,7 +69,7 @@ def exif_size(img: Image.Image):
     return s
 
 
-def verify_image(args, min_size=25):
+def verify_image(args, min_imgsz=25):
     """Verify one image."""
     (im_file, cls), prefix = args
     # Number (found, corrupt), message
@@ -79,7 +79,7 @@ def verify_image(args, min_size=25):
         im.verify()  # PIL verify
         shape = exif_size(im)  # image size
         shape = (shape[1], shape[0])  # hw
-        assert (shape[0] >= min_size) & (shape[1] >= min_size), f"image size {shape} <{min_size} pixels"
+        assert (shape[0] >= min_imgsz) & (shape[1] >= min_imgsz), f"image size {shape} <{min_imgsz} pixels"
         assert im.format.lower() in IMG_FORMATS, f"Invalid image format {im.format}. {FORMATS_HELP_MSG}"
         if im.format.lower() in {"jpg", "jpeg"}:
             with open(im_file, "rb") as f:
@@ -316,10 +316,14 @@ def check_det_dataset(dataset, autodownload=True):
             data["names"] = [check_class_names(n) for n in raw_names]
         else:
             raise SyntaxError(emojis(f"{dataset} 'names' must be a list of lists or a dictionary."))
+        data["nc"] = [len(names) for names in data["names"]]
     elif "nc" in data:
         nc = data["nc"]
         if isinstance(nc, list):
-            data["names"] = [[{i: f"class_{i}" for i in range(nci)}] for nci in nc]
+            data["names"] = [
+                {i: f"class_{i}" for i in range(nci)}
+                for nci in nc
+            ]
         else:
             raise SyntaxError(emojis(f"{dataset} 'nc' must be a list."))
 

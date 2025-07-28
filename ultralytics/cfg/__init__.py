@@ -157,7 +157,8 @@ CFG_INT_KEYS = {  # integer-only arguments
     "save_period",
     "albu_quality_lower",
     "albu_clip_limit",
-    "min_size",
+    "min_bbox",
+    "min_imgsz",
 }
 CFG_BOOL_KEYS = {  # boolean-only arguments
     "save",

@@ -303,7 +303,7 @@ class DetectionModel(BaseModel):
         self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)  # model, savelist
         self.names: list[dict[int, str]] = [
             {i: f"{i}" for i in range(nc_i)}
-            for nc_i in range(self.yaml["nc"])
+            for nc_i in self.yaml["nc"]
         ]  # default names dict
         self.inplace = self.yaml.get("inplace", True)
         self.end2end = getattr(self.model[-1], "end2end", False)
@@ -320,7 +320,7 @@ class DetectionModel(BaseModel):
             def _forward(x):
                 """Performs a forward pass through the model, handling different Detect subclass types accordingly."""
                 if self.end2end:
-                    y =self.forward(x)["one2many"]
+                    y = self.forward(x)["one2many"]
                     return y[0] if isinstance(m, (v10Pose, v10Segment)) else y
                 return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
 
@@ -897,9 +897,43 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
     return ensemble
 
 
+def _ensure_nested_cv3_on_module(mod: nn.Module) -> bool:
+    """
+    If mod has attribute 'cv3' that is ModuleList[...], ensure it becomes
+    ModuleList[ModuleList[...]] (single-task wrap). Also normalize 'nc' int -> [int].
+    Returns True if modified.
+    """
+    if not hasattr(mod, "cv3"):
+        return False
+    cv3 = getattr(mod, "cv3")
+    if isinstance(cv3, nn.ModuleList):
+        needs_wrap = (len(cv3) == 0) or not isinstance(cv3[0], nn.ModuleList)
+        if needs_wrap:
+            setattr(mod, "cv3", nn.ModuleList([cv3]))     # wrap to task dim
+            if hasattr(mod, "nc") and isinstance(getattr(mod, "nc"), int):
+                setattr(mod, "nc", [getattr(mod, "nc")])  # normalize to list
+            return True
+    return False
+
+def patch_model_inplace(root: nn.Module):
+    """
+    Walk the module tree and patch every submodule that exposes 'cv3'.
+    Returns number of modules changed.
+    """
+    for m in root.modules():
+        try:
+            _ensure_nested_cv3_on_module(m)
+        except Exception:
+            # Be conservative; skip modules we can't inspect
+            pass
+
+
 def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     """Loads a single model weights."""
     ckpt, weight = torch_safe_load(weight)  # load ckpt
+
+    patch_model_inplace(ckpt['model'])
+
     args = {**DEFAULT_CFG_DICT, **(ckpt.get("train_args", {}))}  # combine model and default args, preferring model args
     model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
 
@@ -921,6 +955,70 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
 
     # Return model and ckpt
     return model, ckpt
+
+import re
+import torch
+import torch.nn as nn
+
+def install_cv3_compat_hook(model: nn.Module):
+    """
+    Attach a load_state_dict pre-hook that:
+      - Wraps model.cv3 into ModuleList([cv3]) if it's not already a nested ModuleList
+      - Transforms old-style state_dict keys '...cv3.i.j.*' into '...cv3.0.i.j.*'
+    Call this once, before model.load_state_dict(...).
+    """
+
+    def _compat_pre_hook(module: nn.Module,
+                         state_dict: dict,
+                         prefix: str,
+                         local_metadata: dict,
+                         strict: bool,
+                         missing_keys: list,
+                         unexpected_keys: list,
+                         error_msgs: list):
+
+        # ---- 1) Ensure model side is nested: ModuleList[ModuleList[Sequential]]
+        cv3 = getattr(module, "cv3", None)
+        if isinstance(cv3, nn.ModuleList):
+            needs_wrap = (len(cv3) == 0) or not isinstance(cv3[0], nn.ModuleList)
+            if needs_wrap:
+                # Wrap to represent a single classification task
+                module.cv3 = nn.ModuleList([cv3])
+                # If you keep `nc` as a scalar in older code, normalize it to a list of one.
+                if hasattr(module, "nc") and isinstance(module.nc, int):
+                    module.nc = [module.nc]
+
+        # ---- 2) Rewrite state_dict if it matches the old flat layout
+        # Old:  {prefix}cv3.<i>.<j>.<rest>
+        # New:  {prefix}cv3.<task>.<i>.<j>.<rest>  (insert task=0)
+        keys = [k for k in list(state_dict.keys()) if k.startswith(prefix + "cv3.")]
+        if not keys:
+            return
+
+        # Detect if at least one key is old-style (two numeric indices after 'cv3.')
+        def _is_old(k: str) -> bool:
+            return re.match(rf"^{re.escape(prefix)}cv3\.\d+\.\d+\.", k) is not None and \
+                   re.match(rf"^{re.escape(prefix)}cv3\.\d+\.\d+\.\d+\.", k) is None
+
+        if any(_is_old(k) for k in keys):
+            for k in keys:
+                m = re.match(rf"^{re.escape(prefix)}cv3\.(\d+)\.(\d+)\.(.+)$", k)
+                if m:
+                    i, j, rest = m.groups()
+                    new_k = f"{prefix}cv3.0.{i}.{j}.{rest}"
+                    # Move tensor to new key
+                    state_dict[new_k] = state_dict[k]
+                    del state_dict[k]
+
+    # Register with a signature that includes 'module' when available
+    try:
+        model.register_load_state_dict_pre_hook(_compat_pre_hook, with_module=True)
+    except TypeError:
+        # Fallback for older PyTorch that doesn't support with_module
+        def _compat_pre_hook_legacy(state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+            # Use the outer "model" we closed over as 'module'
+            return _compat_pre_hook(model, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs)
+        model.register_load_state_dict_pre_hook(_compat_pre_hook_legacy)
 
 
 def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
@@ -960,7 +1058,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         except:
             pass
         
-        nc2 = d.get("nc2", None)
         for j, a in enumerate(args):
             if isinstance(a, str):
                 with contextlib.suppress(ValueError):
@@ -1045,7 +1142,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in (Detect, v11Detect, WorldDetect, MultiAttributeDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom,
+        elif m in (Detect, v11Detect, WorldDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom,
                    Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM,
                    Detect_DyHead_Prune, Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH,
                    Pose, Pose_LSCD, Pose_TADDH, OBB, OBB_LSCD, OBB_TADDH, Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH,
@@ -1229,18 +1326,9 @@ def yaml_model_load(path):
 
     raw_names = d.get("names", None)
     if "nc" not in d:
-        # detect multi-head configs where names=[[..],[..]]
         if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
             d["nc"] = [len(task) for task in raw_names]
-            d["names"] = [
-                [class_name for class_name in task]
-                for task in raw_names
-            ]
-        elif isinstance(raw_names, (list, dict)):
-            # standard single-head list or dict of class names
-            d["nc"] = [len(raw_names) if isinstance(raw_names, list) else len(raw_names.values())]
-            if isinstance(raw_names, dict):
-                d["names"] = [list(raw_names.values())]
+            
         else:
             raise SyntaxError(emojis(f"{yaml_file} key missing ❌. either 'names' or 'nc' are required in all model YAMLs."))
     return d

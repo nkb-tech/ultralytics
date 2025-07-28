@@ -56,7 +56,7 @@ from ultralytics.utils.torch_utils import (
 from ultralytics.utils.loss import DistillationLoss
 
 from types import SimpleNamespace
-from timm.optim.optim_factory import create_optimizer
+from timm.optim import create_optimizer
 
 
 
@@ -314,10 +314,13 @@ class BaseTrainer:
         if RANK in {-1, 0}:
             # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
             self.test_loader = self.get_dataloader(
-                self.testset, batch_size=batch_size if self.args.task == "obb" else batch_size * 2, rank=-1, mode="val"
+                dataset_path=self.testset,
+                batch_size=batch_size if self.args.task == "obb" else batch_size * 2,
+                rank=-1,
+                mode="val",
             )
             self.validator = self.get_validator()
-            metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix="val")
+            metric_keys = self.validator.metrics[0].keys + self.label_loss_items(prefix="val")
             self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
             self.ema = ModelEMA(self.model)
             if self.args.plots:
@@ -845,9 +848,7 @@ class BaseTrainer:
                 f"ignoring 'lr0={self.args.lr0}' and 'momentum={self.args.momentum}' and "
                 f"determining best 'optimizer', 'lr0' and 'momentum' automatically... "
             )
-            nc = getattr(model, "nc", 10)  # number of classes
-            if isinstance(nc, list):
-                nc = sum(nc)
+            nc = sum(getattr(model, "nc"))  # number of classes
             lr_fit = round(0.002 * 5 / (4 + nc), 6)  # lr0 fit equation to 6 decimal places
             name, lr, momentum = ("SGD", 0.01, 0.9) if iterations > 10000 else ("AdamW", lr_fit, 0.9)
             self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
