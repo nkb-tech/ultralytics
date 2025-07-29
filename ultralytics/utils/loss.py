@@ -16,6 +16,7 @@ from .tal import bbox2dist
 
 from glob import glob
 
+
 class DistillationLoss(nn.Module):
     """Criterion class for computing training losses."""
 
@@ -23,7 +24,7 @@ class DistillationLoss(nn.Module):
         """Initializes DistillationLoss with the model, defining model-related properties and BCE loss function."""
         super().__init__()
 
-        if task=="classify":
+        if task == "classify":
             self.temperature = temperature
             self.alpha = alpha
             self.forward = self.forward_classify
@@ -75,29 +76,47 @@ class QualityfocalLoss(nn.Module):
     https://arxiv.org/abs/2006.04388.
     """
     
-    def __init__(self):
+    def __init__(self, weight=None, *args, **kwargs):
         """Initialize the Quality focal loss class."""
         super().__init__()
+        self.weight = weight
 
-    @staticmethod
-    def forward(pred, label, gt_target_pos_mask, beta=2.0):
+    def preprocess(self, pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask):
+        """Pre-process the prediction and label."""
+        if fg_mask.sum():
+            pos_ious = bbox_iou(pred_bboxes, gt_bboxes, xywh=False).clamp(min=1e-6).detach()
+            cls_iou_targets = pos_ious * gt_scores
+            fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, pred_scores.shape[-1])  # (b, h*w, 80)
+            condition = fg_scores_mask > 0
+            targets_onehot_pos = torch.where(condition, gt_scores, 0)
+            cls_iou_targets = torch.where(condition, cls_iou_targets, 0)
+        else:
+            cls_iou_targets = torch.zeros_like(pred_scores)
+            targets_onehot_pos = torch.zeros_like(pred_scores)
+
+        return cls_iou_targets, targets_onehot_pos.bool()
+
+    def forward(self, pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask, beta=2.0, *args, **kwargs):
         """Computes quality focal loss."""
+        cls_iou_targets, targets_onehot_pos = self.preprocess(pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask)
+        
         # negatives are supervised by 0 quality score
-        pred_sigmoid = pred.sigmoid()
+        pred_sigmoid = pred_scores.sigmoid()
         scale_factor = pred_sigmoid
-        zerolabel = scale_factor.new_zeros(pred.shape)
+        zerolabel = torch.zeros_like(pred_scores)
+
         with autocast(enabled=False):
             loss = F.binary_cross_entropy_with_logits(
-                pred,
+                pred_scores,
                 zerolabel,
                 reduction='none',
+                weight=self.weight,
             ) * scale_factor.pow(beta)
-        
-        scale_factor = label[gt_target_pos_mask] - pred_sigmoid[gt_target_pos_mask]
+        scale_factor = cls_iou_targets[targets_onehot_pos] - pred_sigmoid[targets_onehot_pos]
         with autocast(enabled=False):
-            loss[gt_target_pos_mask] = F.binary_cross_entropy_with_logits(
-                pred[gt_target_pos_mask],
-                label[gt_target_pos_mask],
+            loss[targets_onehot_pos] = F.binary_cross_entropy_with_logits(
+                pred_scores[targets_onehot_pos],
+                cls_iou_targets[targets_onehot_pos],
                 reduction='none',
             ) * scale_factor.abs().pow(beta)
         return loss
@@ -110,17 +129,17 @@ class VarifocalLoss(nn.Module):
     https://arxiv.org/abs/2008.13367.
     """
 
-    def __init__(self):
+    def __init__(self, weight=None, *args, **kwargs):
         """Initialize the VarifocalLoss class."""
         super().__init__()
+        self.weight = weight
 
-    @staticmethod
-    def forward(pred, label, gt_target_pos_mask=None, alpha=0.75, gamma=2.0):
+    def forward(self, pred_scores, gt_scores, gt_target_pos_mask=None, alpha=0.75, gamma=2.0, *args, **kwargs):
         """Computes Varifocal loss."""
         
-        weight = alpha * (pred.sigmoid() - label).abs().pow(gamma) * (label <= 0.0) + label * (label > 0.0)
+        weight = alpha * (pred_scores.sigmoid() - gt_scores).abs().pow(gamma) * (gt_scores <= 0.0) + gt_scores * (gt_scores > 0.0)
         with autocast(enabled=False):
-            return F.binary_cross_entropy_with_logits(pred, label, reduction='none') * weight
+            return F.binary_cross_entropy_with_logits(pred_scores, gt_scores, reduction='none', weight=self.weight) * weight
 
 
 class FocalLoss(nn.Module):
@@ -131,21 +150,29 @@ class FocalLoss(nn.Module):
         super().__init__()
 
     @staticmethod
-    def forward(pred, label, gamma=1.5, alpha=0.25):
+    def forward(pred_scores, gt_scores, gamma=1.5, alpha=0.25, *args, **kwargs):
         """Calculates and updates confusion matrix for object detection/classification tasks."""
-        loss = F.binary_cross_entropy_with_logits(pred, label, reduction="none")
+        loss = F.binary_cross_entropy_with_logits(pred_scores, gt_scores, reduction="none")
         # p_t = torch.exp(-loss)
         # loss *= self.alpha * (1.000001 - p_t) ** self.gamma  # non-zero power for gradient stability
 
         # TF implementation https://github.com/tensorflow/addons/blob/v0.7.1/tensorflow_addons/losses/focal_loss.py
-        pred_prob = pred.sigmoid()  # prob from logits
-        p_t = label * pred_prob + (1 - label) * (1 - pred_prob)
+        pred_prob = pred_scores.sigmoid()  # prob from logits
+        p_t = gt_scores * pred_prob + (1 - gt_scores) * (1 - pred_prob)
         modulating_factor = (1.0 - p_t) ** gamma
         loss *= modulating_factor
         if alpha > 0:
-            alpha_factor = label * alpha + (1 - label) * (1 - alpha)
+            alpha_factor = gt_scores * alpha + (1 - gt_scores) * (1 - alpha)
             loss *= alpha_factor
         return loss
+
+
+class BCELoss(nn.BCEWithLogitsLoss):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def forward(self, pred_scores, gt_scores, *args, **kwargs):
+        return super().forward(pred_scores, gt_scores)
 
 
 class DFLoss(nn.Module):
@@ -243,7 +270,13 @@ class KeypointLoss(nn.Module):
 class v8DetectionLoss:
     """Criterion class for computing training losses."""
 
-    def __init__(self, model, tal_topk=10, clf_loss_weights: list[list[float]] | None = None):  # model must be de-paralleled
+    def __init__(
+        self,
+        model: nn.Module,
+        tal_topk=10,
+        clf_loss_weights: list[list[float]] | None = None,
+        clf_loss_fn: str = "qfl",
+    ):  # model must be de-paralleled
         """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
@@ -255,14 +288,25 @@ class v8DetectionLoss:
         assert clf_loss_weights is None or all(weight > 0 for weight in clf_loss_weights), "Loss weights must be positive."
         assert clf_loss_weights is None or len(clf_loss_weights) == self.n_tasks, \
             f"Loss weights must be provided for each class, got {len(clf_loss_weights)} weights for {len(self.nc)} classes."
-        self.clf_loss_weights = clf_loss_weights if clf_loss_weights is not None else [1.0] * len(self.nc)
-        self.bce = nn.ModuleList(
-            nn.BCEWithLogitsLoss(
-                reduction="none",
-                weight=torch.tensor(self.clf_loss_weights[i], device=device),
+        self.clf_loss_weights = [
+            torch.tensor(
+                clf_loss_weights[i] if clf_loss_weights is not None else [1.0] * self.nc[i],
+                device=device,
             )
             for i in range(self.n_tasks)
-        )
+        ]
+        cls_losses = []
+        for i in range(self.n_tasks):
+            if clf_loss_fn == "bce":
+                cls_loss_fn = BCELoss
+            elif clf_loss_fn == "vfl":
+                cls_loss_fn = VarifocalLoss
+            elif clf_loss_fn == "qfl":
+                cls_loss_fn = QualityfocalLoss
+            cls_losses.append(cls_loss_fn(reduction="none", weight=self.clf_loss_weights[i]))
+        self.cls_losses = nn.ModuleList(cls_losses)
+        LOGGER.info(f"Using {clf_loss_fn} loss for classification.")
+
         self.hyp = h
         self.stride = m.stride  # model strides
         self.no = sum(self.nc) + m.reg_max * 4
@@ -350,17 +394,14 @@ class v8DetectionLoss:
         )
 
         target_bboxes = self.assigner.get_bboxes(gt_bboxes, target_gt_idx, fg_mask)
-
-        target_scores_sum = max(norm_align_metric.sum(), 1)
-
-        offset = 0
+        target_scores_sum, offset = max(norm_align_metric.sum(), 1), 0
 
         # Iterate over each classification task/head.
-        for task_idx, (clf_loss_fn, n_cls_task) in enumerate(zip(self.bce, self.nc)):
+        for task_idx, (cls_loss_fn, n_cls_task) in enumerate(zip(self.cls_losses, self.nc)):
             # Predicted logits slice for current task: (B, N, n_cls_task)
             pred_scores_task = pred_scores[..., offset: offset + n_cls_task]
 
-            _, target_scores_task = self.assigner.get_scores(
+            target_labels_task, target_scores_task = self.assigner.get_scores(
                 gt_labels=gt_labels[..., task_idx, None],
                 target_gt_idx=target_gt_idx,
                 fg_mask=fg_mask,
@@ -370,7 +411,13 @@ class v8DetectionLoss:
             target_scores_task = target_scores_task * norm_align_metric
 
             # BCE loss for current task.
-            loss[1] += clf_loss_fn(pred_scores_task, target_scores_task).sum() / target_scores_sum
+            loss[1] += cls_loss_fn(
+                pred_scores=pred_scores_task,
+                gt_scores=target_scores_task, 
+                pred_bboxes=pred_bboxes,
+                gt_bboxes=target_bboxes / stride_tensor,
+                fg_mask=fg_mask,
+            ).sum() / target_scores_sum
 
             offset += n_cls_task
 
