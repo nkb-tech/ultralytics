@@ -153,7 +153,11 @@ class DetectionValidator(BaseValidator):
                         for k in self.stats[t].keys():
                             self.stats[t][k].append(stat[t][k])
                         if self.args.plots:
-                            self.confusion_matrices[t].process_batch(detections=None, gt_bboxes=bbox, gt_cls=cls[:, t])
+                            self.confusion_matrices[t].process_batch(
+                                detections=None,
+                                gt_bboxes=bbox,
+                                gt_cls=cls[:, t],
+                            )
                 continue
 
             # Predictions
@@ -168,7 +172,7 @@ class DetectionValidator(BaseValidator):
                     stat[t]["tp"] = self._process_batch(predn, bbox, cls[:, t], task=t)
                     if self.args.plots:
                         det = predn[..., [0, 1, 2, 3, 4 + 2 * t, 5 + 2 * t]]
-                        self.confusion_matrix[t].process_batch(
+                        self.confusion_matrices[t].process_batch(
                             det, bbox, cls[:, t]
                         )
                 for k in self.stats[t].keys():
@@ -186,7 +190,7 @@ class DetectionValidator(BaseValidator):
                 )
 
     def finalize_metrics(self, *args, **kwargs):
-        """Set final values for metrics speed and confusion matrix."""
+        """Set final values for metrics speed and confusion matrices."""
         for m, cm in zip(self.metrics, self.confusion_matrices):
             m.speed = self.speed
             m.confusion_matrix = cm
@@ -229,7 +233,10 @@ class DetectionValidator(BaseValidator):
             if self.args.plots:
                 for normalize in True, False:
                     self.confusion_matrices[t].plot(
-                        save_dir=self.save_dir, names=self.names[t].values(), normalize=normalize, on_plot=self.on_plot
+                        save_dir=self.save_dir,
+                        names=self.names[t].values(),
+                        normalize=normalize,
+                        on_plot=self.on_plot,
                     )
 
     def _process_batch(self, detections, gt_bboxes, gt_cls, task=0):

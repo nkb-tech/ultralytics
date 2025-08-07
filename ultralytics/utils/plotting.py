@@ -936,8 +936,21 @@ class Annotator:
 
 @TryExcept()  # known issue https://github.com/ultralytics/yolov5/issues/5395
 @plt_settings()
-def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
-    """Plot training labels including class histograms and box statistics."""
+def plot_labels(
+    boxes: np.ndarray,
+    cls: np.ndarray,
+    names: list[dict] = [{}],
+    save_dir: Path = Path(""),
+    on_plot: Callable = None,
+) -> None:
+    """Plot training labels including class histograms and box statistics.
+    Args:
+        boxes (np.ndarray): Bounding boxes in format [x, y, width, height].
+        cls (np.ndarray): Class labels for each bounding box (n_tasks, n_boxes).
+        names (list[dict]): List of class names.
+        save_dir (Path): Directory to save the plot.
+        on_plot (callable): Function to call after plotting.
+    """
     import pandas  # scope for faster 'import ultralytics'
     import seaborn  # scope for faster 'import ultralytics'
 
@@ -947,7 +960,8 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
 
     # Plot dataset labels
     LOGGER.info(f"Plotting labels to {save_dir / 'labels.jpg'}... ")
-    nc = int(cls.max() + 1)  # number of classes
+    num_tasks = cls.shape[1]
+
     boxes = boxes[:1000000]  # limit to 1M boxes
     x = pandas.DataFrame(boxes, columns=["x", "y", "width", "height"])
 
@@ -956,32 +970,50 @@ def plot_labels(boxes, cls, names=(), save_dir=Path(""), on_plot=None):
     plt.savefig(save_dir / "labels_correlogram.jpg", dpi=200)
     plt.close()
 
+    tmp_i, tmp_j, num_rows = 1, 0, math.ceil(1 + num_tasks / 3)  # rows, cols
+
     # Matplotlib labels
-    ax = plt.subplots(2, 2, figsize=(8, 8), tight_layout=True)[1].ravel()
-    y = ax[0].hist(cls, bins=np.linspace(0, nc, nc + 1) - 0.5, rwidth=0.8)
-    for i in range(nc):
-        y[2].patches[i].set_color([x / 255 for x in colors(i)])
-    ax[0].set_ylabel("instances")
-    if 0 < len(names) < 30:
-        ax[0].set_xticks(range(len(names)))
-        ax[0].set_xticklabels(list(names.values()), rotation=90, fontsize=10)
-    else:
-        ax[0].set_xlabel("classes")
-    seaborn.histplot(x, x="x", y="y", ax=ax[2], bins=50, pmax=0.9)
-    seaborn.histplot(x, x="width", y="height", ax=ax[3], bins=50, pmax=0.9)
+    _, axs = plt.subplots(ncols=3, nrows=num_rows, figsize=(8, 8), tight_layout=True)
+    for i in range(num_tasks):
+        cls_i = cls[..., i]
+        names_i = list(names[i].values())
+        nc = int(cls_i.max() + 1)
+        y = axs[tmp_i][tmp_j].hist(cls_i, bins=np.linspace(0, nc, nc + 1) - 0.5, rwidth=0.8)
+        for i in range(nc):
+            y[2].patches[i].set_color([x / 255 for x in colors(i)])
+        axs[tmp_i][tmp_j].set_ylabel("instances")
+        if 0 < len(names) < 30:
+            axs[tmp_i][tmp_j].set_xticks(range(len(names_i)))
+            axs[tmp_i][tmp_j].set_xticklabels(names_i, rotation=45, fontsize=10)
+        else:
+            axs[tmp_i][tmp_j].set_xlabel("classes")
+
+        tmp_j += 1
+        if tmp_j == 3:
+            tmp_i += 1
+            tmp_j = 0
+
+    if num_tasks % 3 != 0:
+        for j in range(tmp_j, num_rows + 1):
+            axs[tmp_i][j].set_visible(False)
+    
+    # Histograms
+    seaborn.histplot(x, x="x", y="y", ax=axs[0][0], bins=50, pmax=0.9)
+    seaborn.histplot(x, x="width", y="height", ax=axs[0][1], bins=50, pmax=0.9)
 
     # Rectangles
     boxes[:, 0:2] = 0.5  # center
     boxes = ops.xywh2xyxy(boxes) * 1000
     img = Image.fromarray(np.ones((1000, 1000, 3), dtype=np.uint8) * 255)
     for cls, box in zip(cls[:500], boxes[:500]):
-        ImageDraw.Draw(img).rectangle(box, width=1, outline=colors(cls))  # plot
-    ax[1].imshow(img)
-    ax[1].axis("off")
+        ImageDraw.Draw(img).rectangle(box, width=1, outline=colors(cls[..., 0]))  # plot
+    axs[0][2].imshow(img)
+    axs[0][2].axis("off")
 
-    for a in [0, 1, 2, 3]:
-        for s in ["top", "right", "left", "bottom"]:
-            ax[a].spines[s].set_visible(False)
+    for i in range(num_rows):
+        for j in range(3):
+            for s in ["top", "right", "left", "bottom"]:
+                axs[i][j].spines[s].set_visible(False)
 
     fname = save_dir / "labels.jpg"
     plt.savefig(fname, dpi=200)

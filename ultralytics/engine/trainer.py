@@ -869,7 +869,7 @@ class BaseTrainer:
 
         # timm optimizers https://timm.fast.ai/Optimizers & https://github.com/huggingface/pytorch-image-models/blob/4d4bdd64a996bf7b5919ec62f20af4a1c07d5848/timm/optim/optim_factory.py#L183
         elif name in {
-            'nadam', 'radam', 'adamp', 'Lookahead_Adam',  'lion', 'rmsproptf', 'rmsprop', 'novograd' , 'nvnovograd', 'madgradw',  'madgrad', 'adahessian',
+            'nadam', 'radam', 'adamp', 'Lookahead_Adam', 'lion', 'rmsproptf', 'rmsprop', 'novograd' , 'nvnovograd', 'madgradw',  'madgrad', 'adahessian',
             'nlars', 'nlarc', 'lars', 'lambc','lamb', 'adanw', 'adanp', 'adafactor', 'adagrad', 'adadelta', 'radabelief',  'adabelief','adamax',
         }:
             args = SimpleNamespace()

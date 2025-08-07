@@ -108,17 +108,16 @@ class YOLODataset(BaseDataset):
                 nf += nf_f
                 ne += ne_f
                 ncpt += ncpt_f
-                if im_file:
+                if im_file and len(lb):
                     # Filter out small boxes
-                    if len(lb):
-                        ab += len(lb)  # count total boxes before filtering
-                        boxes_pix = lb[:, -4:].copy()
-                        boxes_pix[:, [2, 3]] *= shape[1], shape[0]
-                        
-                        # Keep boxes with width and height >= min_bbox pixels
-                        valid_mask = (boxes_pix[:, 2] >= self.min_bbox) & (boxes_pix[:, 3] >= self.min_bbox)
-                        lb = lb[valid_mask]
-                        fb += len(lb)  # count boxes after filtering
+                    ab += len(lb)  # count total boxes before filtering
+                    boxes_pix = lb[:, -4:].copy()
+                    boxes_pix[:, [2, 3]] *= shape[1], shape[0]
+                    
+                    # Keep boxes with width and height >= min_bbox pixels
+                    valid_mask = (boxes_pix[:, 2] >= self.min_bbox) & (boxes_pix[:, 3] >= self.min_bbox)
+                    lb = lb[valid_mask]
+                    fb += len(lb)  # count boxes after filtering
 
                     x["labels"].append(
                         {
