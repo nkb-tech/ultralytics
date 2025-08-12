@@ -47,20 +47,30 @@ class Detect(nn.Module):
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
 
-    def __init__(self, nc=80, ch=()):
+    def __init__(self, nc: list[int] = [80], ch: Tuple[int, ...] = (), reg_max: int = 16):
         """Initializes the YOLOv8 detection layer with specified number of classes and channels."""
         super().__init__()
-        self.nc = nc  # number of classes
+        # total class count across all heads
+        self.nc = nc
         self.nl = len(ch)  # number of detection layers
-        self.reg_max = 16 # 20 DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
-        self.no = nc + self.reg_max * 4  # number of outputs per anchor
+        self.reg_max = reg_max # 20 DFL channels (ch[0] // 16 to scale 4/8/12/16/20 for n/s/m/l/x)
+        # bbox distribution + per-head (conf, cls) outputs
+        self.no = self.reg_max * 4 + sum(nc)
         self.stride = torch.zeros(self.nl)  # strides computed during build
-        c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
+        c2 = max((16, ch[0] // 4, self.reg_max * 4))  # channels
+        c3 = [max(ch[0], min(nc_i, 100)) for nc_i in nc]  # channels
+
         self.cv2 = nn.ModuleList(
             nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1))
             for x in ch
         )
-        self.cv3 = nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+        self.cv3 = nn.ModuleList(
+            nn.ModuleList(
+                nn.Sequential(Conv(x, c3[i], 3), Conv(c3[i], c3[i], 3), nn.Conv2d(c3[i], nc[i], 1))
+                for x in ch
+            )
+            for i in range(len(nc))
+        )
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
         if self.end2end:
@@ -69,7 +79,10 @@ class Detect(nn.Module):
 
     def pre_forward(self, x):
         for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+            y = [self.cv2[i](x[i])]
+            for head in self.cv3:
+                y.append(head[i](x[i]))
+            x[i] = torch.cat(y, dim=1)
 
         return x  # BCHW
 
@@ -96,12 +109,19 @@ class Detect(nn.Module):
                            If in training mode, returns a dictionary containing the outputs of one2many and one2one detections separately.
         """
         x_detach = [xi.detach() for xi in x]
-        one2one = [
-            torch.cat((self.one2one_cv2[i](x_detach[i]), self.one2one_cv3[i](x_detach[i])), 1)
-            for i in range(self.nl)
-        ]
+        one2one = []
         for i in range(self.nl):
-            x[i] = torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1)
+            y = [self.one2one_cv2[i](x_detach[i])]
+            for head in self.one2one_cv3:
+                y.append(head[i](x_detach[i]))
+            one2one.append(torch.cat(y, dim=1))
+
+        for i in range(self.nl):
+            y = [self.cv2[i](x[i])]
+            for head in self.cv3:
+                y.append(head[i](x[i]))
+            x[i] = torch.cat(y, dim=1)
+
         if self.training:  # Training path
             return {"one2many": x, "one2one": one2one}
 
@@ -119,11 +139,8 @@ class Detect(nn.Module):
             self.anchors, self.strides = (x.transpose(0, 1) for x in make_anchors(x, self.stride, 0.5))
             self.shape = shape
 
-        if self.export and self.format in {"saved_model", "pb", "tflite", "edgetpu", "tfjs"}:  # avoid TF FlexSplitV ops
-            box = x_cat[:, : self.reg_max * 4]
-            cls = x_cat[:, self.reg_max * 4 :]
-        else:
-            box, cls = x_cat.split((self.reg_max * 4, self.nc), 1)
+        box = x_cat[:, : self.reg_max * 4]
+        cls = x_cat[:, self.reg_max * 4 :]
 
         if self.export and self.format in {"tflite", "edgetpu"}:
             # Precompute normalization factor to increase numerical stability
@@ -143,37 +160,56 @@ class Detect(nn.Module):
         m = self  # self.model[-1]  # Detect() module
         # cf = torch.bincount(torch.tensor(np.concatenate(dataset.labels, 0)[:, 0]).long(), minlength=nc) + 1
         # ncf = math.log(0.6 / (m.nc - 0.999999)) if cf is None else torch.log(cf / cf.sum())  # nominal class frequency
-        for a, b, s in zip(m.cv2, m.cv3, m.stride):  # from
+        for i, (a, s) in enumerate(zip(m.cv2, m.stride)):  # from
             a[-1].bias.data[:] = 1.0  # box
-            b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+            # init each head assuming 0.01 object prior per class
+            for b, nc_i in zip(m.cv3, m.nc):
+                b[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)
+    
         if self.end2end:
-            for a, b, s in zip(m.one2one_cv2, m.one2one_cv3, m.stride):  # from
+            for i, (a, s) in zip(m.one2one_cv2, m.stride):  # from
                 a[-1].bias.data[:] = 1.0  # box
-                b[-1].bias.data[: m.nc] = math.log(5 / m.nc / (640 / s) ** 2)  # cls (.01 objects, 80 classes, 640 img)
+                for b, nc_i in zip(m.one2one_cv3, m.nc):
+                    b[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)  # cls (.01 objects, nc_i classes, 640 img)
 
     def decode_bboxes(self, bboxes, anchors):
         """Decode bounding boxes."""
         return dist2bbox(bboxes, anchors, xywh=not self.end2end, dim=1)
 
     @staticmethod
-    def postprocess(preds: torch.Tensor, max_det: int, nc: int = 80):
+    def postprocess(preds: torch.Tensor, max_det: int, nc: list[int] = [80]):
         """
-        Post-processes the predictions obtained from a YOLOv10 model.
+        Post-processes the predictions obtained from a YOLOv10 model with multitask classification support.
 
         Args:
-            preds (torch.Tensor): The predictions obtained from the model. It should have a shape of (batch_size, num_boxes, 4 + num_classes).
+            preds (torch.Tensor): The predictions obtained from the model. It should have a shape of 
+                (batch_size, num_boxes, 4 + sum(num_classes)).
             max_det (int): The maximum number of detections to keep.
-            nc (int, optional): The number of classes. Defaults to 80.
+            nc (list[int], optional): List of number of classes for each task. Defaults to [80].
 
         Returns:
             (torch.Tensor): The post-processed predictions with shape (batch_size, max_det, 6),
                 including bounding boxes, scores and cls.
         """
-        assert 4 + nc == preds.shape[-1]
-        boxes, scores = preds.split([4, nc], dim=-1)
-        max_scores = scores.amax(dim=-1)
+        total_classes = sum(nc)
+        assert 4 + total_classes == preds.shape[-1]
+        
+        boxes, scores = preds.split([4, total_classes], dim=-1)
+        
+        # Split scores by task
+        start_idx = 0
+        task_scores = []
+        for num_classes in nc:
+            end_idx = start_idx + num_classes
+            task_scores.append(scores[:, :, start_idx:end_idx])
+            start_idx = end_idx
+        
+        # Use the first task's scores for ranking (primary classification)
+        primary_scores = task_scores[0]
+        max_scores = primary_scores.amax(dim=-1)
         max_scores, index = torch.topk(max_scores, min(max_det, max_scores.shape[1]), axis=-1)
         index = index.unsqueeze(-1)
+        
         boxes = torch.gather(boxes, dim=1, index=index.repeat(1, 1, boxes.shape[-1]))
         scores = torch.gather(scores, dim=1, index=index.repeat(1, 1, scores.shape[-1]))
 
@@ -182,8 +218,8 @@ class Detect(nn.Module):
         # return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1)], dim=-1)
 
         scores, index = torch.topk(scores.flatten(1), max_det, axis=-1)
-        labels = index % nc
-        index = index // nc
+        labels = index % total_classes
+        index = index // total_classes
         boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
 
         return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).to(boxes.dtype)], dim=-1)
@@ -702,21 +738,37 @@ class v10Pose(Detect):
             return y
 
     @staticmethod
-    def postprocess(detect_preds: torch.Tensor, kpt_preds: torch.Tensor, max_det: int, nc: int = 18, kpt_shape: tuple = (17, 3)):
+    def postprocess(detect_preds: torch.Tensor, kpt_preds: torch.Tensor, max_det: int, nc: list[int] = [18], kpt_shape: tuple = (17, 3)):
         """
-        Post-processes the keypoint predictions obtained from a YOLOv10 model.
+        Post-processes the keypoint predictions obtained from a YOLOv10 model with multitask classification support.
 
         Args:
-            preds (torch.Tensor): The predictions obtained from the model. It should have a shape of (batch_size, num_boxes, kpt_shape[0] * kpt_shape[1]).
+            detect_preds (torch.Tensor): The detection predictions obtained from the model. It should have a shape of 
+                (batch_size, num_boxes, 4 + sum(num_classes)).
+            kpt_preds (torch.Tensor): The keypoint predictions obtained from the model. It should have a shape of 
+                (batch_size, num_boxes, kpt_shape[0] * kpt_shape[1]).
             max_det (int): The maximum number of detections to keep.
-            nc (int, optional): The number of classes. Defaults to 80.
+            nc (list[int], optional): List of number of classes for each task. Defaults to [18].
+            kpt_shape (tuple, optional): Shape of keypoints (num_keypoints, num_dims). Defaults to (17, 3).
 
         """
         assert kpt_shape[0] * kpt_shape[1] == kpt_preds.shape[-1]
-        assert 4 + nc == detect_preds.shape[-1]
-        boxes, scores = detect_preds.split([4, nc], dim=-1)
+        total_classes = sum(nc)
+        assert 4 + total_classes == detect_preds.shape[-1]
         
-        max_scores = scores.amax(dim=-1)
+        boxes, scores = detect_preds.split([4, total_classes], dim=-1)
+        
+        # Split scores by task
+        start_idx = 0
+        task_scores = []
+        for num_classes in nc:
+            end_idx = start_idx + num_classes
+            task_scores.append(scores[:, :, start_idx:end_idx])
+            start_idx = end_idx
+        
+        # Use the first task's scores for ranking (primary classification)
+        primary_scores = task_scores[0]
+        max_scores = primary_scores.amax(dim=-1)
         max_scores, index = torch.topk(max_scores, min(max_det, max_scores.shape[1]), axis=-1)
         index = index.unsqueeze(-1)
         boxes = torch.gather(boxes, dim=1, index=index.repeat(1, 1, boxes.shape[-1]))
@@ -724,8 +776,8 @@ class v10Pose(Detect):
         kpts = torch.gather(kpt_preds, dim=1, index=index.repeat(1, 1, kpt_preds.shape[-1]))
         
         scores, index = torch.topk(scores.flatten(1), max_det, axis=-1)
-        labels = index % nc
-        index = index // nc
+        labels = index % total_classes
+        index = index // total_classes
         boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
         kpts = kpts.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, kpts.shape[-1]))
         
@@ -807,11 +859,33 @@ class v10Segment(Detect):
         return masks
 
     @staticmethod
-    def postprocess(detect_preds: torch.Tensor, masks: torch.Tensor, max_det: int, nc: int = 80):
-        """Applies non-max suppression and processes detections and masks."""
-        boxes, scores = detect_preds.split([4, nc], dim=-1)
+    def postprocess(detect_preds: torch.Tensor, masks: torch.Tensor, max_det: int, nc: list[int] = [80]):
+        """
+        Applies non-max suppression and processes detections and masks with multitask classification support.
+        
+        Args:
+            detect_preds (torch.Tensor): The detection predictions obtained from the model. It should have a shape of 
+                (batch_size, num_boxes, 4 + sum(num_classes)).
+            masks (torch.Tensor): The mask predictions obtained from the model.
+            max_det (int): The maximum number of detections to keep.
+            nc (list[int], optional): List of number of classes for each task. Defaults to [80].
+        """
+        total_classes = sum(nc)
+        assert 4 + total_classes == detect_preds.shape[-1]
+        
+        boxes, scores = detect_preds.split([4, total_classes], dim=-1)
 
-        max_scores = scores.amax(dim=-1)
+        # Split scores by task
+        start_idx = 0
+        task_scores = []
+        for num_classes in nc:
+            end_idx = start_idx + num_classes
+            task_scores.append(scores[:, :, start_idx:end_idx])
+            start_idx = end_idx
+        
+        # Use the first task's scores for ranking (primary classification)
+        primary_scores = task_scores[0]
+        max_scores = primary_scores.amax(dim=-1)
         max_scores, index = torch.topk(max_scores, min(max_det, max_scores.shape[1]), dim=-1)
         index = index.unsqueeze(-1)
 
@@ -821,8 +895,8 @@ class v10Segment(Detect):
         masks = masks.gather(dim=1, index=index.repeat(1, 1, 1, 1))
 
         scores, index = torch.topk(scores.flatten(1), max_det, dim=-1)
-        labels = index % nc  # Get class labels
-        index = index // nc  # Get box index
+        labels = index % total_classes  # Get class labels
+        index = index // total_classes  # Get box index
 
         boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
         masks = masks.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, masks.shape[-2], masks.shape[-1]))
@@ -929,3 +1003,4 @@ class PostDetectONNXNMS(PostDetectTRTNMS):
         selected_scores = max_score[X, Y, None]
         X = X.unsqueeze(1).float()
         return torch.cat([X, selected_boxes, selected_scores, selected_categories], 1)
+    

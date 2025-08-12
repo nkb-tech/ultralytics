@@ -3,6 +3,7 @@
 import math
 import random
 from copy import copy
+from pathlib import Path
 
 import numpy as np
 import torch.nn as nn
@@ -10,7 +11,7 @@ import torch.nn as nn
 from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
-from ultralytics.nn.tasks import DetectionModel
+from ultralytics.nn.tasks import DetectionModel, yaml_model_load
 from ultralytics.utils import LOGGER, RANK
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
@@ -85,9 +86,12 @@ class DetectionTrainer(BaseTrainer):
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
+        if isinstance(cfg, (str, Path)):
+            cfg = yaml_model_load(cfg)
+
         model = DetectionModel(
             cfg,
-            nc=1 if self.args.single_cls else self.data["nc"],
+            nc=[1, ] if self.args.single_cls else self.data["nc"],
             verbose=verbose and RANK == -1,
         )
         if weights:
@@ -134,11 +138,12 @@ class DetectionTrainer(BaseTrainer):
         plot_images(
             images=batch["img"],
             batch_idx=batch["batch_idx"],
-            cls=batch["cls"].squeeze(-1),
+            cls=batch["cls"],
             bboxes=batch["bboxes"],
             paths=batch["im_file"],
             fname=self.save_dir / f"train_batch{ni}.jpg",
             on_plot=self.on_plot,
+            names=self.data["names"],
         )
 
     def plot_metrics(self):

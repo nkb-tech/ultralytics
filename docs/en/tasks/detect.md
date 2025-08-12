@@ -272,3 +272,12 @@ Ultralytics YOLO11 is designed to offer state-of-the-art performance for object 
 4. **Flexibility**: Export models to various formats like ONNX and TensorRT for deployment across multiple platforms.
 
 Explore our [Blog](https://www.ultralytics.com/blog) for use cases and success stories showcasing YOLO11 in action.
+
+### Multi-label (multi-head) validation
+
+Ultralytics validators automatically support custom models with multiple detection heads. When the dataset YAML defines
+`names` as a list of lists, metrics are computed separately for each head and reported individually. A macro-average is
+also printed for quick comparison.
+
+### Multi-head architecture
+# TODO

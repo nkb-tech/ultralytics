@@ -56,7 +56,7 @@ from ultralytics.utils.torch_utils import (
 from ultralytics.utils.loss import DistillationLoss
 
 from types import SimpleNamespace
-from timm.optim.optim_factory import create_optimizer
+from timm.optim import create_optimizer
 
 
 
@@ -314,10 +314,13 @@ class BaseTrainer:
         if RANK in {-1, 0}:
             # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
             self.test_loader = self.get_dataloader(
-                self.testset, batch_size=batch_size if self.args.task == "obb" else batch_size * 2, rank=-1, mode="val"
+                dataset_path=self.testset,
+                batch_size=batch_size if self.args.task == "obb" else batch_size * 2,
+                rank=-1,
+                mode="val",
             )
             self.validator = self.get_validator()
-            metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix="val")
+            metric_keys = self.validator.metrics[0].keys + self.label_loss_items(prefix="val")
             self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
             self.ema = ModelEMA(self.model)
             if self.args.plots:
@@ -348,22 +351,19 @@ class BaseTrainer:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
         # Weighted loss (for classify task)
-        if self.args.weighted_loss and self.args.task=="classify":
+        if self.args.weighted_loss and self.args.task == "classify":
             weights = self.train_loader.dataset.calculate_weights(0.5)
             weights = torch.tensor([weights[k] for k in sorted(weights)], device=self.device, dtype=torch.float)
-            LOGGER.info(f'loss weights = {weights}')
+            LOGGER.info(f'Classify loss weights = {weights}')
             if world_size > 1:
                 self.model.criterion = self.model.module.init_criterion(weights)
             else:
                 self.model.criterion = self.model.init_criterion(weights)
 
-
         nb = len(self.train_loader)  # number of batches
         nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup iterations
         last_opt_step = -1
-        self.epoch_time = None
-        self.epoch_time_start = time.time()
-        self.train_time_start = time.time()
+        self.epoch_time, self.epoch_time_start, self.train_time_start = None, time.time(), time.time()
         self.run_callbacks("on_train_start")
         LOGGER.info(
             f'Image sizes {self.args.imgsz} train, {self.args.imgsz} val\n'
@@ -470,7 +470,7 @@ class BaseTrainer:
                         % (
                             f"{epoch + 1}/{self.epochs}",
                             f"{self._get_memory():.3g}G",  # (GB) GPU memory util
-                            *(self.tloss if loss_length > 1 else torch.unsqueeze(self.tloss, 0)),  # losses
+                            *(self.tloss if loss_length > 1 else self.tloss.unsqueeze(0)),  # losses
                             batch["cls"].shape[0],  # batch size, i.e. 8
                             batch["img"].shape[-1],  # imgsz, i.e 640
                         )
@@ -528,7 +528,8 @@ class BaseTrainer:
             seconds = time.time() - self.train_time_start  # total training seconds
             LOGGER.info(f"\n{epochs} epochs completed in {seconds / 3600:.3f} hours.")
             self.final_eval()
-            self.validator.metrics.training = {"epochs": epochs, "seconds": seconds}  # add training speed
+            for m in self.validator.metrics:
+                m.training = {"epochs": epochs, "seconds": seconds}
             if self.args.plots:
                 self.plot_metrics()
             self.run_callbacks("on_train_end")
@@ -844,7 +845,7 @@ class BaseTrainer:
                 f"ignoring 'lr0={self.args.lr0}' and 'momentum={self.args.momentum}' and "
                 f"determining best 'optimizer', 'lr0' and 'momentum' automatically... "
             )
-            nc = getattr(model, "nc", 10)  # number of classes
+            nc = sum(getattr(model, "nc"))  # number of classes
             lr_fit = round(0.002 * 5 / (4 + nc), 6)  # lr0 fit equation to 6 decimal places
             name, lr, momentum = ("SGD", 0.01, 0.9) if iterations > 10000 else ("AdamW", lr_fit, 0.9)
             self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
@@ -868,7 +869,7 @@ class BaseTrainer:
 
         # timm optimizers https://timm.fast.ai/Optimizers & https://github.com/huggingface/pytorch-image-models/blob/4d4bdd64a996bf7b5919ec62f20af4a1c07d5848/timm/optim/optim_factory.py#L183
         elif name in {
-            'nadam', 'radam', 'adamp', 'Lookahead_Adam',  'lion', 'rmsproptf', 'rmsprop', 'novograd' , 'nvnovograd', 'madgradw',  'madgrad', 'adahessian',
+            'nadam', 'radam', 'adamp', 'Lookahead_Adam', 'lion', 'rmsproptf', 'rmsprop', 'novograd' , 'nvnovograd', 'madgradw',  'madgrad', 'adahessian',
             'nlars', 'nlarc', 'lars', 'lambc','lamb', 'adanw', 'adanp', 'adafactor', 'adagrad', 'adadelta', 'radabelief',  'adabelief','adamax',
         }:
             args = SimpleNamespace()

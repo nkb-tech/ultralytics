@@ -119,7 +119,7 @@ class BaseValidator:
                 self.loss = torch.zeros_like(trainer.loss_items, device=trainer.device)
             else:
                 self.loss = torch.zeros(
-                    len(trainer.loss_items-1)
+                    len(trainer.loss_items) - 1
                     if self.args.teacher is not None
                     else len(trainer.loss_items),
                     device=trainer.device,

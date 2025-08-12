@@ -9,7 +9,12 @@ import torch
 from PIL import Image
 from torch.utils.data import dataloader, distributed
 
-from ultralytics.data.dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset, YOLOWeightedDataset
+from ultralytics.data.dataset import (
+    GroundingDataset,
+    YOLODataset,
+    YOLOWeightedDataset,
+    YOLOMultiModalDataset,
+)
 from ultralytics.data.loaders import (
     LOADERS,
     LoadImagesAndVideos,
@@ -107,7 +112,6 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
     return dataset(
         img_path=img_path,
         imgsz=cfg.imgsz,
-        min_size=cfg.min_size,
         batch_size=batch,
         cut_strategy=cut_strategy,
         sampling_rate=cfg.sampling_rate,
@@ -135,7 +139,7 @@ def build_grounding(cfg, img_path, json_file, batch, mode="train", rect=False, s
         img_path=img_path,
         json_file=json_file,
         imgsz=cfg.imgsz,
-        min_size=cfg.min_size,
+        min_imgsz=cfg.min_imgsz,
         batch_size=batch,
         augment=mode == "train",  # augmentation
         hyp=cfg,  # TODO: probably add a get_hyps_from_cfg function

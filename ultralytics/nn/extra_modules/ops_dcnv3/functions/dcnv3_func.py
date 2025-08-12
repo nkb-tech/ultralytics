@@ -12,7 +12,7 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
-from torch.cuda.amp import custom_bwd, custom_fwd
+from torch.amp import custom_bwd, custom_fwd
 try:
     import DCNv3
     import pkg_resources
@@ -22,7 +22,7 @@ except:
 
 class DCNv3Function(Function):
     @staticmethod
-    @custom_fwd
+    @custom_fwd(device_type="cuda")
     def forward(
             ctx, input, offset, mask,
             kernel_h, kernel_w, stride_h, stride_w,
@@ -58,7 +58,7 @@ class DCNv3Function(Function):
 
     @staticmethod
     @once_differentiable
-    @custom_bwd
+    @custom_bwd(device_type="cuda")
     def backward(ctx, grad_output):
         input, offset, mask = ctx.saved_tensors
 

@@ -2,20 +2,28 @@
 import math
 import random
 from copy import deepcopy
-from typing import Tuple, Union
+from typing import Tuple, Union, Any
 
 import cv2
 import numpy as np
 import torch
 from PIL import Image
 
-from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
+from numba import njit
 from ultralytics.utils import LOGGER, colorstr
 from ultralytics.utils.checks import check_version
 from ultralytics.utils.instance import Instances
 from ultralytics.utils.metrics import bbox_ioa
 from ultralytics.utils.ops import segment2box, xyxyxyxy2xywhr
+from ultralytics.utils.ops import masks2segments, resample_segments, segment2box
+from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils.torch_utils import TORCHVISION_0_10, TORCHVISION_0_11, TORCHVISION_0_13
+
+from albumentations import AtLeastOneBBoxRandomCrop
+from albumentations.core.transforms_interface import DualTransform
+from albumentations.augmentations.crops.transforms import CropSizeError
+
+# from .glitche import Ntsc, VHSSpeed, NumpyRandom
 
 # from .glitche import Ntsc, VHSSpeed, NumpyRandom
 
@@ -63,6 +71,7 @@ class BaseTransform:
         Examples:
             >>> transform = BaseTransform()
         """
+        pass
 
     def apply_image(self, labels):
         """
@@ -85,6 +94,7 @@ class BaseTransform:
             >>> print(transformed_labels)
             [1, 2, 3]
         """
+        pass
 
     def apply_instances(self, labels):
         """
@@ -105,6 +115,7 @@ class BaseTransform:
             >>> labels = {"instances": Instances(xyxy=torch.rand(5, 4), cls=torch.randint(0, 80, (5,)))}
             >>> transformed_labels = transform.apply_instances(labels)
         """
+        pass
 
     def apply_semantic(self, labels):
         """
@@ -124,6 +135,7 @@ class BaseTransform:
             >>> semantic_mask = np.zeros((100, 100), dtype=np.uint8)
             >>> transformed_mask = transform.apply_semantic(semantic_mask)
         """
+        pass
 
     def __call__(self, labels):
         """
@@ -1438,6 +1450,117 @@ class CutMix(BaseMixTransform):
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         return labels
 
+class CutMix(BaseMixTransform):
+    """
+    Applies CutMix augmentation to image datasets as described in the paper https://arxiv.org/abs/1905.04899.
+
+    CutMix combines two images by replacing a random rectangular region of one image with the corresponding region from another image,
+    and adjusts the labels proportionally to the area of the mixed region.
+
+    Attributes:
+        dataset (Any): The dataset to which CutMix augmentation will be applied.
+        pre_transform (Callable | None): Optional transform to apply before CutMix.
+        p (float): Probability of applying CutMix augmentation.
+        beta (float): Beta distribution parameter for sampling the mixing ratio (default=1.0).
+
+    Methods:
+        get_indexes: Returns a random index from the dataset.
+        _mix_transform: Applies CutMix augmentation to the input labels.
+        _rand_bbox: Generates random bounding box coordinates for the cut region.
+
+    Examples:
+        >>> from ultralytics.data.augment import CutMix
+        >>> dataset = YourDataset(...)  # Your image dataset
+        >>> cutmix = CutMix(dataset, p=0.5)
+        >>> augmented_labels = cutmix(original_labels)
+    """
+
+    def __init__(self, dataset, pre_transform=None, p=0.0, beta=1.0) -> None:
+        """
+        Initializes the CutMix augmentation object.
+
+        Args:
+            dataset (Any): The dataset to which CutMix augmentation will be applied.
+            pre_transform (Callable | None): Optional transform to apply before CutMix.
+            p (float): Probability of applying CutMix augmentation.
+            beta (float): Beta distribution parameter for sampling the mixing ratio (default=1.0).
+        """
+        super().__init__(dataset=dataset, pre_transform=pre_transform, p=p)
+        self.beta = beta
+
+    def get_indexes(self):
+        """
+        Get a random index from the dataset.
+
+        Returns:
+            (int): A random integer index within the range of the dataset length.
+        """
+        return random.randint(0, len(self.dataset) - 1)
+
+    def _rand_bbox(self, width, height, lam):
+        """
+        Generates random bounding box coordinates for the cut region.
+
+        Args:
+            width (int): Width of the image.
+            height (int): Height of the image.
+            lam (float): Mixing ratio from the Beta distribution.
+
+        Returns:
+            (tuple): (x1, y1, x2, y2) coordinates of the bounding box.
+        """
+        cut_ratio = np.sqrt(1.0 - lam)
+        cut_w = int(width * cut_ratio)
+        cut_h = int(height * cut_ratio)
+
+        # Random center
+        cx = np.random.randint(width)
+        cy = np.random.randint(height)
+
+        # Bounding box coordinates
+        x1 = np.clip(cx - cut_w // 2, 0, width)
+        y1 = np.clip(cy - cut_h // 2, 0, height)
+        x2 = np.clip(cx + cut_w // 2, 0, width)
+        y2 = np.clip(cy + cut_h // 2, 0, height)
+
+        return x1, y1, x2, y2
+
+    def _mix_transform(self, labels):
+        """
+        Applies CutMix augmentation to the input labels.
+
+        Args:
+            labels (dict): A dictionary containing the original image and label information.
+
+        Returns:
+            (dict): A dictionary containing the mixed image and adjusted labels.
+
+        Examples:
+            >>> cutter = CutMix(dataset)
+            >>> mixed_labels = cutter._mix_transform(labels)
+        """
+        # Sample mixing ratio from Beta distribution
+        lam = np.random.beta(self.beta, self.beta)
+
+        # Get a random second image
+        labels2 = labels["mix_labels"][0]
+        img2 = labels2["img"]
+        h, w = labels["img"].shape[:2]
+
+        # Generate random bounding box
+        x1, y1, x2, y2 = self._rand_bbox(w, h, lam)
+
+        # Apply CutMix
+        labels["img"][y1:y2, x1:x2] = img2[y1:y2, x1:x2]
+
+        # Adjust lambda to match the actual area ratio
+        lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
+
+        labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], axis=0)
+        labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
+        return labels
+
+
 
 class RandomHSV:
     """
@@ -2382,6 +2505,7 @@ class Format:
         mask_overlap=True,
         batch_idx=True,
         bgr=0.0,
+        n_cls_tasks=1,
     ):
         """
         Initializes the Format class with given parameters for image and instance annotation formatting.
@@ -2399,6 +2523,7 @@ class Format:
             mask_overlap (bool): If True, allows mask overlap.
             batch_idx (bool): If True, keeps batch indexes.
             bgr (float): Probability of returning BGR images instead of RGB.
+            n_cls_tasks (int): Number of classification tasks.
 
         Attributes:
             bbox_format (str): Format for bounding boxes.
@@ -2410,6 +2535,7 @@ class Format:
             mask_overlap (bool): Whether masks can overlap.
             batch_idx (bool): Whether to keep batch indexes.
             bgr (float): The probability to return BGR images.
+            n_cls_tasks (int): Number of classification tasks.
 
         Examples:
             >>> format = Format(bbox_format="xyxy", return_mask=True, return_keypoint=False)
@@ -2425,6 +2551,7 @@ class Format:
         self.mask_overlap = mask_overlap
         self.batch_idx = batch_idx  # keep the batch indexes
         self.bgr = bgr
+        self.n_cls_tasks = n_cls_tasks
 
     def __call__(self, labels):
         """
@@ -2473,7 +2600,7 @@ class Format:
                 )
             labels["masks"] = masks
         labels["img"] = self._format_img(img)
-        labels["cls"] = torch.from_numpy(cls).view(-1, 1) if nl else torch.zeros(nl)
+        labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl, self.n_cls_tasks)
         labels["bboxes"] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
         if self.return_keypoint:
             labels["keypoints"] = torch.from_numpy(instances.keypoints)
@@ -2761,6 +2888,33 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         "saturation": hyp.albu_saturation if hasattr(hyp, "albu_saturation") else None,
         "hue": hyp.albu_hue if hasattr(hyp, "albu_hue") else None,
     }
+        
+    # alb = Albumentations(hyp=hyp, p=1.0)
+    # resize = LetterBox(new_shape=(imgsz, imgsz),
+    #                    auto=False,        # строго imgsz×imgsz
+    #                    scaleFill=False,  # паддинги вместо растяжения
+    #                    scaleup=True,      # допускаем upscale
+    #                    center=True)
+
+    # rp = RandomPerspective(degrees=hyp.degrees,
+    #                        translate=hyp.translate,
+    #                        scale=hyp.scale,
+    #                        shear=hyp.shear,
+    #                        perspective=hyp.perspective,
+    #                        border=(0, 0),      # без мозаичных бордеров
+    #                        pre_transform=None) # LetterBox уже применили
+
+    # misc = Compose([
+    #     MixUp(dataset, p=hyp.mixup),
+    #     # CutMix(dataset, p=hyp.cutmix),
+    #     RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+    #     RandomFlip(direction="vertical",   p=hyp.flipud),
+    #     RandomFlip(direction="horizontal", p=hyp.fliplr,
+    #                flip_idx=dataset.data.get("flip_idx", [])),
+    # ])
+
+    # return Compose([resize, rp, misc])
+    
     return Compose(
         [
             pre_transform,
@@ -2772,6 +2926,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
         ]
     )  # transforms
+
 
 
 def crop_transforms(dataset, imgsz, hyp, stretch=False):
@@ -2903,6 +3058,7 @@ def classify_transforms(
     # else:
     #     scale_size = math.floor(size / crop_fraction)
     #     scale_size = (scale_size, scale_size)
+
     # # Aspect ratio is preserved, crops center within image, no borders are added, image is lost
     # if scale_size[0] == scale_size[1]:
     #     # Simple case, use torchvision built-in Resize with the shortest edge mode (scalar size arg)
@@ -2940,14 +3096,14 @@ def classify_augmentations(
     force_color_jitter=False,
     erasing=0.0,
     interpolation="BILINEAR",
-    albu_dropout_prob=0.1,
-    albu_quality_lower=75,
-    albu_max_factor=1.1,
-    albu_clip_limit=2,
-    albu_brightness=0.3,
-    albu_contrast=0.4,
-    albu_saturation=0.3,
-    albu_hue=0.3,
+    albu_dropout_prob = 0.1,
+    albu_quality_lower = 75,
+    albu_max_factor = 1.1,
+    albu_clip_limit = 2,
+    albu_brightness = 0.3,
+    albu_contrast = 0.4,
+    albu_saturation = 0.3 ,
+    albu_hue = 0.3,
 ):
     """
     Creates a composition of image augmentation transforms for classification tasks.
@@ -3041,19 +3197,19 @@ def classify_augmentations(
     if not disable_color_jitter:
         secondary_tfl.append(T.ColorJitter(brightness=hsv_v, contrast=hsv_v, saturation=hsv_s, hue=hsv_h))
 
-    # albu_args = {
-    #     "dropout_prob": albu_dropout_prob,
-    #     "quality_lower": albu_quality_lower,
-    #     "max_factor": albu_max_factor,
-    #     "clip_limit": albu_clip_limit,
-    #     "brightness": albu_brightness,
-    #     "contrast": albu_contrast,
-    #     "saturation": albu_saturation,
-    #     "hue": albu_hue,
-    # }
+    albu_args = {
+                "dropout_prob":albu_dropout_prob,
+                "quality_lower":albu_quality_lower,
+                "max_factor":albu_max_factor,
+                "clip_limit":albu_clip_limit,
+                "brightness":albu_brightness,
+                "contrast":albu_contrast,
+                "saturation":albu_saturation,
+                "hue":albu_hue,
+            }
     final_tfl = [
         # T.RandomChoice([RandomGlitche(p=1), Albumentations(p=1., task='classify', args=albu_args)], p=[1,1]),
-        # T.RandomApply([RandomGlitche(p=1)], p=0.5),
+        #T.RandomApply([RandomGlitche(p=1)], p=0.5),
         T.RandomApply([T.Grayscale(num_output_channels=3)], p=0.5),
         T.ToTensor(),
         T.Normalize(mean=torch.tensor(mean), std=torch.tensor(std)),

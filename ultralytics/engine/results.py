@@ -228,7 +228,17 @@ class Results(SimpleClass):
     """
 
     def __init__(
-        self, orig_img, path, names, boxes=None, masks=None, probs=None, keypoints=None, obb=None, speed=None
+        self,
+        orig_img,
+        path,
+        names,
+        boxes=None,
+        masks=None,
+        probs=None,
+        keypoints=None,
+        obb=None,
+        speed=None,
+        is_track=False,
     ) -> None:
         """
         Initialize the Results class for storing and manipulating inference results.
@@ -243,6 +253,7 @@ class Results(SimpleClass):
             keypoints (torch.Tensor | None): A 2D tensor of keypoint coordinates for each detection.
             obb (torch.Tensor | None): A 2D tensor of oriented bounding box coordinates for each detection.
             speed (Dict | None): A dictionary containing preprocess, inference, and postprocess speeds (ms/image).
+            is_track (bool): Indicates whether tracking IDs are included in the box data. Defaults to False.
 
         Examples:
             >>> results = model("path/to/image.jpg")
@@ -259,7 +270,7 @@ class Results(SimpleClass):
         """
         self.orig_img = orig_img
         self.orig_shape = orig_img.shape[:2]
-        self.boxes = Boxes(boxes, self.orig_shape) if boxes is not None else None  # native size boxes
+        self.boxes = Boxes(boxes, self.orig_shape, is_track=False) if boxes is not None else None  # native size boxes
         self.masks = Masks(masks, self.orig_shape) if masks is not None else None  # native size or imgsz masks
         self.probs = Probs(probs) if probs is not None else None
         self.keypoints = Keypoints(keypoints, self.orig_shape) if keypoints is not None else None
@@ -305,7 +316,7 @@ class Results(SimpleClass):
             if v is not None:
                 return len(v)
 
-    def update(self, boxes=None, masks=None, probs=None, obb=None):
+    def update(self, boxes=None, masks=None, probs=None, obb=None, is_track=False):
         """
         Updates the Results object with new detection data.
 
@@ -325,7 +336,7 @@ class Results(SimpleClass):
             >>> results[0].update(boxes=new_boxes)
         """
         if boxes is not None:
-            self.boxes = Boxes(ops.clip_boxes(boxes, self.orig_shape), self.orig_shape)
+            self.boxes = Boxes(ops.clip_boxes(boxes, self.orig_shape), self.orig_shape, is_track=is_track)
         if masks is not None:
             self.masks = Masks(masks, self.orig_shape)
         if probs is not None:
@@ -441,7 +452,13 @@ class Results(SimpleClass):
             >>> results = model("path/to/image.jpg")
             >>> new_result = results[0].new()
         """
-        return Results(orig_img=self.orig_img, path=self.path, names=self.names, speed=self.speed)
+        return Results(
+            orig_img=self.orig_img,
+            path=self.path,
+            names=self.names,
+            speed=self.speed,
+            is_track=self.boxes.is_track,
+        )
 
     def plot(
         self,
@@ -535,15 +552,21 @@ class Results(SimpleClass):
         # Plot Detect results
         if pred_boxes is not None and show_boxes:
             for i, d in enumerate(reversed(pred_boxes)):
-                c, conf, id = int(d.cls), float(d.conf) if conf else None, None if d.id is None else int(d.id.item())
-                name = ("" if id is None else f"id:{id} ") + names[c]
-                label = (f"{name} {conf:.2f}" if conf else name) if labels else None
+                id = int(d.id.item()) if d.is_track else None
+                b = d.data[0]  # b = [x1, y1, x2, y2, conf1, cls1, conf2, cls2, ...]
+                label_lines, num_tasks = [], (len(b) - 4) // 2
+                for t in range(num_tasks):
+                    conf, cls = float(b[4 + t * 2]), int(b[5 + t * 2])
+                    name = ("" if id is None else f"id:{id} ") + names[t][cls]
+                    label = (f"{name} {conf:.2f}" if conf else name) if labels else None
+                    label_lines.append(label)
+
                 box = d.xyxyxyxy.reshape(-1, 4, 2).squeeze() if is_obb else d.xyxy.squeeze()
                 annotator.box_label(
-                    box,
-                    label,
+                    box=box,
+                    labels=label_lines,
                     color=colors(
-                        c
+                        cls
                         if color_mode == "class"
                         else id
                         if id is not None
@@ -552,7 +575,6 @@ class Results(SimpleClass):
                         else None,
                         True,
                     ),
-                    rotated=is_obb,
                 )
 
         # Plot Classify results
@@ -660,7 +682,7 @@ class Results(SimpleClass):
         if boxes:
             for c in boxes.cls.unique():
                 n = (boxes.cls == c).sum()  # detections per class
-                log_string += f"{n} {self.names[int(c)]}{'s' * (n > 1)}, "
+                log_string += f"{n} {self.names[0][int(c)]}{'s' * (n > 1)}, "
         return log_string
 
     def save_txt(self, txt_file, save_conf=False):
@@ -973,7 +995,7 @@ class Boxes(BaseTensor):
         >>> print(boxes.xywhn)
     """
 
-    def __init__(self, boxes, orig_shape) -> None:
+    def __init__(self, boxes, orig_shape, is_track=False) -> None:
         """
         Initialize the Boxes class with detection box data and the original image shape.
 
@@ -986,6 +1008,7 @@ class Boxes(BaseTensor):
                 (num_boxes, 6) or (num_boxes, 7). Columns should contain
                 [x1, y1, x2, y2, confidence, class, (optional) track_id].
             orig_shape (Tuple[int, int]): The original image shape as (height, width). Used for normalization.
+            is_track (bool): Indicates whether tracking IDs are included in the box data. Defaults to False.
 
         Attributes:
             data (torch.Tensor): The raw tensor containing detection boxes and their associated data.
@@ -1003,9 +1026,9 @@ class Boxes(BaseTensor):
         if boxes.ndim == 1:
             boxes = boxes[None, :]
         n = boxes.shape[-1]
-        assert n in {6, 7}, f"expected 6 or 7 values but got {n}"  # xyxy, track_id, conf, cls
+        assert n > 6, f"expected more than 6 values but got {n}"  # xywh, rotation, track_id, conf, cls
         super().__init__(boxes, orig_shape)
-        self.is_track = n == 7
+        self.is_track = is_track
         self.orig_shape = orig_shape
 
     @property
@@ -1040,7 +1063,7 @@ class Boxes(BaseTensor):
             >>> print(conf_scores)
             tensor([0.9000])
         """
-        return self.data[:, -2]
+        return self.data[:, 4]
 
     @property
     def cls(self):
@@ -1057,8 +1080,8 @@ class Boxes(BaseTensor):
             >>> class_ids = boxes.cls
             >>> print(class_ids)  # tensor([0., 2., 1.])
         """
-        return self.data[:, -1]
-
+        return self.data[:, 5]
+    
     @property
     def id(self):
         """

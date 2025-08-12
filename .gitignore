@@ -54,7 +54,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 mlruns/
-
+*.patch
 # Translations
 *.mo
 *.pot
@@ -169,3 +169,5 @@ pnnx*
 
 # calibration image
 calibration_*.npy
+tests/*
+multihead_training_test.py

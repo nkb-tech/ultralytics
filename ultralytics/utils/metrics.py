@@ -390,7 +390,7 @@ class ConfusionMatrix:
 
     @TryExcept("WARNING ⚠️ ConfusionMatrix plot failure")
     @plt_settings()
-    def plot(self, normalize=True, save_dir="", names=(), on_plot=None):
+    def plot(self, normalize=True, save_dir="", names=(), on_plot=None, prefix=""):
         """
         Plot the confusion matrix using seaborn and save it to a file.
 
@@ -399,6 +399,7 @@ class ConfusionMatrix:
             save_dir (str): Directory where the plot will be saved.
             names (tuple): Names of classes, used as labels on the plot.
             on_plot (func): An optional callback to pass plots path and data when they are rendered.
+            prefix (str): Filename prefix for saved plots.
         """
         import seaborn  # scope for faster 'import ultralytics'
 
@@ -428,7 +429,7 @@ class ConfusionMatrix:
         ax.set_xlabel("True")
         ax.set_ylabel("Predicted")
         ax.set_title(title)
-        plot_fname = Path(save_dir) / f'{title.lower().replace(" ", "_")}.png'
+        plot_fname = Path(save_dir) / f'{prefix}{title.lower().replace(" ", "_")}.png'
         fig.savefig(plot_fname, dpi=250)
         plt.close(fig)
         if on_plot:
@@ -834,8 +835,17 @@ class DetMetrics(SimpleClass):
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
         self.task = "detect"
 
-    def process(self, tp, conf, pred_cls, target_cls):
-        """Process predicted results for object detection and update metrics."""
+    def process(self, tp, conf, pred_cls, target_cls, prefix=""):
+        """Process predicted results for object detection and update metrics.
+
+        Args:
+            tp (np.ndarray): True-positive matrix.
+            conf (np.ndarray): Confidence scores.
+            pred_cls (np.ndarray): Predicted classes.
+            target_cls (np.ndarray): Ground truth classes.
+            prefix (str): Filename prefix for saved plots.
+        """
+
         results = ap_per_class(
             tp,
             conf,
@@ -845,6 +855,7 @@ class DetMetrics(SimpleClass):
             save_dir=self.save_dir,
             names=self.names,
             on_plot=self.on_plot,
+            prefix=prefix,
         )[2:]
         self.box.nc = len(self.names)
         self.box.update(results)
@@ -852,7 +863,7 @@ class DetMetrics(SimpleClass):
     @property
     def keys(self):
         """Returns a list of keys for accessing specific metrics."""
-        return ["metrics/precision(B)", "metrics/recall(B)", "metrics/mAP50(B)", "metrics/mAP50-95(B)"]
+        return ["m/precision(B)", "m/recall(B)", "m/mAP50(B)", "m/mAP50-95(B)"]
 
     def mean_results(self):
         """Calculate mean of detected objects & return precision, recall, mAP50, and mAP50-95."""

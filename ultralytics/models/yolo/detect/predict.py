@@ -23,6 +23,7 @@ class DetectionPredictor(BasePredictor):
     def postprocess(self, preds, img, orig_imgs):
         """Post-processes predictions and returns a list of Results objects."""
         if not self.nms:
+            m = self.model.model.model[-1]  # detect head
             preds = ops.non_max_suppression(
                 preds,
                 self.args.conf,
@@ -30,6 +31,7 @@ class DetectionPredictor(BasePredictor):
                 agnostic=self.args.agnostic_nms,
                 max_det=self.args.max_det,
                 classes=self.args.classes,
+                nc=m.nc,
             )
         elif self.engine:
             preds = ops.process_nms_trt_results(preds, self.output_names)

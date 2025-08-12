@@ -25,12 +25,10 @@ class TaskAlignedAssigner(nn.Module):
         eps (float): A small value to prevent division by zero.
     """
 
-    def __init__(self, topk=13, num_classes=80, alpha=1.0, beta=6.0, eps=1e-9):
+    def __init__(self, topk=13, alpha=1.0, beta=6.0, eps=1e-9):
         """Initialize a TaskAlignedAssigner object with customizable hyperparameters."""
         super().__init__()
         self.topk = topk
-        self.num_classes = num_classes
-        self.bg_idx = num_classes
         self.alpha = alpha
         self.beta = beta
         self.eps = eps
@@ -56,17 +54,15 @@ class TaskAlignedAssigner(nn.Module):
             fg_mask (Tensor): shape(bs, num_total_anchors)
             target_gt_idx (Tensor): shape(bs, num_total_anchors)
         """
-        self.bs = pd_scores.shape[0]
+        self.bs, na = pd_scores.shape[0], pd_scores.shape[1]
         self.n_max_boxes = gt_bboxes.shape[1]
 
         if self.n_max_boxes == 0:
             device = gt_bboxes.device
             return (
-                torch.full_like(pd_scores[..., 0], self.bg_idx).to(device),
-                torch.zeros_like(pd_bboxes).to(device),
-                torch.zeros_like(pd_scores).to(device),
-                torch.zeros_like(pd_scores[..., 0]).to(device),
-                torch.zeros_like(pd_scores[..., 0]).to(device),
+                torch.zeros(self.bs, na, 1, device=device),
+                torch.zeros(self.bs, na, device=device, dtype=torch.bool),
+                torch.zeros(self.bs, na, device=device, dtype=torch.long),
             )
 
         mask_pos, align_metric, overlaps = self.get_pos_mask(
@@ -75,17 +71,30 @@ class TaskAlignedAssigner(nn.Module):
 
         target_gt_idx, fg_mask, mask_pos = self.select_highest_overlaps(mask_pos, overlaps, self.n_max_boxes)
 
-        # Assigned target
-        target_labels, target_bboxes, target_scores = self.get_targets(gt_labels, gt_bboxes, target_gt_idx, fg_mask)
+        norm_align_metric = self.get_norm_align_metric(align_metric, mask_pos, overlaps)
+        target_gt_idx = self.prepare_targets(target_gt_idx)
 
+        return norm_align_metric, fg_mask.bool(), target_gt_idx
+
+    @torch.no_grad()
+    def get_norm_align_metric(self, align_metric, mask_pos, overlaps):
+        """Get normalized alignment metric.
+
+        Args:
+            align_metric (Tensor): shape(bs, n_max_boxes, h*w) - alignment metric
+            mask_pos (Tensor): shape(bs, n_max_boxes, h*w) - mask of positive anchor points
+            overlaps (Tensor): shape(bs, n_max_boxes, h*w) - overlaps between anchor points and ground truth boxes
+
+        Returns:
+            norm_align_metric (Tensor): shape(bs, n_max_boxes, 1) - normalized alignment metric
+        """
         # Normalize
-        align_metric *= mask_pos
+        align_metric = mask_pos * align_metric
         pos_align_metrics = align_metric.amax(dim=-1, keepdim=True)  # b, max_num_obj
         pos_overlaps = (overlaps * mask_pos).amax(dim=-1, keepdim=True)  # b, max_num_obj
         norm_align_metric = (align_metric * pos_overlaps / (pos_align_metrics + self.eps)).amax(-2).unsqueeze(-1)
-        target_scores = target_scores * norm_align_metric
 
-        return target_labels, target_bboxes, target_scores, fg_mask.bool(), target_gt_idx
+        return norm_align_metric
 
     def get_pos_mask(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt):
         """Get in_gts mask, (b, max_num_obj, h*w)."""
@@ -159,14 +168,27 @@ class TaskAlignedAssigner(nn.Module):
 
         return count_tensor.to(metrics.dtype)
 
-    def get_targets(self, gt_labels, gt_bboxes, target_gt_idx, fg_mask):
+    def prepare_targets(self, target_gt_idx):
+        """Prepare targets for the positive anchor points."""
+        # Assigned target labels, (b, 1)
+        batch_ind = torch.arange(end=self.bs, dtype=torch.int64, device=target_gt_idx.device)[..., None]
+        target_gt_idx = target_gt_idx + batch_ind * self.n_max_boxes  # (b, h*w)
+
+        return target_gt_idx
+
+    def get_bboxes(self, gt_bboxes, target_gt_idx, fg_mask):
+        """Get bounding boxes for the positive anchor points."""
+        if gt_bboxes.shape[1] == 0:
+            return torch.zeros(self.bs, fg_mask.shape[1], gt_bboxes.shape[-1], device=gt_bboxes.device)
+        return gt_bboxes.view(-1, gt_bboxes.shape[-1])[target_gt_idx]  # (b, h*w, 4)
+
+    def get_scores(self, gt_labels, target_gt_idx, fg_mask, num_classes):
         """
         Compute target labels, target bounding boxes, and target scores for the positive anchor points.
 
         Args:
             gt_labels (Tensor): Ground truth labels of shape (b, max_num_obj, 1), where b is the
                                 batch size and max_num_obj is the maximum number of objects.
-            gt_bboxes (Tensor): Ground truth bounding boxes of shape (b, max_num_obj, 4).
             target_gt_idx (Tensor): Indices of the assigned ground truth objects for positive
                                     anchor points, with shape (b, h*w), where h*w is the total
                                     number of anchor points.
@@ -174,38 +196,34 @@ class TaskAlignedAssigner(nn.Module):
                               (foreground) anchor points.
 
         Returns:
-            (Tuple[Tensor, Tensor, Tensor]): A tuple containing the following tensors:
+            (Tuple[Tensor, Tensor]): A tuple containing the following tensors:
                 - target_labels (Tensor): Shape (b, h*w), containing the target labels for
                                           positive anchor points.
-                - target_bboxes (Tensor): Shape (b, h*w, 4), containing the target bounding boxes
-                                          for positive anchor points.
                 - target_scores (Tensor): Shape (b, h*w, num_classes), containing the target scores
                                           for positive anchor points, where num_classes is the number
                                           of object classes.
         """
-        # Assigned target labels, (b, 1)
-        batch_ind = torch.arange(end=self.bs, dtype=torch.int64, device=gt_labels.device)[..., None]
-        target_gt_idx = target_gt_idx + batch_ind * self.n_max_boxes  # (b, h*w)
-        target_labels = gt_labels.long().flatten()[target_gt_idx]  # (b, h*w)
+        if gt_labels.shape[1] == 0:
+            return (
+                torch.full((self.bs, fg_mask.shape[1]), fill_value=num_classes, device=gt_labels.device, dtype=gt_labels.dtype),
+                torch.zeros((self.bs, fg_mask.shape[1], num_classes), device=gt_labels.device),
+            )
+        # Assigned target labels, (b, h*w)
+        target_labels = gt_labels.long().flatten()[target_gt_idx].clamp_(0)  # (b, h*w)
 
-        # Assigned target boxes, (b, max_num_obj, 4) -> (b, h*w, 4)
-        target_bboxes = gt_bboxes.view(-1, gt_bboxes.shape[-1])[target_gt_idx]
-
-        # Assigned target scores
-        target_labels.clamp_(0)
-
+        # Assigned target scores, (b, h*w, num_classes)
         # 10x faster than F.one_hot()
         target_scores = torch.zeros(
-            (target_labels.shape[0], target_labels.shape[1], self.num_classes),
+            (target_labels.shape[0], target_labels.shape[1], num_classes),
             dtype=torch.int64,
             device=target_labels.device,
         )  # (b, h*w, 80)
         target_scores.scatter_(2, target_labels.unsqueeze(-1), 1)
 
-        fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, self.num_classes)  # (b, h*w, 80)
+        fg_scores_mask = fg_mask[:, :, None].repeat(1, 1, num_classes)  # (b, h*w, 80)
         target_scores = torch.where(fg_scores_mask > 0, target_scores, 0)
 
-        return target_labels, target_bboxes, target_scores
+        return target_labels, target_scores
 
     @staticmethod
     def select_candidates_in_gts(xy_centers, gt_bboxes, eps=1e-9):
@@ -255,7 +273,7 @@ class TaskAlignedAssigner(nn.Module):
             mask_multi_gts = (fg_mask.unsqueeze(1) > 1).expand(-1, n_max_boxes, -1)  # (b, n_max_boxes, h*w)
             max_overlaps_idx = overlaps.argmax(1)  # (b, h*w)
 
-            is_max_overlaps = torch.zeros(mask_pos.shape, dtype=mask_pos.dtype, device=mask_pos.device)
+            is_max_overlaps = torch.zeros_like(mask_pos)
             is_max_overlaps.scatter_(1, max_overlaps_idx.unsqueeze(1), 1)
 
             mask_pos = torch.where(mask_multi_gts, is_max_overlaps, mask_pos).float()  # (b, n_max_boxes, h*w)

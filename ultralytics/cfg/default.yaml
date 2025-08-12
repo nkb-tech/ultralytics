@@ -12,10 +12,11 @@ time: # (float, optional) number of hours to train for, overrides epochs if supp
 patience: 100 # (int) epochs to wait for no observable improvement for early stopping of training
 batch: 16 # (int) number of images per batch (-1 for AutoBatch)
 imgsz: 640 # (int | list) input images size as int for train and val modes, or list[h,w] for predict and export modes
-min_size: 20 # (int) min size of original image for clf task / min size of original bbox for detect task
+min_bbox: 20 # (int) min size of original bbox for detect task
+min_imgsz: 25 # (int) min size of original image
 save: True # (bool) save train checkpoints and predict results
 save_period: -1 # (int) Save checkpoint every x epochs (disabled if < 1)
-cache: False # (bool) True/ram, low-ram, disc or False. Use cache for data loading. Use low-ram if you have insufficient ram memory, but want better speed than False variant
+cache: False # (bool) True/ram, low-ram, disc or False. Use cache for data loading. Use low-ram if you have unsufficient ram memory, but want better speed than False variant
 device: # (int | str | list, optional) device to run on, i.e. cuda device=0 or device=0,1,2,3 or device=cpu
 workers: 8 # (int) number of worker threads for data loading (per RANK if DDP)
 project: # (str, optional) project name
@@ -26,7 +27,7 @@ optimizer: auto # (str) optimizer to use, choices=[SGD, Adam, Adamax, AdamW, NAd
 verbose: True # (bool) whether to print verbose output
 seed: 0 # (int) random seed for reproducibility
 deterministic: True # (bool) whether to enable deterministic mode
-single_cls: False # (bool) train multi-class data as single-class
+single_cls: False # (bool) train multi-class data as single-class. Multitask will be ignored.
 rect: False # (bool) rectangular training if mode='train' or rectangular validation if mode='val'
 cos_lr: False # (bool) use cosine learning rate scheduler
 close_mosaic: 10 # (int) disable mosaic augmentation for final epochs (0 to disable)
@@ -63,7 +64,7 @@ vid_stride: 1 # (int) video frame-rate stride
 stream_buffer: False # (bool) buffer all streaming frames (True) or return the most recent frame (False)
 visualize: False # (bool) visualize model features
 augment: False # (bool) apply image augmentation to prediction sources
-agnostic_nms: False # (bool) class-agnostic NMS
+agnostic_nms: True # (bool) class-agnostic NMS
 classes: # (int | list[int], optional) filter results by class, i.e. classes=0, or classes=[0,2,3]
 retina_masks: False # (bool) use high-resolution segmentation masks
 embed: # (list[int], optional) return feature vectors/embeddings from given layers
