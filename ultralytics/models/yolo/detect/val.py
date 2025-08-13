@@ -72,10 +72,17 @@ class DetectionValidator(BaseValidator):
             and (val.endswith(f"{os.sep}val2017.txt") or val.endswith(f"{os.sep}test-dev2017.txt"))
         )  # is COCO
         self.is_lvis = isinstance(val, str) and "lvis" in val and not self.is_coco  # is LVIS
-        self.class_map = converter.coco80_to_coco91_class() if self.is_coco else list(range(len(model.names)))
-        self.args.save_json |= (self.is_coco or self.is_lvis) and not self.training  # run on final val if training COCO
-        self.names: list[dict[int, str]] = model.names
-        self.nc: list[int] = [len(model.names[i]) for i in range(len(model.names))]
+        data_names = self.data.get('names', [])
+        if data_names and isinstance(data_names[0], list):
+            # Мультитаск: names: [['heavy', 'light'], ['dmg', 'undmg']]
+            self.names = [{i: name for i, name in enumerate(task_names)} for task_names in data_names]
+            self.nc = [len(task_names) for task_names in data_names]
+        else:
+            # names: ['heavy', 'light', 'art', 'truck', 'car', 'vehicle']
+            self.names = [{i: name for i, name in enumerate(data_names)}]
+            self.nc = [len(data_names)]
+        self.class_map = converter.coco80_to_coco91_class() if self.is_coco else list(range(self.nc[0]))
+        self.args.save_json |= (self.is_coco or self.is_lvis) and not self.training
         self.num_tasks = len(self.nc)
         self.metrics = [
             DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot, names=names)
