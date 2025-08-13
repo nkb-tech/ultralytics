@@ -2600,8 +2600,14 @@ class Format:
                 )
             labels["masks"] = masks
         labels["img"] = self._format_img(img)
-        labels["cls"] = torch.from_numpy(cls) if nl else torch.zeros(nl, self.n_cls_tasks)
-        labels["bboxes"] = torch.from_numpy(instances.bboxes) if nl else torch.zeros((nl, 4))
+        
+        if nl:
+            labels["bboxes"] = torch.from_numpy(instances.bboxes.reshape(-1, 4) if instances.bboxes.ndim == 1 else instances.bboxes)
+            labels["cls"] = torch.from_numpy((cls.reshape(-1, 1) if cls.ndim == 1 else cls))
+        else: 
+            labels["bboxes"] = torch.zeros((0, 4))
+            labels["cls"] = torch.zeros((0, self.n_cls_tasks))
+            
         if self.return_keypoint:
             labels["keypoints"] = torch.from_numpy(instances.keypoints)
             if self.normalize:
@@ -2617,9 +2623,9 @@ class Format:
             labels["bboxes"][:, [1, 3]] /= h
         # Then we can use collate_fn
         if self.batch_idx:
-            labels["batch_idx"] = torch.zeros(nl)
+            labels["batch_idx"] = torch.zeros(nl) 
         return labels
-
+    
     def _format_img(self, img):
         """
         Formats an image for YOLO from a Numpy array to a PyTorch tensor.
