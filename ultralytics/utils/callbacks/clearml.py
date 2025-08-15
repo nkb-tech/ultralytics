@@ -104,8 +104,9 @@ def on_fit_epoch_end(trainer):
         task.get_logger().report_scalar(
             title="Epoch Time", series="Epoch Time", value=trainer.epoch_time, iteration=trainer.epoch
         )
-        for k, v in trainer.metrics.items():
-            task.get_logger().report_scalar("val", k, v, iteration=trainer.epoch)
+        if hasattr(trainer, 'metrics') and trainer.metrics:
+            for k, v in trainer.metrics.items():
+                task.get_logger().report_scalar("val", k, v, iteration=trainer.epoch)
         if trainer.epoch == 0:
             from ultralytics.utils.torch_utils import model_info_for_loggers
 
@@ -130,12 +131,38 @@ def on_train_end(trainer):
             "confusion_matrix_normalized.png",
             *(f"{x}_curve.png" for x in ("F1", "PR", "P", "R")),
         ]
-        files = [(trainer.save_dir / f) for f in files if (trainer.save_dir / f).exists()]  # filter
+        save_dir_files = list(trainer.save_dir.glob("*.png"))
+        multi_task_files = []
+        for f in save_dir_files:
+            if "task" in f.stem:
+                multi_task_files.append(f)
+        if multi_task_files:
+            files = multi_task_files
+        else:
+            files = [(trainer.save_dir / f) for f in files if (trainer.save_dir / f).exists()]
+        
         for f in files:
-            _log_plot(title=f.stem, plot_path=f)
-        # Report final metrics
-        for k, v in trainer.validator.metrics.results_dict.items():
-            task.get_logger().report_single_value(k, v)
+            if f.exists():
+                _log_plot(title=f.stem, plot_path=f)
+                
+        if hasattr(trainer.validator, 'metrics'):
+            metrics = trainer.validator.metrics
+            if isinstance(metrics, list):
+                for i, m in enumerate(metrics):
+                    if hasattr(m, 'results_dict'):
+                        for k, v in m.results_dict.items():
+                            key = k.replace('m/', '') if k.startswith('m/') else k
+                            task.get_logger().report_single_value(f"task{i}/{key}", v)
+                
+                if hasattr(trainer, 'fitness') and trainer.fitness is not None:
+                    task.get_logger().report_single_value("fitness", trainer.fitness)
+            else:
+                if hasattr(metrics, 'results_dict'):
+                    for k, v in metrics.results_dict.items():
+                        task.get_logger().report_single_value(k, v)
+        elif hasattr(trainer, 'metrics') and isinstance(trainer.metrics, dict):
+            for k, v in trainer.metrics.items():
+                task.get_logger().report_single_value(k, v)
         # Log the final model
         task.update_output_model(model_path=str(trainer.best), model_name=trainer.args.name, auto_delete_file=False)
 

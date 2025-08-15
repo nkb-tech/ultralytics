@@ -73,17 +73,29 @@ class DetectionValidator(BaseValidator):
         )  # is COCO
         self.is_lvis = isinstance(val, str) and "lvis" in val and not self.is_coco  # is LVIS
         data_names = self.data.get('names', [])
-        if data_names and isinstance(data_names[0], list):
-            # Мультитаск: names: [['heavy', 'light'], ['dmg', 'undmg']]
-            self.names = [{i: name for i, name in enumerate(task_names)} for task_names in data_names]
-            self.nc = [len(task_names) for task_names in data_names]
+        LOGGER.debug(f"Loaded names: {data_names}")
+        if data_names:
+            if isinstance(data_names[0], list):
+                # Мультитаск: names: [['heavy', 'light'], ['dmg', 'undmg']]
+                self.names = [{i: name for i, name in enumerate(task_names)} for task_names in data_names]
+                self.nc = [len(task_names) for task_names in data_names]
+            elif isinstance(data_names[0], dict):
+                # Мультитаск: names: [['heavy', 'light'], ['dmg', 'undmg']]
+                self.names = data_names
+                self.nc = [len(task_dict) for task_dict in data_names]
+            else:
+                # names: ['heavy', 'light', 'art', 'truck', 'car', 'vehicle']
+                self.names = [{i: name for i, name in enumerate(data_names)}]
+                self.nc = [len(data_names)]
         else:
-            # names: ['heavy', 'light', 'art', 'truck', 'car', 'vehicle']
-            self.names = [{i: name for i, name in enumerate(data_names)}]
-            self.nc = [len(data_names)]
+            self.names = [{i: f'class{i}' for i in range(nc_i)} for nc_i in self.data.get('nc', [1])]
+            self.nc = self.data.get('nc', [1])
+            
+        LOGGER.debug(f"nc from data: {self.data.get('nc')}")
         self.class_map = converter.coco80_to_coco91_class() if self.is_coco else list(range(self.nc[0]))
         self.args.save_json |= (self.is_coco or self.is_lvis) and not self.training
         self.num_tasks = len(self.nc)
+        LOGGER.debug(f"num_tasks: {self.num_tasks}")
         self.metrics = [
             DetMetrics(save_dir=self.save_dir, on_plot=self.on_plot, names=names)
             for names in self.names
@@ -206,6 +218,7 @@ class DetectionValidator(BaseValidator):
         """Returns metrics statistics and results dictionary."""
         results = {}
         self.nt_per_class, self.nt_per_image = [], []
+        fitness_values = []
         for i, (m, st) in enumerate(zip(self.metrics, self.stats)):
             stats = {k: torch.cat(v, 0).cpu().numpy() for k, v in st.items()}
             ntc = np.bincount(stats["target_cls"].astype(int), minlength=self.nc[i])
@@ -215,7 +228,13 @@ class DetectionValidator(BaseValidator):
             stats.pop("target_img", None)
             if len(stats) and stats["tp"].any():
                 m.process(**stats)
-            results.update({f"task{i}_{k}": v for k, v in m.results_dict.items()})
+            for k, v in m.results_dict.items():
+                results[f"task{i}_{k}"] = v
+            if f"task{i}_fitness" in results:
+                fitness_values.append(results[f"task{i}_fitness"])
+        if fitness_values:
+            results["fitness"] = np.mean(fitness_values)
+
         return results
 
     def print_results(self):
@@ -226,24 +245,27 @@ class DetectionValidator(BaseValidator):
             LOGGER.info(pf % (f"task{i}", self.seen, self.nt_per_class[i].sum(), *m.mean_results()))
             if self.nt_per_class[i].sum() == 0:
                 LOGGER.warning(
-                f"WARNING ⚠️ no labels found in {self.args.task} set, can not compute metrics without labels"
-            )
+                    f"WARNING ⚠️ no labels found in task{i} set, can not compute metrics without labels"
+                )
 
         # Print results per class
         for t in range(self.num_tasks):
             if self.args.verbose and not self.training and self.nc[t] > 1 and len(self.stats[t]):
                 for i, c in enumerate(self.metrics[t].ap_class_index):
                     LOGGER.info(
-                        pf % (self.names[t][c], self.nt_per_image[t][c], self.nt_per_class[t][c], *self.metrics[t].class_result(i))
+                        pf % (self.names[t][c], self.nt_per_image[t][c], self.nt_per_class[t][c], 
+                            *self.metrics[t].class_result(i))
                     )
 
             if self.args.plots:
                 for normalize in True, False:
+                    prefix = f"task{t}_" if self.num_tasks > 1 else ""
                     self.confusion_matrices[t].plot(
                         save_dir=self.save_dir,
-                        names=self.names[t].values(),
+                        names=list(self.names[t].values()),
                         normalize=normalize,
                         on_plot=self.on_plot,
+                        prefix=prefix
                     )
 
     def _process_batch(self, detections, gt_bboxes, gt_cls, task=0):
