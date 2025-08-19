@@ -119,7 +119,7 @@ class DetectionValidator(BaseValidator):
             labels=self.lb,
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
-            nc=[1] if self.args.single_cls else self.nc,
+            nc=[1] + self.nc[1:] if self.args.single_cls else self.nc,
         )
 
     def _prepare_batch(self, si, batch):
