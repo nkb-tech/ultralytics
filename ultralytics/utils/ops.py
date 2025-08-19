@@ -294,6 +294,8 @@ def non_max_suppression(
         # Filter by class
         if classes is not None:
             x = x[(j.view(-1, 1) == classes).any(1)]
+            conf = x[:, 4]
+            j = x[:, 5]
 
         # Check shape
         n = x.shape[0]  # number of boxes
@@ -301,6 +303,8 @@ def non_max_suppression(
             continue
         if n > max_nms:  # excess boxes
             x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
+            conf = x[:, 4]
+            j = x[:, 5]
 
         c = j.view(-1, 1) * (0 if agnostic else max_wh)
         scores = conf

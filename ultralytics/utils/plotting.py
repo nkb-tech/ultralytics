@@ -176,7 +176,7 @@ class Annotator:
             self.draw = ImageDraw.Draw(self.im)
             try:
                 font = check_font("Arial.Unicode.ttf" if non_ascii else font)
-                size = font_size or max(round(sum(self.im.size) / 2 * 0.035), 12)
+                size = font_size or max(round(sum(self.im.size) / 2 * 0.02), 9)
                 self.font = ImageFont.truetype(str(font), size)
             except Exception:
                 self.font = ImageFont.load_default()
