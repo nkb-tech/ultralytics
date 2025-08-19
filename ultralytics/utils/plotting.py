@@ -1175,15 +1175,21 @@ def plot_images(
                 boxes = ops.xywhr2xyxyxyxy(boxes) if is_obb else ops.xywh2xyxy(boxes)
                 for j, box in enumerate(boxes.astype(np.int64).tolist()):
                     classes_task = classes[j]
-                    # plot labels for each task
                     plot_labels = []
-                    for k, class_task in enumerate(classes_task):
-                        color = colors(class_task)
-                        class_name = names[k].get(class_task, class_task) if names else class_task
-                        if labels or conf[j, k] > conf_thres:
-                            label = f"{class_name}" if labels else f"{class_name} {conf[j, k]:.1f}"
+                    
+                    show_box = labels or (conf is not None and len(conf[j]) > 0 and conf[j, 0] > conf_thres)
+                    
+                    if show_box:
+                        for k, class_task in enumerate(classes_task):
+                            class_name = names[k].get(class_task, class_task) if names else class_task
+                            if labels:
+                                label = f"{class_name}"
+                            else:
+                                label = f"{class_name} {conf[j, k]:.1f}"
                             plot_labels.append(label)
-                    annotator.box_label(box, plot_labels, color=color)
+                        color = colors(classes_task[0])
+                        if plot_labels:
+                            annotator.box_label(box, plot_labels, color=color)
 
             elif len(classes):
                 for c in classes:
