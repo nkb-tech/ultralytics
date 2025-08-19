@@ -82,16 +82,40 @@ class DetectionTrainer(BaseTrainer):
         self.model.nc = 1 if self.args.single_cls else self.data["nc"]  # attach number of classes to model
         self.model.names = {0: 0} if self.args.single_cls else self.data["names"]  # attach class names to model
         self.model.args = self.args  # attach hyperparameters to model
+        
+        # Подготовка nc и names для модели
+        if self.args.single_cls:
+            # single_cls case
+            if isinstance(self.data["nc"], list):
+                model_nc = [1] + self.data["nc"][1:]  # [1, nc2, nc3, ...]
+                model_names = [{0: "object"}] + self.data["names"][1:]
+            else:
+                model_nc = 1
+                model_names = {0: "object"}
+        else:
+            model_nc = self.data["nc"]
+            model_names = self.data["names"]
+            
+        self.model.nc = model_nc
+        self.model.names = model_names
+        self.model.args = self.args
         # TODO: self.model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
         if isinstance(cfg, (str, Path)):
             cfg = yaml_model_load(cfg)
+    
+        if self.args.single_cls:
+            nc = [1]
+            if isinstance(self.data["nc"], list) and len(self.data["nc"]) > 1:
+                nc.extend(self.data["nc"][1:])
+        else:
+            nc = self.data["nc"]
 
         model = DetectionModel(
             cfg,
-            nc=[1, ] if self.args.single_cls else self.data["nc"],
+            nc=nc,
             verbose=verbose and RANK == -1,
         )
         if weights:
