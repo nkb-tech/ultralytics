@@ -2447,20 +2447,51 @@ class Albumentations:
                 labels["instances"].convert_bbox("xywh")
                 labels["instances"].normalize(*im.shape[:2][::-1])
                 bboxes = labels["instances"].bboxes
-                # TODO: add supports of segments and keypoints
-                new = self.transform(image=im, bboxes=bboxes, class_labels=cls)  # transformed
-                if len(new["class_labels"]) > 0 or self.crop_bg:  # skip update if no bbox in new im
+                
+                if isinstance(cls, np.ndarray) and cls.ndim > 1:
+                    cls_full = cls.copy()
+                    cls_for_albu = cls[:, 0].astype(int).tolist()
+                else:
+                    cls_full = None
+                    cls_for_albu = cls.tolist() if isinstance(cls, np.ndarray) else cls
+                
+                new = self.transform(image=im, bboxes=bboxes, class_labels=cls_for_albu)
+                
+                if len(new["class_labels"]) > 0 or self.crop_bg:
                     labels["img"] = new["image"]
-                    labels["cls"] = np.array(new["class_labels"])
+                    
+                    if cls_full is not None:
+                        new_cls_main = np.array(new["class_labels"])
+                        cls_to_attr = {}
+                        for i in range(len(cls_full)):
+                            main_cls = int(cls_full[i, 0])
+                            if main_cls not in cls_to_attr:
+                                cls_to_attr[main_cls] = []
+                            cls_to_attr[main_cls].append(cls_full[i, 1:])
+                        
+                        new_cls_full = []
+                        for main_cls in new_cls_main:
+                            main_cls = int(main_cls)
+                            if main_cls in cls_to_attr and len(cls_to_attr[main_cls]) > 0:
+                                attrs = cls_to_attr[main_cls].pop(0)
+                                new_cls_full.append([main_cls] + attrs.tolist())
+                            else:
+                                new_cls_full.append([main_cls] + [0] * (cls_full.shape[1] - 1))
+                        
+                        labels["cls"] = np.array(new_cls_full, dtype=cls_full.dtype)
+                    else:
+                        labels["cls"] = np.array(new["class_labels"])
+                    
                     bboxes = np.array(new["bboxes"], dtype=np.float32)
-                labels["instances"].update(bboxes=bboxes)
+                    labels["instances"].update(bboxes=bboxes)
         else:
             if isinstance(labels, dict):
                 labels["img"] = self.transform(image=labels["img"])["image"]
             elif isinstance(labels, Image.Image):
                 labels = Image.fromarray(self.transform(image=np.asarray(labels))["image"])
             else:
-                raise TypeError(type(labels))
+                raise TypeError(f"Unexpected type for labels: {type(labels)}")
+        
         return labels
 
 
