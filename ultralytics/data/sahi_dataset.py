@@ -259,6 +259,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         slice_bbox = [start_x, start_y, end_x, end_y]
 
         slice_labels = self._filter_and_transform_annotations(labels, slice_bbox, h0, w0)
+        n_attrs = labels["cls"].shape[1] if len(labels["cls"]) > 0 else 1
 
         labels.update(
             {
@@ -272,6 +273,8 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
 
         if slice_labels["bboxes"].size == 0:
             labels["bboxes"] = np.empty((0, 4), dtype=np.float32)
+            if labels["cls"].size == 0:
+                labels["cls"] = np.empty((0, n_attrs), dtype=np.float32)
         else:
             bboxes = np.array(slice_labels["bboxes"], dtype=np.float32)
             if bboxes.ndim != 2 or bboxes.shape[1] != 4:
@@ -303,7 +306,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         x_min, y_min, x_max, y_max = slice_bbox
         x_crop_size, y_crop_size = x_max - x_min, y_max - y_min
         slice_labels = {"cls": [], "bboxes": []}
-
+        n_attrs = labels["cls"].shape[1] if len(labels["cls"]) > 0 else 1        
         for i in range(len(labels["bboxes"])):
             cls = labels["cls"][i]
             bbox = labels["bboxes"][i]  # (cx, cy, w, h) normalized
@@ -321,7 +324,6 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
 
             if inter_x1 >= inter_x2 or inter_y1 >= inter_y2:
                 continue  # No intersection
-            # TODO Filter small bboxes by condition
 
             new_x1 = max(x1 - x_min, 0)
             new_y1 = max(y1 - y_min, 0)
@@ -336,8 +338,15 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
             slice_labels["cls"].append(cls)
             slice_labels["bboxes"].append([cx_new, cy_new, w_new, h_new])
 
-        slice_labels["cls"] = np.array(slice_labels["cls"], dtype=np.float32)
+        if len(slice_labels["cls"]) > 0:
+            slice_labels["cls"] = np.array(slice_labels["cls"], dtype=np.float32)
+        else:
+            slice_labels["cls"] = np.zeros((0, n_attrs), dtype=np.float32)
+        
         slice_labels["bboxes"] = np.array(slice_labels["bboxes"], dtype=np.float32)
+        if len(slice_labels["bboxes"]) == 0:
+            slice_labels["bboxes"] = np.zeros((0, 4), dtype=np.float32)
+        
         return slice_labels
 
     def build_transforms(self, hyp: Optional[Dict[str, Any]] = None) -> Compose:
@@ -382,6 +391,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
                 mask_ratio=hyp.mask_ratio if hyp else 0.5,
                 mask_overlap=hyp.overlap_mask if hyp else False,
                 bgr=hyp.bgr if hyp and self.augment else 0.0,
+                n_cls_tasks=len(self.nc),
             )
         )
 
