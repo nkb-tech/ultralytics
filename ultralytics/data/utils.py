@@ -151,7 +151,7 @@ def verify_image_label(args, min_imgsz=9):
                 # All labels
                 for i, nc_i in enumerate(nc):
                     # TODO make single cls work with multi-head labels
-                    if single_cls:
+                    if single_cls and i == 0:
                         lb[:, i] = 0
                     max_cls = lb[:, i].max()
                     assert max_cls < nc_i, (
