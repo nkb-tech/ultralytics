@@ -184,11 +184,18 @@ class DetectionValidator(BaseValidator):
         else:
             ratio_pad = batch["ratio_pad"][si] if len(batch["ratio_pad"]) > si else batch["ratio_pad"][0]
         
+        # Проверяем и исправляем формат ratio_pad
+        if isinstance(ratio_pad, tuple) and len(ratio_pad) == 2:
+            if not isinstance(ratio_pad[0], tuple):
+                # Если это просто (ratio_w, ratio_h), конвертируем в правильный формат
+                ratio_pad = (ratio_pad, (0, 0))
+        
         if len(cls):
             bbox = ops.xywh2xyxy(bbox) * torch.tensor(imgsz, device=self.device)[[1, 0, 1, 0]]  # target boxes
             ops.scale_boxes(imgsz, bbox, ori_shape, ratio_pad=ratio_pad)  # native-space labels
         
         return {"cls": cls, "bbox": bbox, "ori_shape": ori_shape, "imgsz": imgsz, "ratio_pad": ratio_pad}
+
 
     def update_metrics(self, preds, batch):
         """Metrics."""
@@ -197,18 +204,11 @@ class DetectionValidator(BaseValidator):
             self.sahi_debugger.track_crop_mapping(batch, self.batch_i)
             self.sahi_debugger.log_predictions(preds, batch, self.batch_i)
         
-          # Добавим диагностику batch
-        LOGGER.info(f"update_metrics batch keys: {batch.keys()}")
-        if 'original_img_idx' in batch:
-            LOGGER.info(f"  original_img_idx type: {type(batch['original_img_idx'])}")
-            if hasattr(batch['original_img_idx'], 'shape'):
-                LOGGER.info(f"  original_img_idx shape: {batch['original_img_idx'].shape}")
-        
         if self.sahi_enabled and self.sahi_aggregator is not None:
             if hasattr(self, '_last_raw_preds'):
                 raw_preds = self._last_raw_preds
             else:
-                LOGGER.info("Raw predictions not available for SAHI aggregation")
+                LOGGER.warning("Raw predictions not available for SAHI aggregation")
                 self._update_metrics_standard(preds, batch)
                 return
             
@@ -216,14 +216,25 @@ class DetectionValidator(BaseValidator):
             success = self.sahi_aggregator.add_crop_predictions(batch, raw_preds, preds)
             
             if not success:
-                LOGGER.warning("Can not calculate add_crop_predictions for sahi")
+                LOGGER.warning("Cannot add_crop_predictions for sahi")
                 self._update_metrics_standard(preds, batch)
+                return
             
             # Process completed images
             completed_images = self.sahi_aggregator.get_completed_images()
             
+            if completed_images:
+                LOGGER.info(f"Found {len(completed_images)} completed images: {completed_images}")
+            
             for img_key in completed_images:
-                self._process_complete_image(img_key)
+                try:
+                    self._process_complete_image(img_key)
+                    # Increment seen counter for completed image
+                    self.seen += 1
+                except Exception as e:
+                    LOGGER.error(f"Error processing complete image {img_key}: {e}")
+                    import traceback
+                    traceback.print_exc()
                 
             # Clean up processed images
             for img_key in completed_images:
@@ -233,6 +244,15 @@ class DetectionValidator(BaseValidator):
         
         self._update_metrics_standard(preds, batch)
 
+
+    def _prepare_pred(self, pred, pbatch):
+        """Prepares a batch of images and annotations for validation."""
+        predn = pred.clone()
+        ops.scale_boxes(
+            pbatch["imgsz"], predn[:, :4], pbatch["ori_shape"], ratio_pad=pbatch["ratio_pad"]
+        )  # native-space pred
+        return predn
+    
     def _update_metrics_standard(self, preds, batch):
         """Standard metrics update (original implementation)."""
         for si, pred in enumerate(preds):
@@ -353,19 +373,24 @@ class DetectionValidator(BaseValidator):
         # batch_idx should match the number of ground truth instances
         batch_idx_values = torch.zeros(len(gt_bboxes), device=self.device, dtype=torch.long)
         
+        # For SAHI validation, we're working with full images, so ratio_pad should be identity
+        # ratio_pad format should be ((ratio_w, ratio_h), (pad_w, pad_h))
+        ratio_pad = ((1.0, 1.0), (0, 0))  # No scaling, no padding for full image
+        
         synthetic_batch = {
             'cls': gt_cls,  # Shape: [num_instances, num_tasks]
             'bboxes': gt_bboxes,  # Shape: [num_instances, 4]
             'batch_idx': batch_idx_values,  # Shape: [num_instances]
             'ori_shape': [original_shape],
-            'img': torch.zeros((1, 3, 640, 640), device=self.device),  # Placeholder
+            'img': torch.zeros((1, 3, original_shape[0], original_shape[1]), device=self.device),  # Use original shape
             'im_file': [self.dataloader.dataset.im_files[img_idx]],
             'resized_shape': [original_shape],  # For full image validation
-            'ratio_pad': [(1.0, 1.0)],
+            'ratio_pad': [ratio_pad],  # Correct format for ratio_pad
         }
         
         # Update metrics with aggregated results
         self._update_metrics_standard([aggregated_preds], synthetic_batch)
+
         
 
             

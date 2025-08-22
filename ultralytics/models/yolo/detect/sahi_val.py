@@ -125,13 +125,12 @@ class SAHICropAggregator:
                     
         return True
 
-
     def _transform_boxes_to_original(self, predictions, crop_coords):
         """
         Transform box coordinates from crop to original image coordinates.
         
         Args:
-            predictions: Tensor with boxes in first 4 columns (x1,y1,x2,y2) in crop coordinates
+            predictions: Tensor with boxes in first 4 columns (x_center, y_center, width, height) in crop pixel coordinates
             crop_coords: (x_min, y_min, x_max, y_max) of crop in original image
         """
         if len(predictions) == 0:
@@ -140,13 +139,24 @@ class SAHICropAggregator:
         pred = predictions.clone()
         x_min, y_min, x_max, y_max = crop_coords
         
-        # Boxes are in crop pixel coordinates, offset to original image
-        pred[:, 0] += x_min  # x1
-        pred[:, 1] += y_min  # y1
-        pred[:, 2] += x_min  # x2
-        pred[:, 3] += y_min  # y2
+        # Get crop dimensions
+        crop_width = x_max - x_min
+        crop_height = y_max - y_min
+        
+        # Boxes are in YOLO format (x_center, y_center, width, height) normalized to crop size
+        # First denormalize to crop pixel coordinates
+        pred[:, 0] *= crop_width   # x_center
+        pred[:, 1] *= crop_height  # y_center
+        pred[:, 2] *= crop_width   # width
+        pred[:, 3] *= crop_height  # height
+        
+        # Then offset to original image coordinates
+        pred[:, 0] += x_min  # x_center
+        pred[:, 1] += y_min  # y_center
+        # width and height remain the same
         
         return pred
+
     
     def get_aggregated_predictions(self, img_key):
         """
