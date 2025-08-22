@@ -37,10 +37,10 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
         self.crop_size = crop_size
         self.scale_range = scale_range
         self.random_crop_height = crop_size
-        self.random_crop_wigth = crop_size
+        self.random_crop_width = crop_size
         super().__init__(
             height=self.random_crop_height,
-            width=self.random_crop_wigth,
+            width=self.random_crop_width,
             erosion_factor=erosion_factor,
             p=p,
         )
@@ -58,7 +58,7 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
         h_scale = random.uniform(*h_scale_range)
         w_scale = random.uniform(*w_scale_range)
         self.height = int(round(self.crop_size * h_scale))
-        self.wigth = int(round(self.crop_size * w_scale))
+        self.width = int(round(self.crop_size * w_scale))
         if image_height < self.height or image_width < self.width:
             return {"crop_coords": (0, 0, image_width, image_height)}
         return super().get_params_dependent_on_data(params, data)
@@ -134,7 +134,7 @@ class RandomCropLarge(DualTransform):
         h_scale = random.uniform(*h_scale_range)
         w_scale = random.uniform(*w_scale_range)
         self.height = int(round(self.crop_size * h_scale))
-        self.wigth = int(round(self.crop_size * w_scale))
+        self.width = int(round(self.crop_size * w_scale))
 
         if self._use_random(height, width):
             return self.random_crop.get_params_dependent_on_data(params, data)
