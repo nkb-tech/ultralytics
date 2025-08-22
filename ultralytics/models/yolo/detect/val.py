@@ -9,6 +9,7 @@ import torch
 from ultralytics.data import build_dataloader, build_yolo_dataset, converter
 from ultralytics.engine.validator import BaseValidator
 from ultralytics.models.yolo.detect.sahi_debugger import SAHIValidationDebugger
+from ultralytics.models.yolo.detect.sahi_val import SAHICropAggregator
 from ultralytics.utils import LOGGER, ops, yaml_load
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
@@ -47,6 +48,8 @@ class DetectionValidator(BaseValidator):
             )
         if self.args.sahi_val_debug:
             self.sahi_debugger = SAHIValidationDebugger()
+        self.sahi_aggregator = None
+        self.sahi_enabled = False
                         
     def preprocess(self, batch):
         """Preprocesses batch of images for YOLO training."""
@@ -108,6 +111,16 @@ class DetectionValidator(BaseValidator):
 
         self.seen = 0
         self.jdict = []
+        
+        if hasattr(self.args, 'sahi') and self.args.sahi:
+            if hasattr(self.args, 'val_cut_strategy') and self.args.val_cut_strategy == 'grid':
+                self.sahi_aggregator = SAHICropAggregator(self)
+                self.sahi_enabled = True       
+                if hasattr(self.dataloader, 'dataset'):
+                    self.sahi_aggregator.calculate_expected_crops(self.dataloader.dataset)
+                    
+                LOGGER.info("SAHI aggregator initialized for grid validation")
+    
 
     def get_desc(self):
         """Return a formatted string summarizing class metrics of YOLO model."""
@@ -115,6 +128,9 @@ class DetectionValidator(BaseValidator):
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
+        if self.sahi_enabled:
+            self._last_raw_preds = preds.clone() if isinstance(preds, torch.Tensor) else preds
+            
         return ops.non_max_suppression(
             preds,
             self.args.conf,
@@ -152,7 +168,37 @@ class DetectionValidator(BaseValidator):
             self.sahi_debugger.log_batch_info(batch, self.batch_i)
             self.sahi_debugger.track_crop_mapping(batch, self.batch_i)
             self.sahi_debugger.log_predictions(preds, batch, self.batch_i)
+        
+        if self.sahi_enabled and self.sahi_aggregator is not None:
+            if hasattr(self, '_last_raw_preds'):
+                raw_preds = self._last_raw_preds
+            else:
+                LOGGER.warning("Raw predictions not available for SAHI aggregation")
+                return
+            
+            # Add predictions to aggregator
+            success = self.sahi_aggregator.add_crop_predictions(batch, raw_preds, preds)
+            
+            if not success:
+                LOGGER.warning("Can not calculate add_crop_predictions for sahi")
+                self._update_metrics_standard(preds, batch)
+            
+            # Process completed images
+            completed_images = self.sahi_aggregator.get_completed_images()
+            
+            for img_key in completed_images:
+                self._process_complete_image(img_key)
+                
+            # Clean up processed images
+            for img_key in completed_images:
+                del self.sahi_aggregator.image_crops[img_key]
+                
+            return
+        
+        self._update_metrics_standard(preds, batch)
 
+    def _update_metrics_standard(self, preds, batch):
+        """Standard metrics update (original implementation)."""
         for si, pred in enumerate(preds):
             self.seen += 1
             npr = len(pred)
@@ -216,8 +262,58 @@ class DetectionValidator(BaseValidator):
                     self.save_dir / "labels" / f"{Path(batch['im_file'][si]).stem}.txt",
                 )
 
+    def _process_complete_image(self, img_key):
+        """Process a complete image with all crops aggregated."""
+        
+        # Get aggregated predictions
+        aggregated_preds_raw = self.sahi_aggregator.get_aggregated_predictions(img_key)
+        
+        # Apply NMS to aggregated predictions
+        if len(aggregated_preds_raw) > 0:
+            # Reshape for NMS function (add batch dimension)
+            preds_for_nms = aggregated_preds_raw.unsqueeze(0)
+            
+            # Apply standard postprocessing (NMS)
+            aggregated_preds = self.postprocess(preds_for_nms)[0]
+        else:
+            aggregated_preds = torch.empty((0, 4 + 2 * len(self.nc)), device=self.device)
+        
+        # Get original image ground truth
+        img_idx = self.sahi_aggregator.image_crops[img_key]['original_img_idx']
+        original_shape = self.sahi_aggregator.image_crops[img_key]['original_shape']
+        
+        # Load original GT for this image
+        original_labels = self.dataloader.dataset.labels[img_idx]
+        
+        # Create batch format for metrics calculation
+        synthetic_batch = {
+            'cls': torch.tensor(original_labels['cls'], device=self.device).unsqueeze(0) if 'cls' in original_labels else torch.empty((0, len(self.nc)), device=self.device),
+            'bboxes': torch.tensor(original_labels['bboxes'], device=self.device).unsqueeze(0) if 'bboxes' in original_labels else torch.empty((0, 4), device=self.device),
+            'batch_idx': torch.zeros(len(original_labels.get('bboxes', [])), device=self.device),
+            'ori_shape': [original_shape],
+            'img': torch.zeros((1, 3, 640, 640), device=self.device),  # Placeholder
+            'im_file': [self.dataloader.dataset.im_files[img_idx]],
+            'resized_shape': [original_shape],  # For full image validation
+            'ratio_pad': [(1.0, 1.0)],
+        }
+        
+        # Update metrics with aggregated results
+        self._update_metrics_standard([aggregated_preds], synthetic_batch)
+        
+
+            
     def finalize_metrics(self, *args, **kwargs):
         """Set final values for metrics speed and confusion matrices."""
+        if self.sahi_enabled and self.sahi_aggregator is not None:
+            remaining_images = list(self.sahi_aggregator.image_crops.keys())
+            if remaining_images:
+                LOGGER.warning(f"Processing {len(remaining_images)} incomplete images at validation end")
+                for img_key in remaining_images:
+                    crops_processed = len(self.sahi_aggregator.image_crops[img_key]['processed_crops'])
+                    img_idx = self.sahi_aggregator.image_crops[img_key].get('original_img_idx', -1)
+                    expected = self.sahi_aggregator.expected_crops_per_image.get(img_idx, 'unknown')
+                    LOGGER.debug(f"Image {img_key}: {crops_processed}/{expected} crops processed")
+        
         for m, cm in zip(self.metrics, self.confusion_matrices):
             m.speed = self.speed
             m.confusion_matrix = cm
