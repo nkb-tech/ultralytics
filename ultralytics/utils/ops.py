@@ -306,7 +306,19 @@ def non_max_suppression(
             conf = x[:, 4]
             j = x[:, 5]
 
-        c = j.view(-1, 1) * (0 if agnostic else max_wh)
+        if agnostic:
+            c = torch.zeros_like(j.view(-1, 1))  # No offset for agnostic NMS
+        else:
+            if len(nc) > 1:  # Мультитаск
+                unique_id = j.view(-1, 1)
+                multiplier = nc[0]
+                for head_idx in range(1, len(nc)):
+                    attr_class = clss[head_idx].view(-1, 1)
+                    unique_id = unique_id + attr_class * multiplier
+                    multiplier *= nc[head_idx]
+                c = unique_id * max_wh
+            else:  # Одна голова - оригинальная реализация
+                c = j.view(-1, 1) * max_wh
         scores = conf
 
         if rotated:
