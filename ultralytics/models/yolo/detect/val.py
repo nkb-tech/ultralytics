@@ -128,11 +128,27 @@ class DetectionValidator(BaseValidator):
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
+        
+        # Добавим диагностику и правильную обработку tuple
+        if isinstance(preds, tuple):
+            LOGGER.info(f"postprocess input is tuple with {len(preds)} elements")
+            if len(preds) > 0:
+                LOGGER.info(f"First element shape: {preds[0].shape if hasattr(preds[0], 'shape') else type(preds[0])}")
+            # Для мультитаск модели preds может быть (predictions, proto) или просто predictions
+            # Берем первый элемент если это tuple
+            actual_preds = preds[0] if isinstance(preds[0], torch.Tensor) else preds
+        else:
+            actual_preds = preds
+            
+        LOGGER.info(f"Actual predictions shape: {actual_preds.shape if hasattr(actual_preds, 'shape') else type(actual_preds)}")
+        LOGGER.info(f"self.nc (num classes per task): {self.nc}")
+        
         if self.sahi_enabled:
-            self._last_raw_preds = preds.clone() if isinstance(preds, torch.Tensor) else preds
+            # Сохраняем актуальные предсказания, а не tuple
+            self._last_raw_preds = actual_preds.clone() if isinstance(actual_preds, torch.Tensor) else actual_preds
             
         return ops.non_max_suppression(
-            preds,
+            actual_preds,  # Используем actual_preds вместо preds
             self.args.conf,
             self.args.iou,
             labels=self.lb,
@@ -141,26 +157,38 @@ class DetectionValidator(BaseValidator):
             nc=[1] + self.nc[1:] if self.args.single_cls else self.nc,
         )
 
+
     def _prepare_batch(self, si, batch):
         """Prepares a batch of images and annotations for validation."""
-        idx = batch["batch_idx"] == si
-        cls = batch["cls"][idx]
-        bbox = batch["bboxes"][idx]
-        ori_shape = batch["ori_shape"][si]
+        # Проверяем формат batch_idx
+        if 'batch_idx' in batch and batch['batch_idx'].numel() > 0:
+            idx = batch["batch_idx"] == si
+        else:
+            # Если batch_idx пустой или отсутствует, обрабатываем все данные для изображения si
+            idx = torch.ones(len(batch["cls"]), dtype=torch.bool, device=batch["cls"].device) if si == 0 else torch.zeros(len(batch["cls"]), dtype=torch.bool, device=batch["cls"].device)
+        
+        cls = batch["cls"][idx] if idx.any() else batch["cls"]
+        bbox = batch["bboxes"][idx] if idx.any() else batch["bboxes"]
+        
+        # Обработка ori_shape с учетом разных форматов
+        if isinstance(batch["ori_shape"], list):
+            ori_shape = batch["ori_shape"][si] if si < len(batch["ori_shape"]) else batch["ori_shape"][0]
+        else:
+            ori_shape = batch["ori_shape"][si] if len(batch["ori_shape"]) > si else batch["ori_shape"][0]
+        
         imgsz = batch["img"].shape[2:]
-        ratio_pad = batch["ratio_pad"][si]
+        
+        # Обработка ratio_pad с учетом разных форматов
+        if isinstance(batch["ratio_pad"], list):
+            ratio_pad = batch["ratio_pad"][si] if si < len(batch["ratio_pad"]) else batch["ratio_pad"][0]
+        else:
+            ratio_pad = batch["ratio_pad"][si] if len(batch["ratio_pad"]) > si else batch["ratio_pad"][0]
+        
         if len(cls):
             bbox = ops.xywh2xyxy(bbox) * torch.tensor(imgsz, device=self.device)[[1, 0, 1, 0]]  # target boxes
             ops.scale_boxes(imgsz, bbox, ori_shape, ratio_pad=ratio_pad)  # native-space labels
+        
         return {"cls": cls, "bbox": bbox, "ori_shape": ori_shape, "imgsz": imgsz, "ratio_pad": ratio_pad}
-
-    def _prepare_pred(self, pred, pbatch):
-        """Prepares a batch of images and annotations for validation."""
-        predn = pred.clone()
-        ops.scale_boxes(
-            pbatch["imgsz"], predn[:, :4], pbatch["ori_shape"], ratio_pad=pbatch["ratio_pad"]
-        )  # native-space pred
-        return predn
 
     def update_metrics(self, preds, batch):
         """Metrics."""
@@ -169,11 +197,19 @@ class DetectionValidator(BaseValidator):
             self.sahi_debugger.track_crop_mapping(batch, self.batch_i)
             self.sahi_debugger.log_predictions(preds, batch, self.batch_i)
         
+          # Добавим диагностику batch
+        LOGGER.info(f"update_metrics batch keys: {batch.keys()}")
+        if 'original_img_idx' in batch:
+            LOGGER.info(f"  original_img_idx type: {type(batch['original_img_idx'])}")
+            if hasattr(batch['original_img_idx'], 'shape'):
+                LOGGER.info(f"  original_img_idx shape: {batch['original_img_idx'].shape}")
+        
         if self.sahi_enabled and self.sahi_aggregator is not None:
             if hasattr(self, '_last_raw_preds'):
                 raw_preds = self._last_raw_preds
             else:
-                LOGGER.warning("Raw predictions not available for SAHI aggregation")
+                LOGGER.info("Raw predictions not available for SAHI aggregation")
+                self._update_metrics_standard(preds, batch)
                 return
             
             # Add predictions to aggregator
@@ -265,18 +301,30 @@ class DetectionValidator(BaseValidator):
     def _process_complete_image(self, img_key):
         """Process a complete image with all crops aggregated."""
         
+        LOGGER.info(f"Processing complete image: {img_key}")
+        
         # Get aggregated predictions
         aggregated_preds_raw = self.sahi_aggregator.get_aggregated_predictions(img_key)
+        
+        LOGGER.info(f"  Aggregated predictions shape before NMS: {aggregated_preds_raw.shape}")
         
         # Apply NMS to aggregated predictions
         if len(aggregated_preds_raw) > 0:
             # Reshape for NMS function (add batch dimension)
             preds_for_nms = aggregated_preds_raw.unsqueeze(0)
             
+            # Transpose back to expected format [batch, outputs, anchors]
+            preds_for_nms = preds_for_nms.permute(0, 2, 1)
+            
+            LOGGER.info(f"  Predictions for NMS shape: {preds_for_nms.shape}")
+            
             # Apply standard postprocessing (NMS)
-            aggregated_preds = self.postprocess(preds_for_nms)[0]
+            nms_results = self.postprocess(preds_for_nms)
+            aggregated_preds = nms_results[0] if nms_results else torch.empty((0, 4 + 2 * len(self.nc)), device=self.device)
         else:
             aggregated_preds = torch.empty((0, 4 + 2 * len(self.nc)), device=self.device)
+        
+        LOGGER.info(f"  Aggregated predictions shape after NMS: {aggregated_preds.shape}")
         
         # Get original image ground truth
         img_idx = self.sahi_aggregator.image_crops[img_key]['original_img_idx']
@@ -285,11 +333,30 @@ class DetectionValidator(BaseValidator):
         # Load original GT for this image
         original_labels = self.dataloader.dataset.labels[img_idx]
         
-        # Create batch format for metrics calculation
+        # Prepare ground truth data
+        if 'cls' in original_labels and len(original_labels['cls']) > 0:
+            gt_cls = torch.tensor(original_labels['cls'], device=self.device, dtype=torch.float32)
+            gt_bboxes = torch.tensor(original_labels['bboxes'], device=self.device, dtype=torch.float32)
+        else:
+            num_tasks = len(self.nc)
+            gt_cls = torch.empty((0, num_tasks), device=self.device, dtype=torch.float32)
+            gt_bboxes = torch.empty((0, 4), device=self.device, dtype=torch.float32)
+        
+        # Ensure cls has correct shape
+        if gt_cls.dim() == 1 and len(self.nc) > 1:
+            # If single task labels, reshape for compatibility
+            gt_cls = gt_cls.unsqueeze(1)
+        
+        LOGGER.info(f"  GT cls shape: {gt_cls.shape}, GT bboxes shape: {gt_bboxes.shape}")
+        
+        # Create synthetic batch for metrics calculation
+        # batch_idx should match the number of ground truth instances
+        batch_idx_values = torch.zeros(len(gt_bboxes), device=self.device, dtype=torch.long)
+        
         synthetic_batch = {
-            'cls': torch.tensor(original_labels['cls'], device=self.device).unsqueeze(0) if 'cls' in original_labels else torch.empty((0, len(self.nc)), device=self.device),
-            'bboxes': torch.tensor(original_labels['bboxes'], device=self.device).unsqueeze(0) if 'bboxes' in original_labels else torch.empty((0, 4), device=self.device),
-            'batch_idx': torch.zeros(len(original_labels.get('bboxes', [])), device=self.device),
+            'cls': gt_cls,  # Shape: [num_instances, num_tasks]
+            'bboxes': gt_bboxes,  # Shape: [num_instances, 4]
+            'batch_idx': batch_idx_values,  # Shape: [num_instances]
             'ori_shape': [original_shape],
             'img': torch.zeros((1, 3, 640, 640), device=self.device),  # Placeholder
             'im_file': [self.dataloader.dataset.im_files[img_idx]],

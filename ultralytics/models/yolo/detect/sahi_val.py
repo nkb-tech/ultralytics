@@ -60,6 +60,15 @@ class SAHICropAggregator:
         slice_coords = batch.get('slice_coords', [])
         ori_shapes = batch.get('ori_shape', [])
         
+        # Добавим диагностику
+        LOGGER.info(f"add_crop_predictions called:")
+        if preds_before_nms is not None:
+            if isinstance(preds_before_nms, tuple):
+                LOGGER.info(f"  preds_before_nms is tuple with {len(preds_before_nms)} elements")
+                preds_before_nms = preds_before_nms[0] if len(preds_before_nms) > 0 else None
+            if hasattr(preds_before_nms, 'shape'):
+                LOGGER.info(f"  preds_before_nms shape: {preds_before_nms.shape}")
+        
         # If metadata is missing, skip SAHI aggregation
         if not original_img_idx:
             LOGGER.warning("SAHI metadata missing in batch, skipping aggregation")
@@ -79,26 +88,44 @@ class SAHICropAggregator:
             self.image_crops[img_key]['processed_crops'].add(slice_idx[i])
             
             # Store raw predictions (before NMS) with crop coordinates
-            if preds_before_nms is not None:
-                # Extract predictions for this image from batch
-                # preds_before_nms shape: (batch_size, max_det, 4 + num_classes + num_attributes)
-                crop_preds = preds_before_nms[i]
+            if preds_before_nms is not None and hasattr(preds_before_nms, 'shape'):
+                # preds_before_nms shape: (batch_size, num_outputs, num_anchors)
+                # Нужно транспонировать для правильной обработки
+                if len(preds_before_nms.shape) == 3:
+                    # Transpose from [batch, outputs, anchors] to [batch, anchors, outputs]
+                    preds_transposed = preds_before_nms.permute(0, 2, 1)
+                    crop_preds = preds_transposed[i]  # [num_anchors, num_outputs]
+                else:
+                    LOGGER.error(f"Unexpected preds_before_nms shape: {preds_before_nms.shape}")
+                    continue
                 
-                # Filter out padding (zero confidence predictions)
-                # Assuming first confidence is at index 4
-                valid_mask = crop_preds[:, 4] > 0
-                crop_preds = crop_preds[valid_mask]
+                # Для мультитаск YOLO формат: [x, y, w, h, obj_conf, cls0_0, ..., cls0_N, cls1_0, ..., cls1_M]
+                # Фильтруем по objectness confidence (индекс 4)
+                obj_conf_idx = 4
                 
-                if len(crop_preds) > 0:
+                if crop_preds.shape[-1] <= obj_conf_idx:
+                    LOGGER.error(f"Invalid crop_preds shape: {crop_preds.shape}, obj_conf_idx: {obj_conf_idx}")
+                    continue
+                    
+                # Применяем пороговое значение для фильтрации
+                conf_threshold = 0.001  # Минимальный порог для сохранения предсказаний
+                valid_mask = crop_preds[:, obj_conf_idx] > conf_threshold
+                
+                crop_preds_filtered = crop_preds[valid_mask]
+                
+                LOGGER.info(f"  Image {i}: filtered predictions: {len(crop_preds_filtered)}/{len(crop_preds)}")
+                
+                if len(crop_preds_filtered) > 0:
                     # Transform box coordinates from crop to original image
                     crop_preds_transformed = self._transform_boxes_to_original(
-                        crop_preds, slice_coords[i]
+                        crop_preds_filtered, slice_coords[i]
                     )
                     self.image_crops[img_key]['predictions'].append(crop_preds_transformed)
                     self.image_crops[img_key]['crop_coords'].append(slice_coords[i])
                     
         return True
-    
+
+
     def _transform_boxes_to_original(self, predictions, crop_coords):
         """
         Transform box coordinates from crop to original image coordinates.
