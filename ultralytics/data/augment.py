@@ -896,11 +896,16 @@ class Mosaic(BaseMixTransform):
         instances = []
         imgsz = self.imgsz * 2  # mosaic imgsz
         n_attrs = 1
+        
         for labels in mosaic_labels:
-            if "cls" in labels and len(labels["cls"]) > 0:
-                n_attrs = labels["cls"].shape[1] if labels["cls"].ndim == 2 else 1
-                break
-            
+            if "cls" in labels:
+                if labels["cls"].ndim == 2:
+                    n_attrs = labels["cls"].shape[1]
+                    break
+                elif labels["cls"].ndim == 1 and len(labels["cls"]) > 0:
+                    n_attrs = 1
+                    break
+        
         for labels in mosaic_labels:
             if "cls" in labels:
                 cls_array = labels["cls"]
@@ -908,6 +913,9 @@ class Mosaic(BaseMixTransform):
                     cls_array = np.empty((0, n_attrs), dtype=np.float32)
                 elif cls_array.ndim == 1 and len(cls_array) > 0:
                     cls_array = cls_array.reshape(-1, 1)
+                elif cls_array.ndim == 2 and cls_array.shape[1] != n_attrs:
+                    if cls_array.shape[0] == 0:
+                        cls_array = np.empty((0, n_attrs), dtype=np.float32)
                 cls.append(cls_array)
             else:
                 cls.append(np.empty((0, n_attrs), dtype=np.float32))
@@ -3015,6 +3023,28 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
 
 
 
+class CropOrResize:
+    """
+    Transform that either crops or resizes the image based on probability.
+    
+    Args:
+        crop_transform: The crop transform to apply (RandomCropLarge or SafeFixedRandomCrop)
+        resize_prob (float): Probability of resizing instead of cropping. Default: 0.1
+        target_size (int): Target size for resize. Default: 640
+    """
+    def __init__(self, crop_transform, resize_prob=0.1, target_size=640):
+        self.crop_transform = crop_transform
+        self.resize_prob = resize_prob
+        self.target_size = target_size
+        self.resize_transform = LetterBox(new_shape=(target_size, target_size), scaleup=True)
+    
+    def __call__(self, labels):
+        """Apply either crop or resize based on probability."""
+        if random.random() < self.resize_prob:
+            return self.resize_transform(labels)
+        else:
+            return self.crop_transform(labels)
+        
 def crop_transforms(dataset, imgsz, hyp, stretch=False):
     """
     Compose из кастомных SAHI-кропов + стандартных аугментаций.
@@ -3047,7 +3077,13 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
         p=1.0,
     )
 
-    crop_albu = Albumentations(hyp, transforms=crop_transform, crop_bg=True)
+    resize_prob = getattr(hyp, 'full_image_prob', 0.05)
+    crop_or_resize = CropOrResize(
+        crop_transform=Albumentations(hyp, transforms=crop_transform, crop_bg=True),
+        resize_prob=resize_prob,
+        target_size=imgsz
+    )
+    
     alb = Albumentations(p=1.0, hyp=hyp, args=albu_args)
     affine = RandomPerspective(
         degrees=hyp.degrees,
@@ -3061,8 +3097,8 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
         pre_transform=LetterBox(new_shape=(imgsz, imgsz)),
     )
 
-    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, mix_transform=crop_albu)
-    pre_transform = Compose([crop_albu, mosaic, affine]) # , crop_albu ,affine
+    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, mix_transform=crop_or_resize)
+    pre_transform = Compose([crop_or_resize, mosaic, affine]) # , crop_albu ,affine
     
     misc = Compose(
         [
