@@ -416,6 +416,11 @@ class BaseMixTransform:
         if self.pre_transform is not None:
             for i, data in enumerate(mix_labels):
                 mix_labels[i] = self.pre_transform(data)
+        
+        if hasattr(self, 'mix_transform') and self.mix_transform is not None:
+            for i, data in enumerate(mix_labels):
+                mix_labels[i] = self.mix_transform(data)
+        
         labels["mix_labels"] = mix_labels
 
         # Update cls and texts
@@ -3056,8 +3061,8 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
         pre_transform=LetterBox(new_shape=(imgsz, imgsz)),
     )
 
-    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic)
-    pre_transform = Compose([mosaic, affine])
+    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, mix_transform=crop_albu)
+    pre_transform = Compose([crop_albu, mosaic, affine]) # , crop_albu ,affine
     
     misc = Compose(
         [
@@ -3069,7 +3074,7 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
         ]
     )
 
-    transforms = [crop_albu, pre_transform, alb, misc] #[crop_albu, affine, alb, misc]
+    transforms = [pre_transform, alb, misc] #[crop_albu, affine, alb, misc]
     return Compose(transforms)
 
 
