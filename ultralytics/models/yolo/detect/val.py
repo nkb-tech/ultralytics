@@ -8,6 +8,7 @@ import torch
 
 from ultralytics.data import build_dataloader, build_yolo_dataset, converter
 from ultralytics.engine.validator import BaseValidator
+from ultralytics.models.yolo.detect.sahi_debugger import SAHIValidationDebugger
 from ultralytics.utils import LOGGER, ops, yaml_load
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
@@ -44,7 +45,9 @@ class DetectionValidator(BaseValidator):
                 "WARNING ⚠️ 'save_hybrid=True' will append ground truth to predictions for autolabelling.\n"
                 "WARNING ⚠️ 'save_hybrid=True' will cause incorrect mAP.\n"
             )
-
+        if self.args.sahi_val_debug:
+            self.sahi_debugger = SAHIValidationDebugger()
+                        
     def preprocess(self, batch):
         """Preprocesses batch of images for YOLO training."""
         batch["img"] = batch["img"].to(self.device, non_blocking=True)
@@ -145,6 +148,11 @@ class DetectionValidator(BaseValidator):
 
     def update_metrics(self, preds, batch):
         """Metrics."""
+        if hasattr(self, 'sahi_debugger'):
+            self.sahi_debugger.log_batch_info(batch, self.batch_i)
+            self.sahi_debugger.track_crop_mapping(batch, self.batch_i)
+            self.sahi_debugger.log_predictions(preds, batch, self.batch_i)
+
         for si, pred in enumerate(preds):
             self.seen += 1
             npr = len(pred)

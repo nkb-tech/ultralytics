@@ -250,7 +250,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         Returns:
             Dict[str, Any]: Dictionary containing sliced image and filtered labels.
         """
-        img_idx, _, slice_bbox_coords = self.slice_indices[index]
+        img_idx, slice_idx, slice_bbox_coords = self.slice_indices[index]
         start_x, start_y, end_x, end_y = slice_bbox_coords
         im, (h0, w0), _ = self.load_image(img_idx)
         labels = deepcopy(self.labels[img_idx])
@@ -268,6 +268,11 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
                 "resized_shape": slice_im.shape[:2],
                 "ratio_pad": (1.0, 1.0),
                 "cls": slice_labels["cls"],
+                "original_img_idx": img_idx,  # Index of original image
+                "slice_idx": slice_idx,        # Index of slice within image
+                "slice_coords": slice_bbox_coords,  # Coordinates of this crop in original image
+                "original_im_file": self.im_files[img_idx],  # Original image path
+            
             }
         )
 
