@@ -255,6 +255,22 @@ class DetectionValidator(BaseValidator):
     
     def _update_metrics_standard(self, preds, batch):
         """Standard metrics update (original implementation)."""
+            # Debug first batch
+        if hasattr(self, '_debug_counter'):
+            self._debug_counter += 1
+        else:
+            self._debug_counter = 1
+            
+        if self._debug_counter <= 3:  # Log first 3 batches
+            LOGGER.info(f"_update_metrics_standard batch {self._debug_counter}:")
+            LOGGER.info(f"  Number of predictions: {[len(p) for p in preds]}")
+            if len(preds) > 0 and len(preds[0]) > 0:
+                LOGGER.info(f"  First prediction: {preds[0][0]}")
+            LOGGER.info(f"  GT bboxes shape: {batch['bboxes'].shape}")
+            if len(batch['bboxes']) > 0:
+                LOGGER.info(f"  First GT bbox: {batch['bboxes'][0] if batch['bboxes'].dim() > 1 else batch['bboxes']}")
+        
+    
         for si, pred in enumerate(preds):
             self.seen += 1
             npr = len(pred)
@@ -330,23 +346,30 @@ class DetectionValidator(BaseValidator):
         
         # Apply NMS to aggregated predictions
         if len(aggregated_preds_raw) > 0:
-            # Reshape for NMS function (add batch dimension)
-            preds_for_nms = aggregated_preds_raw.unsqueeze(0)
+            # aggregated_preds_raw is [N, num_outputs] where outputs = 4(bbox) + objectness + classes
+            # Coordinates are already in pixel space for the original image
             
-            # Transpose back to expected format [batch, outputs, anchors]
-            preds_for_nms = preds_for_nms.permute(0, 2, 1)
+            # Reshape for NMS: add batch dimension and transpose
+            preds_for_nms = aggregated_preds_raw.unsqueeze(0)  # [1, N, num_outputs]
+            preds_for_nms = preds_for_nms.permute(0, 2, 1)  # [1, num_outputs, N]
             
             LOGGER.info(f"  Predictions for NMS shape: {preds_for_nms.shape}")
             
             # Apply standard postprocessing (NMS)
             nms_results = self.postprocess(preds_for_nms)
             aggregated_preds = nms_results[0] if nms_results else torch.empty((0, 4 + 2 * len(self.nc)), device=self.device)
+            
+            LOGGER.info(f"  After NMS: {len(aggregated_preds)} detections")
+            if len(aggregated_preds) > 0:
+                LOGGER.info(f"    First detection: {aggregated_preds[0]}")
+                LOGGER.info(f"    Box coords: x1={aggregated_preds[0][0]:.1f}, y1={aggregated_preds[0][1]:.1f}, "
+                            f"x2={aggregated_preds[0][2]:.1f}, y2={aggregated_preds[0][3]:.1f}")
         else:
             aggregated_preds = torch.empty((0, 4 + 2 * len(self.nc)), device=self.device)
         
         LOGGER.info(f"  Aggregated predictions shape after NMS: {aggregated_preds.shape}")
         
-        # Get original image ground truth
+        # Get original image info
         img_idx = self.sahi_aggregator.image_crops[img_key]['original_img_idx']
         original_shape = self.sahi_aggregator.image_crops[img_key]['original_shape']
         
@@ -364,29 +387,29 @@ class DetectionValidator(BaseValidator):
         
         # Ensure cls has correct shape
         if gt_cls.dim() == 1 and len(self.nc) > 1:
-            # If single task labels, reshape for compatibility
             gt_cls = gt_cls.unsqueeze(1)
         
         LOGGER.info(f"  GT cls shape: {gt_cls.shape}, GT bboxes shape: {gt_bboxes.shape}")
+        if len(gt_bboxes) > 0:
+            LOGGER.info(f"    First GT bbox (normalized): {gt_bboxes[0]}")
         
-        # Create synthetic batch for metrics calculation
-        # batch_idx should match the number of ground truth instances
+        # Create batch for metrics calculation
         batch_idx_values = torch.zeros(len(gt_bboxes), device=self.device, dtype=torch.long)
-        
-        # For SAHI validation, we're working with full images, so ratio_pad should be identity
-        # ratio_pad format should be ((ratio_w, ratio_h), (pad_w, pad_h))
-        ratio_pad = ((1.0, 1.0), (0, 0))  # No scaling, no padding for full image
+        ratio_pad = ((1.0, 1.0), (0, 0))
         
         synthetic_batch = {
-            'cls': gt_cls,  # Shape: [num_instances, num_tasks]
-            'bboxes': gt_bboxes,  # Shape: [num_instances, 4]
-            'batch_idx': batch_idx_values,  # Shape: [num_instances]
+            'cls': gt_cls,
+            'bboxes': gt_bboxes,
+            'batch_idx': batch_idx_values,
             'ori_shape': [original_shape],
-            'img': torch.zeros((1, 3, original_shape[0], original_shape[1]), device=self.device),  # Use original shape
+            'img': torch.zeros((1, 3, original_shape[0], original_shape[1]), device=self.device),
             'im_file': [self.dataloader.dataset.im_files[img_idx]],
-            'resized_shape': [original_shape],  # For full image validation
-            'ratio_pad': [ratio_pad],  # Correct format for ratio_pad
+            'resized_shape': [original_shape],
+            'ratio_pad': [ratio_pad],
         }
+        
+        # Increment seen counter for this image
+        self.seen += 1
         
         # Update metrics with aggregated results
         self._update_metrics_standard([aggregated_preds], synthetic_batch)

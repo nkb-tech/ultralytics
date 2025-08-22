@@ -48,11 +48,6 @@ class SAHICropAggregator:
     def add_crop_predictions(self, batch, preds_before_nms, preds_after_nms):
         """
         Add predictions from a batch of crops.
-        
-        Args:
-            batch: Batch dict containing crop information
-            preds_before_nms: Raw model predictions before NMS
-            preds_after_nms: Predictions after NMS (list of tensors per image)
         """
         # Extract metadata
         original_img_idx = batch.get('original_img_idx', [])
@@ -60,11 +55,9 @@ class SAHICropAggregator:
         slice_coords = batch.get('slice_coords', [])
         ori_shapes = batch.get('ori_shape', [])
         
-        # Добавим диагностику
         LOGGER.info(f"add_crop_predictions called:")
         if preds_before_nms is not None:
             if isinstance(preds_before_nms, tuple):
-                LOGGER.info(f"  preds_before_nms is tuple with {len(preds_before_nms)} elements")
                 preds_before_nms = preds_before_nms[0] if len(preds_before_nms) > 0 else None
             if hasattr(preds_before_nms, 'shape'):
                 LOGGER.info(f"  preds_before_nms shape: {preds_before_nms.shape}")
@@ -89,74 +82,60 @@ class SAHICropAggregator:
             
             # Store raw predictions (before NMS) with crop coordinates
             if preds_before_nms is not None and hasattr(preds_before_nms, 'shape'):
-                # preds_before_nms shape: (batch_size, num_outputs, num_anchors)
-                # Нужно транспонировать для правильной обработки
                 if len(preds_before_nms.shape) == 3:
-                    # Transpose from [batch, outputs, anchors] to [batch, anchors, outputs]
-                    preds_transposed = preds_before_nms.permute(0, 2, 1)
-                    crop_preds = preds_transposed[i]  # [num_anchors, num_outputs]
+                    # Format: [batch, outputs, anchors]
+                    crop_preds = preds_before_nms[i]  # [outputs, anchors]
+                    
+                    # Transpose to [anchors, outputs]
+                    crop_preds = crop_preds.T
+                    
+                    LOGGER.info(f"  Image {i}: transposed crop_preds shape: {crop_preds.shape}")
+                    
+                    # Log structure for first image
+                    if i == 0 and len(crop_preds) > 0:
+                        LOGGER.info(f"    Output structure analysis:")
+                        LOGGER.info(f"    Objectness range: [{crop_preds[:, 4].min():.4f}, {crop_preds[:, 4].max():.4f}]")
+                        LOGGER.info(f"    Box coord ranges before transform:")
+                        LOGGER.info(f"      x: [{crop_preds[:, 0].min():.2f}, {crop_preds[:, 0].max():.2f}]")
+                        LOGGER.info(f"      y: [{crop_preds[:, 1].min():.2f}, {crop_preds[:, 1].max():.2f}]")
+                    
+                    # Filter by objectness confidence
+                    conf_threshold = 0.001
+                    valid_mask = crop_preds[:, 4] > conf_threshold
+                    
+                    crop_preds_filtered = crop_preds[valid_mask]
+                    
+                    LOGGER.info(f"  Image {i}: filtered predictions: {len(crop_preds_filtered)}/{len(crop_preds)}")
+                    
+                    if len(crop_preds_filtered) > 0:
+                        # Get crop info
+                        x_min, y_min, x_max, y_max = slice_coords[i]
+                        crop_width = x_max - x_min
+                        crop_height = y_max - y_min
+                        
+                        # Transform box coordinates from crop to original image
+                        # The predictions are in pixel coordinates relative to the crop
+                        crop_preds_transformed = crop_preds_filtered.clone()
+                        
+                        # Offset coordinates to original image space
+                        crop_preds_transformed[:, 0] += x_min  # x_center
+                        crop_preds_transformed[:, 1] += y_min  # y_center
+                        # Width and height stay the same (they're already in pixels)
+                        
+                        if i == 0:  # Debug first image
+                            LOGGER.info(f"    After transform to original image:")
+                            LOGGER.info(f"      x: [{crop_preds_transformed[:, 0].min():.2f}, {crop_preds_transformed[:, 0].max():.2f}]")
+                            LOGGER.info(f"      y: [{crop_preds_transformed[:, 1].min():.2f}, {crop_preds_transformed[:, 1].max():.2f}]")
+                            LOGGER.info(f"      Crop coords: {slice_coords[i]}")
+                            LOGGER.info(f"      Original shape: {self.image_crops[img_key]['original_shape']}")
+                        
+                        self.image_crops[img_key]['predictions'].append(crop_preds_transformed)
+                        self.image_crops[img_key]['crop_coords'].append(slice_coords[i])
                 else:
                     LOGGER.error(f"Unexpected preds_before_nms shape: {preds_before_nms.shape}")
                     continue
-                
-                # Для мультитаск YOLO формат: [x, y, w, h, obj_conf, cls0_0, ..., cls0_N, cls1_0, ..., cls1_M]
-                # Фильтруем по objectness confidence (индекс 4)
-                obj_conf_idx = 4
-                
-                if crop_preds.shape[-1] <= obj_conf_idx:
-                    LOGGER.error(f"Invalid crop_preds shape: {crop_preds.shape}, obj_conf_idx: {obj_conf_idx}")
-                    continue
-                    
-                # Применяем пороговое значение для фильтрации
-                conf_threshold = 0.001  # Минимальный порог для сохранения предсказаний
-                valid_mask = crop_preds[:, obj_conf_idx] > conf_threshold
-                
-                crop_preds_filtered = crop_preds[valid_mask]
-                
-                LOGGER.info(f"  Image {i}: filtered predictions: {len(crop_preds_filtered)}/{len(crop_preds)}")
-                
-                if len(crop_preds_filtered) > 0:
-                    # Transform box coordinates from crop to original image
-                    crop_preds_transformed = self._transform_boxes_to_original(
-                        crop_preds_filtered, slice_coords[i]
-                    )
-                    self.image_crops[img_key]['predictions'].append(crop_preds_transformed)
-                    self.image_crops[img_key]['crop_coords'].append(slice_coords[i])
                     
         return True
-
-    def _transform_boxes_to_original(self, predictions, crop_coords):
-        """
-        Transform box coordinates from crop to original image coordinates.
-        
-        Args:
-            predictions: Tensor with boxes in first 4 columns (x_center, y_center, width, height) in crop pixel coordinates
-            crop_coords: (x_min, y_min, x_max, y_max) of crop in original image
-        """
-        if len(predictions) == 0:
-            return predictions
-            
-        pred = predictions.clone()
-        x_min, y_min, x_max, y_max = crop_coords
-        
-        # Get crop dimensions
-        crop_width = x_max - x_min
-        crop_height = y_max - y_min
-        
-        # Boxes are in YOLO format (x_center, y_center, width, height) normalized to crop size
-        # First denormalize to crop pixel coordinates
-        pred[:, 0] *= crop_width   # x_center
-        pred[:, 1] *= crop_height  # y_center
-        pred[:, 2] *= crop_width   # width
-        pred[:, 3] *= crop_height  # height
-        
-        # Then offset to original image coordinates
-        pred[:, 0] += x_min  # x_center
-        pred[:, 1] += y_min  # y_center
-        # width and height remain the same
-        
-        return pred
-
     
     def get_aggregated_predictions(self, img_key):
         """
@@ -166,6 +145,13 @@ class SAHICropAggregator:
             Tensor: Concatenated predictions from all crops (before NMS)
         """
         data = self.image_crops[img_key]
+        
+        LOGGER.info(f"  get_aggregated_predictions for image {img_key}:")
+        LOGGER.info(f"    Number of prediction lists: {len(data['predictions'])}")
+        
+        if data['predictions']:
+            for i, pred in enumerate(data['predictions']):
+                LOGGER.info(f"    Predictions[{i}] shape: {pred.shape if hasattr(pred, 'shape') else type(pred)}")
         
         if not data['predictions']:
             # Return empty tensor with correct number of columns
@@ -178,6 +164,15 @@ class SAHICropAggregator:
         
         # Concatenate all predictions
         all_preds = torch.cat(data['predictions'], dim=0)
+        LOGGER.info(f"    Concatenated predictions shape: {all_preds.shape}")
+        
+        # Проверим содержимое
+        if len(all_preds) > 0:
+            LOGGER.info(f"    Sample prediction (first 5 values): {all_preds[0][:5] if len(all_preds[0]) >= 5 else all_preds[0]}")
+            LOGGER.info(f"    Box values range: x=[{all_preds[:, 0].min():.2f}, {all_preds[:, 0].max():.2f}], "
+                        f"y=[{all_preds[:, 1].min():.2f}, {all_preds[:, 1].max():.2f}]")
+            LOGGER.info(f"    Confidence values range: [{all_preds[:, 4].min():.4f}, {all_preds[:, 4].max():.4f}]")
+        
         return all_preds
     
     def is_image_complete(self, img_key):
