@@ -535,7 +535,7 @@ class Mosaic(BaseMixTransform):
         >>> augmented_labels = mosaic_aug(original_labels)
     """
 
-    def __init__(self, dataset, imgsz=640, p=1.0, n=4):
+    def __init__(self, dataset, imgsz=640, p=1.0, n=4, mix_transform=None):
         """
         Initializes the Mosaic augmentation object.
 
@@ -547,7 +547,8 @@ class Mosaic(BaseMixTransform):
             imgsz (int): Image size (height and width) after mosaic pipeline of a single image.
             p (float): Probability of applying the mosaic augmentation. Must be in the range 0-1.
             n (int): The grid size, either 4 (for 2x2) or 9 (for 3x3).
-
+            mix_transform (Callable, optional): Transform to apply to each image before mosaic.
+            This is useful for applying crop transforms to mix_labels.
         Examples:
             >>> from ultralytics.data.augment import Mosaic
             >>> dataset = YourDataset(...)
@@ -559,6 +560,7 @@ class Mosaic(BaseMixTransform):
         self.imgsz = imgsz
         self.border = (-imgsz // 2, -imgsz // 2)  # width, height
         self.n = n
+        self.mix_transform = mix_transform
 
     def get_indexes(self, buffer=True):
         """
@@ -610,6 +612,10 @@ class Mosaic(BaseMixTransform):
         """
         assert labels.get("rect_shape", None) is None, "rect and mosaic are mutually exclusive."
         assert len(labels.get("mix_labels", [])), "There are no other images for mosaic augment."
+        # print(f"DEBUG _mix_transform: main image shape: {labels['img'].shape}, resized_shape: {labels.get('resized_shape', 'N/A')}")
+        # if 'mix_labels' in labels:
+        #     for idx, mix_label in enumerate(labels['mix_labels']):
+        #         print(f"  mix_label[{idx}] image shape: {mix_label['img'].shape}, resized_shape: {mix_label.get('resized_shape', 'N/A')}")
         return (
             self._mosaic3(labels) if self.n == 3 else self._mosaic4(labels) if self.n == 4 else self._mosaic9(labels)
         )  # This code is modified for mosaic3 method.
@@ -647,8 +653,15 @@ class Mosaic(BaseMixTransform):
             labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
             # Load image
             img = labels_patch["img"]
-            h, w = labels_patch.pop("resized_shape")
 
+            actual_h, actual_w = img.shape[:2]
+            stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
+        
+            if (actual_h, actual_w) != (stored_h, stored_w):
+                h, w = actual_h, actual_w
+                labels_patch["resized_shape"] = (h, w)
+            else:
+                h, w = labels_patch.pop("resized_shape")
             # Place img in img3
             if i == 0:  # center
                 img3 = np.full((s * 3, s * 3, img.shape[2]), 114, dtype=np.uint8)  # base image with 3 tiles
@@ -704,8 +717,16 @@ class Mosaic(BaseMixTransform):
             labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
             # Load image
             img = labels_patch["img"]
-            h, w = labels_patch.pop("resized_shape")
-
+            
+            actual_h, actual_w = img.shape[:2]
+            stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
+        
+            if (actual_h, actual_w) != (stored_h, stored_w):
+                h, w = actual_h, actual_w
+                labels_patch["resized_shape"] = (h, w)
+            else:
+                h, w = labels_patch.pop("resized_shape")
+            
             # Place img in img4
             if i == 0:  # top left
                 img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
@@ -764,8 +785,15 @@ class Mosaic(BaseMixTransform):
             labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
             # Load image
             img = labels_patch["img"]
-            h, w = labels_patch.pop("resized_shape")
 
+            actual_h, actual_w = img.shape[:2]
+            stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
+        
+            if (actual_h, actual_w) != (stored_h, stored_w):
+                h, w = actual_h, actual_w
+                labels_patch["resized_shape"] = (h, w)
+            else:
+                h, w = labels_patch.pop("resized_shape")
             # Place img in img9
             if i == 0:  # center
                 img9 = np.full((s * 3, s * 3, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
@@ -862,9 +890,25 @@ class Mosaic(BaseMixTransform):
         cls = []
         instances = []
         imgsz = self.imgsz * 2  # mosaic imgsz
+        n_attrs = 1
         for labels in mosaic_labels:
-            cls.append(labels["cls"])
+            if "cls" in labels and len(labels["cls"]) > 0:
+                n_attrs = labels["cls"].shape[1] if labels["cls"].ndim == 2 else 1
+                break
+            
+        for labels in mosaic_labels:
+            if "cls" in labels:
+                cls_array = labels["cls"]
+                if cls_array.shape == (0,):
+                    cls_array = np.empty((0, n_attrs), dtype=np.float32)
+                elif cls_array.ndim == 1 and len(cls_array) > 0:
+                    cls_array = cls_array.reshape(-1, 1)
+                cls.append(cls_array)
+            else:
+                cls.append(np.empty((0, n_attrs), dtype=np.float32))
+                
             instances.append(labels["instances"])
+            
         # Final labels
         final_labels = {
             "im_file": mosaic_labels[0]["im_file"],
@@ -3012,6 +3056,9 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
         pre_transform=LetterBox(new_shape=(imgsz, imgsz)),
     )
 
+    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic)
+    pre_transform = Compose([mosaic, affine])
+    
     misc = Compose(
         [
             MixUp(dataset, p=hyp.mixup),
@@ -3022,7 +3069,7 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
         ]
     )
 
-    transforms = [crop_albu, affine, alb, misc]
+    transforms = [crop_albu, pre_transform, alb, misc] #[crop_albu, affine, alb, misc]
     return Compose(transforms)
 
 
