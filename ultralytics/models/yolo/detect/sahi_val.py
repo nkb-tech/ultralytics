@@ -43,7 +43,7 @@ class SAHICropAggregator:
                     self.expected_crops_per_image[img_idx] = 0
                 self.expected_crops_per_image[img_idx] += 1
                 
-        LOGGER.info(f"Expected crops per image calculated: {len(self.expected_crops_per_image)} images")
+        LOGGER.debug(f"Expected crops per image calculated: {len(self.expected_crops_per_image)} images")
         
     def add_crop_predictions(self, batch, preds_before_nms, preds_after_nms):
         """
@@ -55,12 +55,12 @@ class SAHICropAggregator:
         slice_coords = batch.get('slice_coords', [])
         ori_shapes = batch.get('ori_shape', [])
         
-        LOGGER.info(f"add_crop_predictions called:")
+        LOGGER.debug(f"add_crop_predictions called:")
         if preds_before_nms is not None:
             if isinstance(preds_before_nms, tuple):
                 preds_before_nms = preds_before_nms[0] if len(preds_before_nms) > 0 else None
             if hasattr(preds_before_nms, 'shape'):
-                LOGGER.info(f"  preds_before_nms shape: {preds_before_nms.shape}")
+                LOGGER.debug(f"  preds_before_nms shape: {preds_before_nms.shape}")
         
         # If metadata is missing, skip SAHI aggregation
         if not original_img_idx:
@@ -89,15 +89,15 @@ class SAHICropAggregator:
                     # Transpose to [anchors, outputs]
                     crop_preds = crop_preds.T
                     
-                    LOGGER.info(f"  Image {i}: transposed crop_preds shape: {crop_preds.shape}")
+                    LOGGER.debug(f"  Image {i}: transposed crop_preds shape: {crop_preds.shape}")
                     
                     # Log structure for first image
                     if i == 0 and len(crop_preds) > 0:
-                        LOGGER.info(f"    Output structure analysis:")
-                        LOGGER.info(f"    Objectness range: [{crop_preds[:, 4].min():.4f}, {crop_preds[:, 4].max():.4f}]")
-                        LOGGER.info(f"    Box coord ranges before transform:")
-                        LOGGER.info(f"      x: [{crop_preds[:, 0].min():.2f}, {crop_preds[:, 0].max():.2f}]")
-                        LOGGER.info(f"      y: [{crop_preds[:, 1].min():.2f}, {crop_preds[:, 1].max():.2f}]")
+                        LOGGER.debug(f"    Output structure analysis:")
+                        LOGGER.debug(f"    Objectness range: [{crop_preds[:, 4].min():.4f}, {crop_preds[:, 4].max():.4f}]")
+                        LOGGER.debug(f"    Box coord ranges before transform:")
+                        LOGGER.debug(f"      x: [{crop_preds[:, 0].min():.2f}, {crop_preds[:, 0].max():.2f}]")
+                        LOGGER.debug(f"      y: [{crop_preds[:, 1].min():.2f}, {crop_preds[:, 1].max():.2f}]")
                     
                     # Filter by objectness confidence
                     conf_threshold = 0.001
@@ -105,7 +105,7 @@ class SAHICropAggregator:
                     
                     crop_preds_filtered = crop_preds[valid_mask]
                     
-                    LOGGER.info(f"  Image {i}: filtered predictions: {len(crop_preds_filtered)}/{len(crop_preds)}")
+                    LOGGER.debug(f"  Image {i}: filtered predictions: {len(crop_preds_filtered)}/{len(crop_preds)}")
                     
                     if len(crop_preds_filtered) > 0:
                         # Get crop info
@@ -123,11 +123,11 @@ class SAHICropAggregator:
                         # Width and height stay the same (they're already in pixels)
                         
                         if i == 0:  # Debug first image
-                            LOGGER.info(f"    After transform to original image:")
-                            LOGGER.info(f"      x: [{crop_preds_transformed[:, 0].min():.2f}, {crop_preds_transformed[:, 0].max():.2f}]")
-                            LOGGER.info(f"      y: [{crop_preds_transformed[:, 1].min():.2f}, {crop_preds_transformed[:, 1].max():.2f}]")
-                            LOGGER.info(f"      Crop coords: {slice_coords[i]}")
-                            LOGGER.info(f"      Original shape: {self.image_crops[img_key]['original_shape']}")
+                            LOGGER.debug(f"    After transform to original image:")
+                            LOGGER.debug(f"      x: [{crop_preds_transformed[:, 0].min():.2f}, {crop_preds_transformed[:, 0].max():.2f}]")
+                            LOGGER.debug(f"      y: [{crop_preds_transformed[:, 1].min():.2f}, {crop_preds_transformed[:, 1].max():.2f}]")
+                            LOGGER.debug(f"      Crop coords: {slice_coords[i]}")
+                            LOGGER.debug(f"      Original shape: {self.image_crops[img_key]['original_shape']}")
                         
                         self.image_crops[img_key]['predictions'].append(crop_preds_transformed)
                         self.image_crops[img_key]['crop_coords'].append(slice_coords[i])
@@ -146,12 +146,12 @@ class SAHICropAggregator:
         """
         data = self.image_crops[img_key]
         
-        LOGGER.info(f"  get_aggregated_predictions for image {img_key}:")
-        LOGGER.info(f"    Number of prediction lists: {len(data['predictions'])}")
+        LOGGER.debug(f"  get_aggregated_predictions for image {img_key}:")
+        LOGGER.debug(f"    Number of prediction lists: {len(data['predictions'])}")
         
         if data['predictions']:
             for i, pred in enumerate(data['predictions']):
-                LOGGER.info(f"    Predictions[{i}] shape: {pred.shape if hasattr(pred, 'shape') else type(pred)}")
+                LOGGER.debug(f"    Predictions[{i}] shape: {pred.shape if hasattr(pred, 'shape') else type(pred)}")
         
         if not data['predictions']:
             # Return empty tensor with correct number of columns
@@ -164,14 +164,14 @@ class SAHICropAggregator:
         
         # Concatenate all predictions
         all_preds = torch.cat(data['predictions'], dim=0)
-        LOGGER.info(f"    Concatenated predictions shape: {all_preds.shape}")
+        LOGGER.debug(f"    Concatenated predictions shape: {all_preds.shape}")
         
         # Проверим содержимое
         if len(all_preds) > 0:
-            LOGGER.info(f"    Sample prediction (first 5 values): {all_preds[0][:5] if len(all_preds[0]) >= 5 else all_preds[0]}")
-            LOGGER.info(f"    Box values range: x=[{all_preds[:, 0].min():.2f}, {all_preds[:, 0].max():.2f}], "
+            LOGGER.debug(f"    Sample prediction (first 5 values): {all_preds[0][:5] if len(all_preds[0]) >= 5 else all_preds[0]}")
+            LOGGER.debug(f"    Box values range: x=[{all_preds[:, 0].min():.2f}, {all_preds[:, 0].max():.2f}], "
                         f"y=[{all_preds[:, 1].min():.2f}, {all_preds[:, 1].max():.2f}]")
-            LOGGER.info(f"    Confidence values range: [{all_preds[:, 4].min():.4f}, {all_preds[:, 4].max():.4f}]")
+            LOGGER.debug(f"    Confidence values range: [{all_preds[:, 4].min():.4f}, {all_preds[:, 4].max():.4f}]")
         
         return all_preds
     
