@@ -128,27 +128,31 @@ class DetectionValidator(BaseValidator):
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
-        
-        # Добавим диагностику и правильную обработку tuple
-        if isinstance(preds, tuple):
-            LOGGER.info(f"postprocess input is tuple with {len(preds)} elements")
-            if len(preds) > 0:
-                LOGGER.info(f"First element shape: {preds[0].shape if hasattr(preds[0], 'shape') else type(preds[0])}")
-            # Для мультитаск модели preds может быть (predictions, proto) или просто predictions
-            # Берем первый элемент если это tuple
-            actual_preds = preds[0] if isinstance(preds[0], torch.Tensor) else preds
+        LOGGER.info("--- Entering postprocess ---")
+
+        if isinstance(preds, (list, tuple)):
+            LOGGER.info(f"postprocess received a tuple/list with {len(preds)} elements.")
+            actual_preds = preds[0]
         else:
             actual_preds = preds
-            
-        LOGGER.info(f"Actual predictions shape: {actual_preds.shape if hasattr(actual_preds, 'shape') else type(actual_preds)}")
-        LOGGER.info(f"self.nc (num classes per task): {self.nc}")
         
+        if not isinstance(actual_preds, torch.Tensor):
+            LOGGER.error(f"Error in postprocess: 'actual_preds' is not a tensor, but {type(actual_preds)}. Cannot proceed.")
+            return []
+
+        LOGGER.info(f"Actual predictions shape for NMS: {actual_preds.shape}")
+
         if self.sahi_enabled:
-            # Сохраняем актуальные предсказания, а не tuple
-            self._last_raw_preds = actual_preds.clone() if isinstance(actual_preds, torch.Tensor) else actual_preds
+            if isinstance(preds, (list, tuple)) and len(preds) > 1 and isinstance(preds[1], torch.Tensor):
+                self._last_raw_preds = preds[1].clone()
+                LOGGER.info(f"SAHI enabled: Storing secondary tensor (e.g., protos). Shape: {self._last_raw_preds.shape}")
+            else:
+                self._last_raw_preds = actual_preds.clone()
+                LOGGER.info(f"SAHI enabled: Storing main predictions tensor. Shape: {self._last_raw_preds.shape}")
             
+        # 3. Применяем NMS
         return ops.non_max_suppression(
-            actual_preds,  # Используем actual_preds вместо preds
+            actual_preds,
             self.args.conf,
             self.args.iou,
             labels=self.lb,
