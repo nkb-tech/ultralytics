@@ -120,7 +120,7 @@ class DetectionValidator(BaseValidator):
                 if hasattr(self.dataloader, 'dataset'):
                     self.sahi_aggregator.calculate_expected_crops(self.dataloader.dataset)
                     
-                LOGGER.info("SAHI aggregator initialized for grid validation")
+                LOGGER.debug("SAHI aggregator initialized for grid validation")
     
 
     def get_desc(self):
@@ -129,10 +129,10 @@ class DetectionValidator(BaseValidator):
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
-        LOGGER.info("--- Entering postprocess ---")
+        LOGGER.debug("--- Entering postprocess ---")
 
         if isinstance(preds, (list, tuple)):
-            LOGGER.info(f"postprocess received a tuple/list with {len(preds)} elements.")
+            LOGGER.debug(f"postprocess received a tuple/list with {len(preds)} elements.")
             actual_preds = preds[0]
         else:
             actual_preds = preds
@@ -141,15 +141,15 @@ class DetectionValidator(BaseValidator):
             LOGGER.error(f"Error in postprocess: 'actual_preds' is not a tensor, but {type(actual_preds)}. Cannot proceed.")
             return []
 
-        LOGGER.info(f"Actual predictions shape for NMS: {actual_preds.shape}")
+        LOGGER.debug(f"Actual predictions shape for NMS: {actual_preds.shape}")
 
         if self.sahi_enabled:
             if isinstance(preds, (list, tuple)) and len(preds) > 1 and isinstance(preds[1], torch.Tensor):
                 self._last_raw_preds = preds[1].clone()
-                LOGGER.info(f"SAHI enabled: Storing secondary tensor (e.g., protos). Shape: {self._last_raw_preds.shape}")
+                LOGGER.debug(f"SAHI enabled: Storing secondary tensor (e.g., protos). Shape: {self._last_raw_preds.shape}")
             else:
                 self._last_raw_preds = actual_preds.clone()
-                LOGGER.info(f"SAHI enabled: Storing main predictions tensor. Shape: {self._last_raw_preds.shape}")
+                LOGGER.debug(f"SAHI enabled: Storing main predictions tensor. Shape: {self._last_raw_preds.shape}")
             
         # 3. Применяем NMS
         return ops.non_max_suppression(
@@ -229,7 +229,7 @@ class DetectionValidator(BaseValidator):
             completed_images = self.sahi_aggregator.get_completed_images()
             
             if completed_images:
-                LOGGER.info(f"Found {len(completed_images)} completed images: {completed_images}")
+                LOGGER.debug(f"Found {len(completed_images)} completed images: {completed_images}")
             
             for img_key in completed_images:
                 try:
@@ -267,13 +267,13 @@ class DetectionValidator(BaseValidator):
             self._debug_counter = 1
             
         if self._debug_counter <= 3:  # Log first 3 batches
-            LOGGER.info(f"_update_metrics_standard batch {self._debug_counter}:")
-            LOGGER.info(f"  Number of predictions: {[len(p) for p in preds]}")
+            LOGGER.debug(f"_update_metrics_standard batch {self._debug_counter}:")
+            LOGGER.debug(f"  Number of predictions: {[len(p) for p in preds]}")
             if len(preds) > 0 and len(preds[0]) > 0:
-                LOGGER.info(f"  First prediction: {preds[0][0]}")
-            LOGGER.info(f"  GT bboxes shape: {batch['bboxes'].shape}")
+                LOGGER.debug(f"  First prediction: {preds[0][0]}")
+            LOGGER.debug(f"  GT bboxes shape: {batch['bboxes'].shape}")
             if len(batch['bboxes']) > 0:
-                LOGGER.info(f"  First GT bbox: {batch['bboxes'][0] if batch['bboxes'].dim() > 1 else batch['bboxes']}")
+                LOGGER.debug(f"  First GT bbox: {batch['bboxes'][0] if batch['bboxes'].dim() > 1 else batch['bboxes']}")
         
     
         for si, pred in enumerate(preds):
@@ -342,12 +342,12 @@ class DetectionValidator(BaseValidator):
     def _process_complete_image(self, img_key):
         """Process a complete image with all crops aggregated."""
         
-        LOGGER.info(f"Processing complete image: {img_key}")
+        LOGGER.debug(f"Processing complete image: {img_key}")
         
         # Get aggregated predictions
         aggregated_preds_raw = self.sahi_aggregator.get_aggregated_predictions(img_key)
         
-        LOGGER.info(f"  Aggregated predictions shape before NMS: {aggregated_preds_raw.shape}")
+        LOGGER.debug(f"  Aggregated predictions shape before NMS: {aggregated_preds_raw.shape}")
         
         # Apply NMS to aggregated predictions
         if len(aggregated_preds_raw) > 0:
@@ -358,21 +358,21 @@ class DetectionValidator(BaseValidator):
             preds_for_nms = aggregated_preds_raw.unsqueeze(0)  # [1, N, num_outputs]
             preds_for_nms = preds_for_nms.permute(0, 2, 1)  # [1, num_outputs, N]
             
-            LOGGER.info(f"  Predictions for NMS shape: {preds_for_nms.shape}")
+            LOGGER.debug(f"  Predictions for NMS shape: {preds_for_nms.shape}")
             
             # Apply standard postprocessing (NMS)
             nms_results = self.postprocess(preds_for_nms)
             aggregated_preds = nms_results[0] if nms_results else torch.empty((0, 4 + 2 * len(self.nc)), device=self.device)
             
-            LOGGER.info(f"  After NMS: {len(aggregated_preds)} detections")
+            LOGGER.debug(f"  After NMS: {len(aggregated_preds)} detections")
             if len(aggregated_preds) > 0:
-                LOGGER.info(f"    First detection: {aggregated_preds[0]}")
-                LOGGER.info(f"    Box coords: x1={aggregated_preds[0][0]:.1f}, y1={aggregated_preds[0][1]:.1f}, "
+                LOGGER.debug(f"    First detection: {aggregated_preds[0]}")
+                LOGGER.debug(f"    Box coords: x1={aggregated_preds[0][0]:.1f}, y1={aggregated_preds[0][1]:.1f}, "
                             f"x2={aggregated_preds[0][2]:.1f}, y2={aggregated_preds[0][3]:.1f}")
         else:
             aggregated_preds = torch.empty((0, 4 + 2 * len(self.nc)), device=self.device)
         
-        LOGGER.info(f"  Aggregated predictions shape after NMS: {aggregated_preds.shape}")
+        LOGGER.debug(f"  Aggregated predictions shape after NMS: {aggregated_preds.shape}")
         
         # Get original image info
         img_idx = self.sahi_aggregator.image_crops[img_key]['original_img_idx']
@@ -394,9 +394,9 @@ class DetectionValidator(BaseValidator):
         if gt_cls.dim() == 1 and len(self.nc) > 1:
             gt_cls = gt_cls.unsqueeze(1)
         
-        LOGGER.info(f"  GT cls shape: {gt_cls.shape}, GT bboxes shape: {gt_bboxes.shape}")
+        LOGGER.debug(f"  GT cls shape: {gt_cls.shape}, GT bboxes shape: {gt_bboxes.shape}")
         if len(gt_bboxes) > 0:
-            LOGGER.info(f"    First GT bbox (normalized): {gt_bboxes[0]}")
+            LOGGER.debug(f"    First GT bbox (normalized): {gt_bboxes[0]}")
         
         # Create batch for metrics calculation
         batch_idx_values = torch.zeros(len(gt_bboxes), device=self.device, dtype=torch.long)
@@ -620,7 +620,7 @@ class DetectionValidator(BaseValidator):
             LOGGER.warning("No images with predictions found for SAHI plotting")
             return
         
-        LOGGER.info(f"Plotting predictions for images: {completed_images}")
+        LOGGER.debug(f"Plotting predictions for images: {completed_images}")
         
         images_list = []
         all_preds = []
@@ -665,7 +665,7 @@ class DetectionValidator(BaseValidator):
             # Пробуем получить агрегированные предсказания
             if self.sahi_aggregator and img_key in self.sahi_aggregator.image_crops:
                 if len(self.sahi_aggregator.image_crops[img_key]['predictions']) > 0:
-                    LOGGER.info(f"Using aggregated predictions for image {img_idx}")
+                    LOGGER.debug(f"Using aggregated predictions for image {img_idx}")
                     aggregated_preds_raw = self.sahi_aggregator.get_aggregated_predictions(img_key)
                     
                     if len(aggregated_preds_raw) > 0:
@@ -687,7 +687,7 @@ class DetectionValidator(BaseValidator):
             
             # Если нет агрегированных, используем кэшированные
             if preds_for_image is None and 'predictions' in cache_data and cache_data['predictions']:
-                LOGGER.info(f"Using cached predictions for image {img_idx} ({len(cache_data['predictions'])} crops)")
+                LOGGER.debug(f"Using cached predictions for image {img_idx} ({len(cache_data['predictions'])} crops)")
                 combined_preds = []
                 for pred in cache_data['predictions']:
                     if isinstance(pred, torch.Tensor) and len(pred) > 0:
@@ -724,7 +724,7 @@ class DetectionValidator(BaseValidator):
                 on_plot=self.on_plot,
                 max_subplots=16
             )
-            LOGGER.info(f"Saved SAHI predictions to {self.save_dir / 'val_sahi_full_pred.jpg'}")
+            LOGGER.debug(f"Saved SAHI predictions to {self.save_dir / 'val_sahi_full_pred.jpg'}")
 
     def plot_sahi_complete_images(self):
         """Plot complete images with aggregated labels and predictions for SAHI validation."""
@@ -884,7 +884,7 @@ class DetectionValidator(BaseValidator):
                 on_plot=self.on_plot,
                 max_subplots=16
             )
-            LOGGER.info(f"Saved SAHI validation samples to {self.save_dir / 'val_sahi_full_labels.jpg'}")
+            LOGGER.debug(f"Saved SAHI validation samples to {self.save_dir / 'val_sahi_full_labels.jpg'}")
 
     def save_one_txt(self, predn, save_conf, shape, file):
         """Save YOLO detections to a txt file in normalized coordinates in a specific format."""
