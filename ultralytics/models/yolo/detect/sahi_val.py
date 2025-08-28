@@ -63,22 +63,17 @@ class SAHICropAggregator:
         for i in range(len(original_img_idx)):
             img_idx = original_img_idx[i]
             img_key = str(img_idx)
-            
-            # Store original shape
             if self.image_crops[img_key]['original_shape'] is None:
                 self.image_crops[img_key]['original_shape'] = ori_shapes[i]
                 self.image_crops[img_key]['original_img_idx'] = img_idx
             
-            # Track this crop
             self.image_crops[img_key]['processed_crops'].add(slice_idx[i])
             
-            # Store raw predictions (before NMS) with crop coordinates
             if preds_before_nms is not None and hasattr(preds_before_nms, 'shape'):
                 if len(preds_before_nms.shape) == 3:
                     # Format: [batch, outputs, anchors]
                     crop_preds = preds_before_nms[i]  # [outputs, anchors]
                     
-                    # Transpose to [anchors, outputs]
                     crop_preds = crop_preds.T
                     conf_threshold = 0.001
                     valid_mask = crop_preds[:, 4] > conf_threshold
@@ -90,7 +85,6 @@ class SAHICropAggregator:
 
                         boxes_xyxy_crop = ops.xywh2xyxy(crop_preds_filtered[:, :4])
                         
-                        # Теперь смещаем координаты углов
                         boxes_xyxy_crop[:, 0] += x_min  # x1
                         boxes_xyxy_crop[:, 1] += y_min  # y1
                         boxes_xyxy_crop[:, 2] += x_min  # x2

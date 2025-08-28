@@ -152,7 +152,6 @@ class DetectionValidator(BaseValidator):
                 self._last_raw_preds = actual_preds.clone()
                 LOGGER.debug(f"SAHI enabled: Storing main predictions tensor. Shape: {self._last_raw_preds.shape}")
             
-        # 3. Применяем NMS
         return ops.non_max_suppression(
             actual_preds,
             self.args.conf,
@@ -166,17 +165,14 @@ class DetectionValidator(BaseValidator):
 
     def _prepare_batch(self, si, batch):
         """Prepares a batch of images and annotations for validation."""
-        # Проверяем формат batch_idx
         if 'batch_idx' in batch and batch['batch_idx'].numel() > 0:
             idx = batch["batch_idx"] == si
         else:
-            # Если batch_idx пустой или отсутствует, обрабатываем все данные для изображения si
             idx = torch.ones(len(batch["cls"]), dtype=torch.bool, device=batch["cls"].device) if si == 0 else torch.zeros(len(batch["cls"]), dtype=torch.bool, device=batch["cls"].device)
         
         cls = batch["cls"][idx] if idx.any() else batch["cls"]
         bbox = batch["bboxes"][idx] if idx.any() else batch["bboxes"]
         
-        # Обработка ori_shape с учетом разных форматов
         if isinstance(batch["ori_shape"], list):
             ori_shape = batch["ori_shape"][si] if si < len(batch["ori_shape"]) else batch["ori_shape"][0]
         else:
@@ -184,16 +180,13 @@ class DetectionValidator(BaseValidator):
         
         imgsz = batch["img"].shape[2:]
         
-        # Обработка ratio_pad с учетом разных форматов
         if isinstance(batch["ratio_pad"], list):
             ratio_pad = batch["ratio_pad"][si] if si < len(batch["ratio_pad"]) else batch["ratio_pad"][0]
         else:
             ratio_pad = batch["ratio_pad"][si] if len(batch["ratio_pad"]) > si else batch["ratio_pad"][0]
         
-        # Проверяем и исправляем формат ratio_pad
         if isinstance(ratio_pad, tuple) and len(ratio_pad) == 2:
             if not isinstance(ratio_pad[0], tuple):
-                # Если это просто (ratio_w, ratio_h), конвертируем в правильный формат
                 ratio_pad = (ratio_pad, (0, 0))
         
         if len(cls):
@@ -345,7 +338,6 @@ class DetectionValidator(BaseValidator):
         
         LOGGER.debug(f"Processing complete image: {img_key}")
         
-        # Get aggregated predictions
         aggregated_preds_raw = self.sahi_aggregator.get_aggregated_predictions(img_key)
         
         LOGGER.debug(f"  Aggregated predictions shape before NMS: {aggregated_preds_raw.shape}")
@@ -353,9 +345,6 @@ class DetectionValidator(BaseValidator):
         # Apply NMS to aggregated predictions
         if len(aggregated_preds_raw) > 0:
             # aggregated_preds_raw is [N, num_outputs] where outputs = 4(bbox) + objectness + classes
-            # Coordinates are already in pixel space for the original image
-            
-            # Reshape for NMS: add batch dimension and transpose
             preds_for_nms = aggregated_preds_raw.unsqueeze(0)  # [1, N, num_outputs]
             preds_for_nms = preds_for_nms.permute(0, 2, 1)  # [1, num_outputs, N]
             
@@ -375,14 +364,10 @@ class DetectionValidator(BaseValidator):
         
         LOGGER.debug(f"  Aggregated predictions shape after NMS: {aggregated_preds.shape}")
         
-        # Get original image info
         img_idx = self.sahi_aggregator.image_crops[img_key]['original_img_idx']
         original_shape = self.sahi_aggregator.image_crops[img_key]['original_shape']
-        
-        # Load original GT for this image
         original_labels = self.dataloader.dataset.labels[img_idx]
         
-        # Prepare ground truth data
         if 'cls' in original_labels and len(original_labels['cls']) > 0:
             gt_cls = torch.tensor(original_labels['cls'], device=self.device, dtype=torch.float32)
             gt_bboxes = torch.tensor(original_labels['bboxes'], device=self.device, dtype=torch.float32)
@@ -391,7 +376,6 @@ class DetectionValidator(BaseValidator):
             gt_cls = torch.empty((0, num_tasks), device=self.device, dtype=torch.float32)
             gt_bboxes = torch.empty((0, 4), device=self.device, dtype=torch.float32)
         
-        # Ensure cls has correct shape
         if gt_cls.dim() == 1 and len(self.nc) > 1:
             gt_cls = gt_cls.unsqueeze(1)
         
@@ -399,7 +383,6 @@ class DetectionValidator(BaseValidator):
         if len(gt_bboxes) > 0:
             LOGGER.debug(f"    First GT bbox (normalized): {gt_bboxes[0]}")
         
-        # Create batch for metrics calculation
         batch_idx_values = torch.zeros(len(gt_bboxes), device=self.device, dtype=torch.long)
         ratio_pad = ((1.0, 1.0), (0, 0))
         
@@ -408,9 +391,9 @@ class DetectionValidator(BaseValidator):
                 self._sahi_plot_cache[img_idx] = {
                     'im_file': self.dataloader.dataset.im_files[img_idx],
                     'original_shape': original_shape,
-                    'predictions': aggregated_preds.clone().cpu(),  # Сохраняем на CPU
+                    'predictions': aggregated_preds.clone().cpu(),
                     'gt_cls': gt_cls.clone().cpu(),
-                    'gt_bboxes': gt_bboxes.clone().cpu()  # GT в формате normalized xywh
+                    'gt_bboxes': gt_bboxes.clone().cpu()
                 }
                 
         synthetic_batch = {
@@ -544,24 +527,20 @@ class DetectionValidator(BaseValidator):
     def plot_val_samples(self, batch, ni):
         """Plot validation image samples."""
         if self.sahi_enabled:
-            # Сохраняем информацию о кропах для последующей визуализации полных изображений
             if not hasattr(self, '_val_samples_cache'):
                 self._val_samples_cache = {}
             
-            # Сохраняем данные кропов для агрегации (для всех батчей, не только первых)
             original_img_idx = batch.get('original_img_idx', [])
             if original_img_idx:
                 for i, img_idx in enumerate(original_img_idx):
-                    # Сохраняем только для первых N изображений для визуализации
                     if img_idx < 16 and img_idx not in self._val_samples_cache:
                         self._val_samples_cache[img_idx] = {
                             'im_file': self.dataloader.dataset.im_files[img_idx],
                             'labels': self.dataloader.dataset.labels[img_idx],
                             'processed': False
                         }
-            return  # Не рисуем кропы
+            return
         
-        # Стандартная отрисовка для не-SAHI режима
         plot_images(
             batch["img"],
             batch["batch_idx"],
@@ -576,14 +555,12 @@ class DetectionValidator(BaseValidator):
     def plot_predictions(self, batch, preds, ni):
         """Plots predicted bounding boxes on input images and saves the result."""
         if self.sahi_enabled:
-            # Сохраняем предсказания кропов для последующей визуализации
             if not hasattr(self, '_pred_samples_cache'):
                 self._pred_samples_cache = {}
             
             original_img_idx = batch.get('original_img_idx', [])
             if original_img_idx:
                 for i, img_idx in enumerate(original_img_idx):
-                    # Сохраняем только для первых N изображений для визуализации
                     if img_idx < 16:
                         if img_idx not in self._pred_samples_cache:
                             self._pred_samples_cache[img_idx] = {
@@ -592,12 +569,10 @@ class DetectionValidator(BaseValidator):
                                 'processed': False
                             }
                         
-                        # Сохраняем предсказания с этого кропа
                         if i < len(preds):
                             self._pred_samples_cache[img_idx]['predictions'].append(preds[i])
-            return  # Не рисуем кропы
+            return
         
-        # Стандартная отрисовка для не-SAHI режима
         plot_images(
             batch["img"],
             *output_to_target(preds, max_det=self.args.max_det),
@@ -612,21 +587,18 @@ class DetectionValidator(BaseValidator):
         if not self.sahi_enabled or not hasattr(self, '_sahi_plot_cache') or not self._sahi_plot_cache:
             return
 
-        # --- Отрисовка Ground Truth (Labels) ---
         self._plot_sahi_from_cache(plot_preds=False)
-        src = self.save_dir / "val_sahi_full_labels.jpg"
+        src = self.save_dir / "val_batch0_labels.jpg"
         if src.exists():
             dst = self.save_dir / "val_batch0_labels.jpg"
             if not dst.exists():
                 import shutil
                 shutil.copy(str(src), str(dst))
 
-        # --- Отрисовка Предсказаний (Predictions) ---
         self._plot_sahi_from_cache(plot_preds=True)
-        src = self.save_dir / "val_sahi_full_pred.jpg"
+        src = self.save_dir / "val_batch0_pred.jpg"
         if src.exists():
-            dst = self.save_dir / "val_batch0_pred.jpg" # Имя файла, которое ожидает Ultralytics/ClearML
-            # Перезаписываем, если нужно, так как это основной артефакт
+            dst = self.save_dir / "val_batch0_pred.jpg"
             import shutil
             shutil.copy(str(src), str(dst))
 
@@ -638,7 +610,7 @@ class DetectionValidator(BaseValidator):
             return
 
         images_list, paths_list = [], []
-        all_targets = [] # Будет содержать либо GT, либо предсказания
+        all_targets = []
         target_size = None
 
         for idx, img_idx in enumerate(img_indices):
@@ -659,7 +631,6 @@ class DetectionValidator(BaseValidator):
             paths_list.append(cache_data['im_file'])
 
             if plot_preds:
-                # --- Готовим Предсказания ---
                 preds = cache_data['predictions'].clone() # xyxy format
                 if len(preds) > 0:
                     scale_x = target_size[0] / original_w
@@ -668,14 +639,10 @@ class DetectionValidator(BaseValidator):
                     preds[:, 2] *= scale_x; preds[:, 3] *= scale_y
                 all_targets.append(preds)
             else:
-                # --- Готовим Ground Truth ---
                 gt_cls = cache_data['gt_cls']
                 gt_bboxes = cache_data['gt_bboxes'] # normalized xywh
                 if len(gt_bboxes) > 0:
-                    # Конвертируем в формат, который ожидает output_to_target
-                    # batch_idx, cls0, cls1, ..., bbox_xywh
                     batch_idx_col = torch.full((len(gt_cls), 1), float(idx))
-                    # gt_bboxes уже нормализованы, plot_images справится
                     target = torch.cat([batch_idx_col, gt_cls, gt_bboxes], dim=1)
                     all_targets.append(target)
                 else:
@@ -684,7 +651,7 @@ class DetectionValidator(BaseValidator):
         if not images_list: return
 
         images = np.stack(images_list)
-        fname = "val_sahi_full_pred.jpg" if plot_preds else "val_sahi_full_labels.jpg"
+        fname = "val_batch0_pred.jpg" if plot_preds else "val_batch0_labels.jpg"
 
         if plot_preds:
             plot_images(images, *output_to_target(all_targets, max_det=self.args.max_det),
@@ -699,7 +666,6 @@ class DetectionValidator(BaseValidator):
 
     def finalize_metrics(self, *args, **kwargs):
         """Set final values for metrics speed and confusion matrices."""
-        # Сначала обрабатываем оставшиеся изображения
         if self.sahi_enabled and self.sahi_aggregator is not None:
             remaining_images = list(self.sahi_aggregator.image_crops.keys())
             if remaining_images:
@@ -710,7 +676,6 @@ class DetectionValidator(BaseValidator):
                     expected = self.sahi_aggregator.expected_crops_per_image.get(img_idx, 'unknown')
                     LOGGER.debug(f"Image {img_key}: {crops_processed}/{expected} crops processed")
             
-            # Отрисовываем полные изображения с агрегированными результатами
             try:
                 self.plot_sahi_complete_images()
             except Exception as e:
@@ -718,7 +683,6 @@ class DetectionValidator(BaseValidator):
                 import traceback
                 traceback.print_exc()
         
-        # Стандартная финализация метрик
         for m, cm in zip(self.metrics, self.confusion_matrices):
             m.speed = self.speed
             m.confusion_matrix = cm
