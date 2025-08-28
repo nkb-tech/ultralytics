@@ -3,18 +3,17 @@
 import os
 from pathlib import Path
 
-import numpy as np
 import torch
-import cv2
+import numpy as np
 
 from ultralytics.data import build_dataloader, build_yolo_dataset, converter
 from ultralytics.engine.validator import BaseValidator
 from ultralytics.models.yolo.detect.sahi_debugger import SAHIValidationDebugger
 from ultralytics.models.yolo.detect.sahi_val import SAHICropAggregator
-from ultralytics.utils import LOGGER, ops, yaml_load
+from ultralytics.utils import LOGGER, ops
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
-from ultralytics.utils.plotting import output_to_target, plot_images
+from ultralytics.utils.plotting import ValidatorPlotter
 
 
 class DetectionValidator(BaseValidator):
@@ -51,7 +50,6 @@ class DetectionValidator(BaseValidator):
             self.sahi_debugger = SAHIValidationDebugger()
         self.sahi_aggregator = None
         self.sahi_enabled = False
-        self._sahi_plot_cache = {}
                         
     def preprocess(self, batch):
         """Preprocesses batch of images for YOLO training."""
@@ -122,6 +120,16 @@ class DetectionValidator(BaseValidator):
                     self.sahi_aggregator.calculate_expected_crops(self.dataloader.dataset)
                     
                 LOGGER.debug("SAHI aggregator initialized for grid validation")
+                
+        self.plotter = ValidatorPlotter(
+            save_dir=self.save_dir,
+            names=self.names,
+            nc=self.nc,
+            on_plot=self.on_plot,
+            sahi_enabled=self.sahi_enabled,
+            dataloader=self.dataloader,
+            max_det=self.args.max_det
+        )
     
 
     def get_desc(self):
@@ -386,9 +394,9 @@ class DetectionValidator(BaseValidator):
         batch_idx_values = torch.zeros(len(gt_bboxes), device=self.device, dtype=torch.long)
         ratio_pad = ((1.0, 1.0), (0, 0))
         
-        if self.args.plots and len(self._sahi_plot_cache) < 16:
-            if img_idx not in self._sahi_plot_cache:
-                self._sahi_plot_cache[img_idx] = {
+        if self.args.plots and len(self.plotter._sahi_plot_cache) < 16:
+            if img_idx not in self.plotter._sahi_plot_cache:
+                self.plotter._sahi_plot_cache[img_idx] = {
                     'im_file': self.dataloader.dataset.im_files[img_idx],
                     'original_shape': original_shape,
                     'predictions': aggregated_preds.clone().cpu(),
@@ -427,7 +435,12 @@ class DetectionValidator(BaseValidator):
                     img_idx = self.sahi_aggregator.image_crops[img_key].get('original_img_idx', -1)
                     expected = self.sahi_aggregator.expected_crops_per_image.get(img_idx, 'unknown')
                     LOGGER.debug(f"Image {img_key}: {crops_processed}/{expected} crops processed")
-            self.plot_sahi_complete_images()
+            try:
+                self.plotter.plot_sahi_results()
+            except Exception as e:
+                LOGGER.error(f"Error plotting SAHI complete images: {e}")
+                import traceback
+                traceback.print_exc()
         
         for m, cm in zip(self.metrics, self.confusion_matrices):
             m.speed = self.speed
@@ -524,145 +537,14 @@ class DetectionValidator(BaseValidator):
         """Construct and return dataloader."""
         dataset = self.build_dataset(dataset_path, batch=batch_size, mode="val")
         return build_dataloader(dataset, batch_size, self.args.workers, shuffle=False, rank=-1)  # return dataloader
+    
     def plot_val_samples(self, batch, ni):
         """Plot validation image samples."""
-        if self.sahi_enabled:
-            if not hasattr(self, '_val_samples_cache'):
-                self._val_samples_cache = {}
-            
-            original_img_idx = batch.get('original_img_idx', [])
-            if original_img_idx:
-                for i, img_idx in enumerate(original_img_idx):
-                    if img_idx < 16 and img_idx not in self._val_samples_cache:
-                        self._val_samples_cache[img_idx] = {
-                            'im_file': self.dataloader.dataset.im_files[img_idx],
-                            'labels': self.dataloader.dataset.labels[img_idx],
-                            'processed': False
-                        }
-            return
-        
-        plot_images(
-            batch["img"],
-            batch["batch_idx"],
-            batch["cls"],
-            batch["bboxes"],
-            paths=batch["im_file"],
-            fname=self.save_dir / f"val_batch{ni}_labels.jpg",
-            names=self.names,
-            on_plot=self.on_plot,
-        )
+        self.plotter.plot_val_samples(batch, ni)
 
     def plot_predictions(self, batch, preds, ni):
         """Plots predicted bounding boxes on input images and saves the result."""
-        if self.sahi_enabled:
-            if not hasattr(self, '_pred_samples_cache'):
-                self._pred_samples_cache = {}
-            
-            original_img_idx = batch.get('original_img_idx', [])
-            if original_img_idx:
-                for i, img_idx in enumerate(original_img_idx):
-                    if img_idx < 16:
-                        if img_idx not in self._pred_samples_cache:
-                            self._pred_samples_cache[img_idx] = {
-                                'predictions': [],
-                                'im_file': self.dataloader.dataset.im_files[img_idx],
-                                'processed': False
-                            }
-                        
-                        if i < len(preds):
-                            self._pred_samples_cache[img_idx]['predictions'].append(preds[i])
-            return
-        
-        plot_images(
-            batch["img"],
-            *output_to_target(preds, max_det=self.args.max_det),
-            paths=batch["im_file"],
-            fname=self.save_dir / f"val_batch{ni}_pred.jpg",
-            names=self.names,
-            on_plot=self.on_plot,
-        )
-
-    def plot_sahi_complete_images(self):
-        """Plot complete images with aggregated labels and predictions from the plot cache."""
-        if not self.sahi_enabled or not hasattr(self, '_sahi_plot_cache') or not self._sahi_plot_cache:
-            return
-
-        self._plot_sahi_from_cache(plot_preds=False)
-        src = self.save_dir / "val_batch0_labels.jpg"
-        if src.exists():
-            dst = self.save_dir / "val_batch0_labels.jpg"
-            if not dst.exists():
-                import shutil
-                shutil.copy(str(src), str(dst))
-
-        self._plot_sahi_from_cache(plot_preds=True)
-        src = self.save_dir / "val_batch0_pred.jpg"
-        if src.exists():
-            dst = self.save_dir / "val_batch0_pred.jpg"
-            import shutil
-            shutil.copy(str(src), str(dst))
-
-
-    def _plot_sahi_from_cache(self, plot_preds=True):
-        """Helper function to plot either GT or Predictions from the SAHI plot cache."""
-        img_indices = list(self._sahi_plot_cache.keys())
-        if not img_indices:
-            return
-
-        images_list, paths_list = [], []
-        all_targets = []
-        target_size = None
-
-        for idx, img_idx in enumerate(img_indices):
-            cache_data = self._sahi_plot_cache[img_idx]
-            im = cv2.imread(cache_data['im_file'])
-            if im is None: continue
-            
-            original_h, original_w = im.shape[:2]
-            
-            if target_size is None:
-                max_dim = 1280
-                scale = max_dim / max(original_h, original_w) if max(original_h, original_w) > max_dim else 1.0
-                target_size = (int(original_w * scale), int(original_h * scale))
-
-            im_resized = cv2.resize(im, target_size)
-            im_resized_chw = cv2.cvtColor(im_resized, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)
-            images_list.append(im_resized_chw.astype(np.float32) / 255.0)
-            paths_list.append(cache_data['im_file'])
-
-            if plot_preds:
-                preds = cache_data['predictions'].clone() # xyxy format
-                if len(preds) > 0:
-                    scale_x = target_size[0] / original_w
-                    scale_y = target_size[1] / original_h
-                    preds[:, 0] *= scale_x; preds[:, 1] *= scale_y
-                    preds[:, 2] *= scale_x; preds[:, 3] *= scale_y
-                all_targets.append(preds)
-            else:
-                gt_cls = cache_data['gt_cls']
-                gt_bboxes = cache_data['gt_bboxes'] # normalized xywh
-                if len(gt_bboxes) > 0:
-                    batch_idx_col = torch.full((len(gt_cls), 1), float(idx))
-                    target = torch.cat([batch_idx_col, gt_cls, gt_bboxes], dim=1)
-                    all_targets.append(target)
-                else:
-                    all_targets.append(torch.empty(0, 1 + len(self.nc) + 4))
-
-        if not images_list: return
-
-        images = np.stack(images_list)
-        fname = "val_batch0_pred.jpg" if plot_preds else "val_batch0_labels.jpg"
-
-        if plot_preds:
-            plot_images(images, *output_to_target(all_targets, max_det=self.args.max_det),
-                        paths=paths_list, fname=self.save_dir / fname, names=self.names, on_plot=self.on_plot)
-        else:
-            # Для GT нужен другой вызов, т.к. формат данных отличается
-            targets = torch.cat(all_targets, dim=0).numpy()
-            plot_images(images, targets[:, 0], targets[:, 1:1+len(self.nc)], targets[:, 1+len(self.nc):],
-                        paths=paths_list, fname=self.save_dir / fname, names=self.names, on_plot=self.on_plot)
-
-        LOGGER.debug(f"Saved SAHI validation plot to {self.save_dir / fname}")
+        self.plotter.plot_predictions(batch, preds, ni)
 
     def finalize_metrics(self, *args, **kwargs):
         """Set final values for metrics speed and confusion matrices."""
@@ -677,7 +559,7 @@ class DetectionValidator(BaseValidator):
                     LOGGER.debug(f"Image {img_key}: {crops_processed}/{expected} crops processed")
             
             try:
-                self.plot_sahi_complete_images()
+                self.plotter.plot_sahi_results()
             except Exception as e:
                 LOGGER.error(f"Error plotting SAHI complete images: {e}")
                 import traceback

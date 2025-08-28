@@ -933,6 +933,150 @@ class Annotator:
         cv2.circle(self.im, center_bbox, self.tf * 2, color, -1)
         cv2.line(self.im, center_point, center_bbox, color, self.tf)
 
+class ValidatorPlotter:
+    """
+    Класс для отрисовки результатов валидации.
+    Управляет созданием и сохранением изображений с GT и preds,
+    включая агрегированную обработку для SAHI (Sliced Aided Hyper Inference).
+    """
+
+    def __init__(self, save_dir, names, nc, on_plot=None, sahi_enabled=False, dataloader=None, max_det=300):
+        """Инициализация плоттера."""
+        self.save_dir = Path(save_dir)
+        self.names = names
+        self.nc = nc
+        self.on_plot = on_plot
+        self.sahi_enabled = sahi_enabled
+        self.dataloader = dataloader
+        self.max_det = max_det
+        self._sahi_plot_cache = {}
+        self._val_samples_cache = {}
+        self._pred_samples_cache = {}
+
+    def plot_val_samples(self, batch, ni):
+        """Отрисовка сэмплов с Ground Truth метками."""
+        if self.sahi_enabled:
+            original_img_idx = batch.get('original_img_idx', [])
+            if original_img_idx and self.dataloader:
+                for i, img_idx in enumerate(original_img_idx):
+                    if img_idx < 16 and img_idx not in self._val_samples_cache:
+                        self._val_samples_cache[img_idx] = {
+                            'im_file': self.dataloader.dataset.im_files[img_idx],
+                            'labels': self.dataloader.dataset.labels[img_idx],
+                            'processed': False
+                        }
+            return
+
+        plot_images(
+            batch["img"],
+            batch["batch_idx"],
+            batch["cls"],
+            batch["bboxes"],
+            paths=batch["im_file"],
+            fname=self.save_dir / f"val_batch{ni}_labels.jpg",
+            names=self.names,
+            on_plot=self.on_plot,
+        )
+
+    def plot_predictions(self, batch, preds, ni):
+        """Отрисовка предсказаний модели."""
+        if self.sahi_enabled:
+            original_img_idx = batch.get('original_img_idx', [])
+            if original_img_idx and self.dataloader:
+                for i, img_idx in enumerate(original_img_idx):
+                    if img_idx < 16:
+                        if img_idx not in self._pred_samples_cache:
+                            self._pred_samples_cache[img_idx] = {
+                                'predictions': [],
+                                'im_file': self.dataloader.dataset.im_files[img_idx],
+                                'processed': False
+                            }
+                        if i < len(preds):
+                            self._pred_samples_cache[img_idx]['predictions'].append(preds[i])
+            return
+
+        plot_images(
+            batch["img"],
+            *output_to_target(preds, max_det=self.max_det),
+            paths=batch["im_file"],
+            fname=self.save_dir / f"val_batch{ni}_pred.jpg",
+            names=self.names,
+            on_plot=self.on_plot,
+        )
+
+    def plot_sahi_results(self):
+        """
+        Отрисовка полных изображений для SAHI, используя закэшированные данные
+        о предсказаниях и метках.
+        """
+        if not self.sahi_enabled or not self._sahi_plot_cache:
+            return
+
+        LOGGER.info(f"Plotting {len(self._sahi_plot_cache)} SAHI validation images...")
+        self._plot_sahi_from_cache(plot_preds=False)
+        self._plot_sahi_from_cache(plot_preds=True)
+
+    def _plot_sahi_from_cache(self, plot_preds=True):
+        """Вспомогательная функция для отрисовки GT или предсказаний из кэша SAHI."""
+        img_indices = list(self._sahi_plot_cache.keys())
+        if not img_indices:
+            return
+
+        images_list, paths_list, all_targets = [], [], []
+        target_size = None
+
+        for idx, img_idx in enumerate(img_indices):
+            cache_data = self._sahi_plot_cache[img_idx]
+            im = cv2.imread(cache_data['im_file'])
+            if im is None:
+                continue
+
+            original_h, original_w = im.shape[:2]
+
+            if target_size is None:
+                max_dim = 1280
+                scale = max_dim / max(original_h, original_w) if max(original_h, original_w) > max_dim else 1.0
+                target_size = (int(original_w * scale), int(original_h * scale))
+
+            im_resized = cv2.resize(im, target_size)
+            im_resized_chw = cv2.cvtColor(im_resized, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)
+            images_list.append(im_resized_chw.astype(np.float32) / 255.0)
+            paths_list.append(cache_data['im_file'])
+
+            if plot_preds:
+                preds = cache_data['predictions'].clone()  # xyxy format
+                if len(preds) > 0:
+                    scale_x = target_size[0] / original_w
+                    scale_y = target_size[1] / original_h
+                    preds[:, 0::2] *= scale_x
+                    preds[:, 1::2] *= scale_y
+                all_targets.append(preds)
+            else:
+                gt_cls = cache_data['gt_cls']
+                gt_bboxes = cache_data['gt_bboxes']  # normalized xywh
+                if len(gt_bboxes) > 0:
+                    batch_idx_col = torch.full((len(gt_cls), 1), float(idx))
+                    target = torch.cat([batch_idx_col, gt_cls, gt_bboxes], dim=1)
+                    all_targets.append(target)
+                else:
+                    all_targets.append(torch.empty(0, 1 + len(self.nc) + 4))
+
+        if not images_list:
+            return
+
+        images = np.stack(images_list)
+        fname = "val_batch0_pred.jpg" if plot_preds else "val_batch0_labels.jpg"
+
+        if plot_preds:
+            plot_images(images, *output_to_target(all_targets, max_det=self.max_det),
+                        paths=paths_list, fname=self.save_dir / fname, names=self.names, on_plot=self.on_plot)
+        else:
+            targets = torch.cat(all_targets, dim=0).numpy()
+            plot_images(images, targets[:, 0], targets[:, 1:1 + len(self.nc)], targets[:, 1 + len(self.nc):],
+                        paths=paths_list, fname=self.save_dir / fname, names=self.names, on_plot=self.on_plot)
+
+        LOGGER.debug(f"Saved SAHI validation plot to {self.save_dir / fname}")
+        
 
 @TryExcept()  # known issue https://github.com/ultralytics/yolov5/issues/5395
 @plt_settings()
