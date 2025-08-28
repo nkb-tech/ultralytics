@@ -1048,8 +1048,8 @@ class ValidatorPlotter:
                 if len(preds) > 0:
                     scale_x = target_size[0] / original_w
                     scale_y = target_size[1] / original_h
-                    preds[:, 0::2] *= scale_x
-                    preds[:, 1::2] *= scale_y
+                    preds[:, [0, 2]] *= scale_x  # x1, x2
+                    preds[:, [1, 3]] *= scale_y  # y1, y2
                 all_targets.append(preds)
             else:
                 gt_cls = cache_data['gt_cls']
