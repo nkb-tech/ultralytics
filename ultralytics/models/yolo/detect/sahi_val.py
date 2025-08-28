@@ -87,11 +87,18 @@ class SAHICropAggregator:
                     
                     if len(crop_preds_filtered) > 0:
                         x_min, y_min, _, _ = slice_coords[i]
+
+                        boxes_xyxy_crop = ops.xywh2xyxy(crop_preds_filtered[:, :4])
                         
-                        # Transform box coordinates from crop to original image
+                        # Теперь смещаем координаты углов
+                        boxes_xyxy_crop[:, 0] += x_min  # x1
+                        boxes_xyxy_crop[:, 1] += y_min  # y1
+                        boxes_xyxy_crop[:, 2] += x_min  # x2
+                        boxes_xyxy_crop[:, 3] += y_min  # y2
+                        boxes_xywh_full = ops.xyxy2xywh(boxes_xyxy_crop)
+                        
                         crop_preds_transformed = crop_preds_filtered.clone()
-                        crop_preds_transformed[:, 0] += x_min  # x_center
-                        crop_preds_transformed[:, 1] += y_min  # y_center
+                        crop_preds_transformed[:, :4] = boxes_xywh_full
                 
                         
                         self.image_crops[img_key]['predictions'].append(crop_preds_transformed)

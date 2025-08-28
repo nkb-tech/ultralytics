@@ -51,6 +51,7 @@ class DetectionValidator(BaseValidator):
             self.sahi_debugger = SAHIValidationDebugger()
         self.sahi_aggregator = None
         self.sahi_enabled = False
+        self._sahi_plot_cache = {}
                         
     def preprocess(self, batch):
         """Preprocesses batch of images for YOLO training."""
@@ -402,6 +403,16 @@ class DetectionValidator(BaseValidator):
         batch_idx_values = torch.zeros(len(gt_bboxes), device=self.device, dtype=torch.long)
         ratio_pad = ((1.0, 1.0), (0, 0))
         
+        if self.args.plots and len(self._sahi_plot_cache) < 16:
+            if img_idx not in self._sahi_plot_cache:
+                self._sahi_plot_cache[img_idx] = {
+                    'im_file': self.dataloader.dataset.im_files[img_idx],
+                    'original_shape': original_shape,
+                    'predictions': aggregated_preds.clone().cpu(),  # Сохраняем на CPU
+                    'gt_cls': gt_cls.clone().cpu(),
+                    'gt_bboxes': gt_bboxes.clone().cpu()  # GT в формате normalized xywh
+                }
+                
         synthetic_batch = {
             'cls': gt_cls,
             'bboxes': gt_bboxes,
@@ -596,163 +607,95 @@ class DetectionValidator(BaseValidator):
             on_plot=self.on_plot,
         )
 
-    def _plot_sahi_predictions(self):
-        """Plot predictions for SAHI - full images with aggregated predictions."""
-        # Выбираем изображения для которых есть агрегированные предсказания
-        completed_images = []
-        
-        # Сначала пробуем найти изображения с полными агрегированными предсказаниями
-        if self.sahi_aggregator:
-            for img_idx in list(self._pred_samples_cache.keys())[:16]:
-                img_key = str(img_idx)
-                if img_key in self.sahi_aggregator.image_crops:
-                    # Проверяем, что для изображения есть предсказания
-                    if len(self.sahi_aggregator.image_crops[img_key]['predictions']) > 0:
-                        completed_images.append(img_idx)
-        
-        # Если не нашли агрегированных, используем кэшированные
-        if not completed_images:
-            for img_idx in list(self._pred_samples_cache.keys())[:16]:
-                if self._pred_samples_cache[img_idx]['predictions']:
-                    completed_images.append(img_idx)
-        
-        if not completed_images:
-            LOGGER.warning("No images with predictions found for SAHI plotting")
-            return
-        
-        LOGGER.debug(f"Plotting predictions for images: {completed_images}")
-        
-        images_list = []
-        all_preds = []
-        paths_list = []
-        target_size = None
-        
-        for img_idx in completed_images:
-            cache_data = self._pred_samples_cache[img_idx]
-            
-            # Загружаем изображение
-            im_path = cache_data['im_file']
-            im = cv2.imread(im_path)
-            if im is None:
-                continue
-            
-            # Определяем целевой размер по первому изображению
-            if target_size is None:
-                h, w = im.shape[:2]
-                # Ограничиваем максимальный размер для экономии памяти
-                max_dim = 1280
-                if max(h, w) > max_dim:
-                    scale = max_dim / max(h, w)
-                    target_size = (int(w * scale), int(h * scale))
-                else:
-                    target_size = (w, h)
-            
-            # Ресайзим изображение к целевому размеру
-            im_resized = cv2.resize(im, target_size)
-            
-            # Конвертируем в формат CHW и нормализуем
-            im_resized = cv2.cvtColor(im_resized, cv2.COLOR_BGR2RGB)
-            im_resized = im_resized.transpose(2, 0, 1)  # HWC to CHW
-            im_resized = im_resized.astype(np.float32) / 255.0
-            
-            images_list.append(im_resized)
-            paths_list.append(im_path)
-            
-            # Получаем предсказания для этого изображения
-            img_key = str(img_idx)
-            preds_for_image = None
-            
-            # Пробуем получить агрегированные предсказания
-            if self.sahi_aggregator and img_key in self.sahi_aggregator.image_crops:
-                if len(self.sahi_aggregator.image_crops[img_key]['predictions']) > 0:
-                    LOGGER.debug(f"Using aggregated predictions for image {img_idx}")
-                    aggregated_preds_raw = self.sahi_aggregator.get_aggregated_predictions(img_key)
-                    
-                    if len(aggregated_preds_raw) > 0:
-                        # Применяем NMS
-                        preds_for_nms = aggregated_preds_raw.unsqueeze(0).permute(0, 2, 1)
-                        nms_results = self.postprocess(preds_for_nms)
-                        
-                        if nms_results and len(nms_results[0]) > 0:
-                            preds_for_image = nms_results[0].clone()
-                            
-                            # Масштабируем координаты если изображение было ресайзнуто
-                            if im.shape[:2] != (target_size[1], target_size[0]):
-                                scale_x = target_size[0] / im.shape[1]
-                                scale_y = target_size[1] / im.shape[0]
-                                preds_for_image[:, 0] *= scale_x  # x1
-                                preds_for_image[:, 1] *= scale_y  # y1
-                                preds_for_image[:, 2] *= scale_x  # x2
-                                preds_for_image[:, 3] *= scale_y  # y2
-            
-            # Если нет агрегированных, используем кэшированные
-            if preds_for_image is None and 'predictions' in cache_data and cache_data['predictions']:
-                LOGGER.debug(f"Using cached predictions for image {img_idx} ({len(cache_data['predictions'])} crops)")
-                combined_preds = []
-                for pred in cache_data['predictions']:
-                    if isinstance(pred, torch.Tensor) and len(pred) > 0:
-                        combined_preds.append(pred)
-                
-                if combined_preds:
-                    preds_for_image = torch.cat(combined_preds, dim=0)
-                    # Масштабируем если нужно
-                    if im.shape[:2] != (target_size[1], target_size[0]):
-                        scale_x = target_size[0] / im.shape[1]
-                        scale_y = target_size[1] / im.shape[0]
-                        preds_for_image[:, 0] *= scale_x
-                        preds_for_image[:, 1] *= scale_y
-                        preds_for_image[:, 2] *= scale_x
-                        preds_for_image[:, 3] *= scale_y
-            
-            # Добавляем предсказания
-            if preds_for_image is not None:
-                all_preds.append(preds_for_image)
-            else:
-                all_preds.append(torch.empty((0, 4 + 2 * len(self.nc)), device=self.device))
-        
-        if images_list and all_preds:
-            # Конвертируем в numpy
-            images = np.stack(images_list)
-            
-            # Отрисовываем предсказания
-            plot_images(
-                images,
-                *output_to_target(all_preds, max_det=self.args.max_det),
-                paths=paths_list,
-                fname=self.save_dir / "val_batch0_pred.jpg",
-                names=self.names,
-                on_plot=self.on_plot,
-                max_subplots=16
-            )
-            LOGGER.debug(f"Saved SAHI predictions to {self.save_dir / 'val_sahi_full_pred.jpg'}")
-
     def plot_sahi_complete_images(self):
-        """Plot complete images with aggregated labels and predictions for SAHI validation."""
-        if not self.sahi_enabled:
+        """Plot complete images with aggregated labels and predictions from the plot cache."""
+        if not self.sahi_enabled or not hasattr(self, '_sahi_plot_cache') or not self._sahi_plot_cache:
             return
-        
-        # Отрисовка полных изображений с ground truth
-        if hasattr(self, '_val_samples_cache'):
-            self._plot_sahi_val_samples()
-            # Создаем копию файла с ожидаемым именем для ClearML
-            src = self.save_dir / "val_sahi_full_labels.jpg"
-            if src.exists():
-                dst = self.save_dir / "val_batch0_labels.jpg"
-                if not dst.exists():
-                    import shutil
-                    shutil.copy(str(src), str(dst))
-        
-        # Отрисовка полных изображений с предсказаниями  
-        if hasattr(self, '_pred_samples_cache'):
-            self._plot_sahi_predictions()
-            # Создаем копию файла с ожидаемым именем для ClearML
-            src = self.save_dir / "val_batch0_pred.jpg"
-            if src.exists():
-                dst = self.save_dir / "val_batch0_pred.jpg"
-                if not dst.exists():
-                    import shutil
-                    shutil.copy(str(src), str(dst))
 
+        # --- Отрисовка Ground Truth (Labels) ---
+        self._plot_sahi_from_cache(plot_preds=False)
+        src = self.save_dir / "val_sahi_full_labels.jpg"
+        if src.exists():
+            dst = self.save_dir / "val_batch0_labels.jpg"
+            if not dst.exists():
+                import shutil
+                shutil.copy(str(src), str(dst))
+
+        # --- Отрисовка Предсказаний (Predictions) ---
+        self._plot_sahi_from_cache(plot_preds=True)
+        src = self.save_dir / "val_sahi_full_pred.jpg"
+        if src.exists():
+            dst = self.save_dir / "val_batch0_pred.jpg" # Имя файла, которое ожидает Ultralytics/ClearML
+            # Перезаписываем, если нужно, так как это основной артефакт
+            import shutil
+            shutil.copy(str(src), str(dst))
+
+
+    def _plot_sahi_from_cache(self, plot_preds=True):
+        """Helper function to plot either GT or Predictions from the SAHI plot cache."""
+        img_indices = list(self._sahi_plot_cache.keys())
+        if not img_indices:
+            return
+
+        images_list, paths_list = [], []
+        all_targets = [] # Будет содержать либо GT, либо предсказания
+        target_size = None
+
+        for idx, img_idx in enumerate(img_indices):
+            cache_data = self._sahi_plot_cache[img_idx]
+            im = cv2.imread(cache_data['im_file'])
+            if im is None: continue
+            
+            original_h, original_w = im.shape[:2]
+            
+            if target_size is None:
+                max_dim = 1280
+                scale = max_dim / max(original_h, original_w) if max(original_h, original_w) > max_dim else 1.0
+                target_size = (int(original_w * scale), int(original_h * scale))
+
+            im_resized = cv2.resize(im, target_size)
+            im_resized_chw = cv2.cvtColor(im_resized, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)
+            images_list.append(im_resized_chw.astype(np.float32) / 255.0)
+            paths_list.append(cache_data['im_file'])
+
+            if plot_preds:
+                # --- Готовим Предсказания ---
+                preds = cache_data['predictions'].clone() # xyxy format
+                if len(preds) > 0:
+                    scale_x = target_size[0] / original_w
+                    scale_y = target_size[1] / original_h
+                    preds[:, 0] *= scale_x; preds[:, 1] *= scale_y
+                    preds[:, 2] *= scale_x; preds[:, 3] *= scale_y
+                all_targets.append(preds)
+            else:
+                # --- Готовим Ground Truth ---
+                gt_cls = cache_data['gt_cls']
+                gt_bboxes = cache_data['gt_bboxes'] # normalized xywh
+                if len(gt_bboxes) > 0:
+                    # Конвертируем в формат, который ожидает output_to_target
+                    # batch_idx, cls0, cls1, ..., bbox_xywh
+                    batch_idx_col = torch.full((len(gt_cls), 1), float(idx))
+                    # gt_bboxes уже нормализованы, plot_images справится
+                    target = torch.cat([batch_idx_col, gt_cls, gt_bboxes], dim=1)
+                    all_targets.append(target)
+                else:
+                    all_targets.append(torch.empty(0, 1 + len(self.nc) + 4))
+
+        if not images_list: return
+
+        images = np.stack(images_list)
+        fname = "val_sahi_full_pred.jpg" if plot_preds else "val_sahi_full_labels.jpg"
+
+        if plot_preds:
+            plot_images(images, *output_to_target(all_targets, max_det=self.args.max_det),
+                        paths=paths_list, fname=self.save_dir / fname, names=self.names, on_plot=self.on_plot)
+        else:
+            # Для GT нужен другой вызов, т.к. формат данных отличается
+            targets = torch.cat(all_targets, dim=0).numpy()
+            plot_images(images, targets[:, 0], targets[:, 1:1+len(self.nc)], targets[:, 1+len(self.nc):],
+                        paths=paths_list, fname=self.save_dir / fname, names=self.names, on_plot=self.on_plot)
+
+        LOGGER.debug(f"Saved SAHI validation plot to {self.save_dir / fname}")
 
     def finalize_metrics(self, *args, **kwargs):
         """Set final values for metrics speed and confusion matrices."""
@@ -780,111 +723,6 @@ class DetectionValidator(BaseValidator):
             m.speed = self.speed
             m.confusion_matrix = cm
 
-    def _plot_sahi_val_samples(self):
-        """Plot validation samples for SAHI - full images with all labels."""
-        # Выбираем до 16 изображений для визуализации
-        img_indices = list(self._val_samples_cache.keys())[:16]
-        
-        if not img_indices:
-            return
-        
-        # Загружаем полные изображения
-        images_list = []
-        cls_list = []
-        bboxes_list = []
-        paths_list = []
-        batch_idx_list = []
-        
-        # Определяем целевой размер для ресайза (используем размер первого изображения или стандартный)
-        target_size = None
-        
-        for idx, img_idx in enumerate(img_indices):
-            cache_data = self._val_samples_cache[img_idx]
-            
-            # Загружаем изображение
-            im_path = cache_data['im_file']
-            im = cv2.imread(im_path)
-            if im is None:
-                continue
-            
-            # Определяем целевой размер по первому изображению
-            if target_size is None:
-                h, w = im.shape[:2]
-                # Ограничиваем максимальный размер для экономии памяти
-                max_dim = 1280
-                if max(h, w) > max_dim:
-                    scale = max_dim / max(h, w)
-                    target_size = (int(w * scale), int(h * scale))
-                else:
-                    target_size = (w, h)
-            
-            # Ресайзим изображение к целевому размеру
-            im_resized = cv2.resize(im, target_size)
-            
-            # Конвертируем в формат CHW и нормализуем
-            im_resized = cv2.cvtColor(im_resized, cv2.COLOR_BGR2RGB)
-            im_resized = im_resized.transpose(2, 0, 1)  # HWC to CHW
-            im_resized = im_resized.astype(np.float32) / 255.0
-            
-            images_list.append(im_resized)
-            paths_list.append(im_path)
-            
-            # Получаем labels
-            labels = cache_data['labels']
-            if 'cls' in labels and len(labels['cls']) > 0:
-                cls = labels['cls']
-                bboxes = labels['bboxes'].copy()  # Копируем чтобы не изменить оригинал
-                
-                # Масштабируем bboxes если изображение было ресайзнуто
-                if im.shape[:2] != (target_size[1], target_size[0]):
-                    scale_x = target_size[0] / im.shape[1]
-                    scale_y = target_size[1] / im.shape[0]
-                    # bboxes в формате normalized xywh, так что не нужно масштабировать
-                    # они будут правильно отображены относительно нового размера
-                
-                # Добавляем batch_idx для каждого bbox
-                for _ in range(len(cls)):
-                    batch_idx_list.append(idx)
-                
-                cls_list.extend(cls)
-                bboxes_list.extend(bboxes)
-        
-        if images_list:
-            # Конвертируем в numpy arrays
-            images = np.stack(images_list)
-            batch_idx = np.array(batch_idx_list) if batch_idx_list else np.array([])
-            cls = np.array(cls_list) if cls_list else np.zeros((0, len(self.nc)), dtype=np.float32)
-            bboxes = np.array(bboxes_list) if bboxes_list else np.zeros((0, 4), dtype=np.float32)
-            
-            # Ensure cls has correct shape for multi-task
-            if cls.ndim == 1 and len(self.nc) > 1:
-                # Предполагаем что это класс для первой задачи, добавляем нули для остальных
-                cls_expanded = np.zeros((len(cls), len(self.nc)), dtype=np.float32)
-                cls_expanded[:, 0] = cls
-                cls = cls_expanded
-            elif cls.ndim == 2 and cls.shape[1] != len(self.nc):
-                # Приводим к правильному количеству задач
-                if cls.shape[1] < len(self.nc):
-                    # Дополняем нулями
-                    padding = np.zeros((len(cls), len(self.nc) - cls.shape[1]), dtype=np.float32)
-                    cls = np.concatenate([cls, padding], axis=1)
-                else:
-                    # Обрезаем
-                    cls = cls[:, :len(self.nc)]
-            
-            # Отрисовываем
-            plot_images(
-                images,
-                batch_idx,
-                cls,
-                bboxes,
-                paths=paths_list,
-                fname=self.save_dir / "val_batch0_labels.jpg",
-                names=self.names,
-                on_plot=self.on_plot,
-                max_subplots=16
-            )
-            LOGGER.debug(f"Saved SAHI validation samples to {self.save_dir / 'val_sahi_full_labels.jpg'}")
 
     def save_one_txt(self, predn, save_conf, shape, file):
         """Save YOLO detections to a txt file in normalized coordinates in a specific format."""
