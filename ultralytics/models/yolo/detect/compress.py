@@ -23,7 +23,7 @@ from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
-from ultralytics.nn.tasks import DetectionModel
+from ultralytics.nn.tasks import DetectionModel, yaml_model_load
 from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK, TQDM, clean_url, colorstr, emojis, yaml_save, callbacks, __version__
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
@@ -120,16 +120,15 @@ def get_pruner(opt, model, example_inputs):
     
     
     for k, m in model.named_modules():
+        # TODO исходный вариант закомменчен, с ним вылезает ошибка
+        # if isinstance(m, Detect):
+        #     for i in range(len(m.cv2)):
+        #         ignored_layers.append(m.cv2[i][2])
+        #     for i in range(len(m.cv3)):
+        #         ignored_layers.append(m.cv3[i][2])
+        #     ignored_layers.append(m.dfl)
         if isinstance(m, Detect):
-            ignored_layers.append(m.cv2[0][2])
-            ignored_layers.append(m.cv2[1][2])
-            ignored_layers.append(m.cv2[2][2])
-            ignored_layers.append(m.cv3[0][2])
-            ignored_layers.append(m.cv3[1][2])
-            ignored_layers.append(m.cv3[2][2])
-            #ignored_layers.append(m.cv2)
-            #ignored_layers.append(m.cv3)
-            ignored_layers.append(m.dfl)
+            ignored_layers.append(m)
     #TODO normal choice for head freezing with CLI parameter       
     """        
     # ignore output layers
@@ -412,14 +411,24 @@ class DetectionCompressor(BaseTrainer):
         return batch
 
     def set_model_attributes(self):
-        """Nl = de_parallel(self.model).model[-1].nl  # number of detection layers (to scale hyps)."""
-        # self.args.box *= 3 / nl  # scale to layers
-        # self.args.cls *= self.data["nc"] / 80 * 3 / nl  # scale to classes and layers
-        # self.args.cls *= (self.args.imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers
-        self.model.nc = self.data['nc']  # attach number of classes to model
-        self.model.names = self.data['names']  # attach class names to model
-        self.model.args = self.args  # attach hyperparameters to model
-        # TODO: self.model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc
+        """Sets model attributes based on arguments and data."""
+        # Подготовка nc и names для модели
+        if self.args.single_cls:
+            # single_cls case
+            if isinstance(self.data["nc"], list):
+                model_nc = [1] + self.data["nc"][1:]  # [1, nc2, nc3, ...]
+                model_names = [{0: "object"}] + self.data["names"][1:]
+            else:
+                model_nc = 1
+                model_names = {0: "object"}
+        else:
+            model_nc = self.data["nc"]
+            model_names = self.data["names"]
+            
+        self.model.nc = model_nc
+        self.model.names = model_names
+        self.model.args = self.args
+        # TODO: self.model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc   
 
     """
     def get_model(self, cfg=None, weights=None, verbose=True):
@@ -433,10 +442,23 @@ class DetectionCompressor(BaseTrainer):
     
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
-        model = torch.load(self.args.model, map_location=self.device)
-        model = model['ema' if model.get('ema') else 'model'].float()
-        for p in model.parameters():
-            p.requires_grad_(True)
+        if isinstance(cfg, (str, Path)):
+            cfg = yaml_model_load(cfg)
+    
+        if self.args.single_cls:
+            nc = [1]
+            if isinstance(self.data["nc"], list) and len(self.data["nc"]) > 1:
+                nc.extend(self.data["nc"][1:])
+        else:
+            nc = self.data["nc"]
+
+        model = DetectionModel(
+            cfg,
+            nc=nc,
+            verbose=verbose and RANK == -1,
+        )
+        if weights:
+            model.load(weights)
         LOGGER.info(colorstr("prune_model info:"))
         model.info()
         return model
@@ -875,7 +897,14 @@ class DetectionCompressor(BaseTrainer):
         if RANK in (-1, 0):
             self.test_loader = self.get_dataloader(self.testset, batch_size=batch_size * 2, rank=-1, mode='val')
             self.validator = self.get_validator()
-            metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix='val')
+            if isinstance(self.validator.metrics, list):
+                all_metric_keys = []
+                for metric_obj in self.validator.metrics:
+                    all_metric_keys.extend(metric_obj.keys)
+                metric_keys = all_metric_keys + self.label_loss_items(prefix='val')
+            else:
+                metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix='val')
+
             self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
             self.ema = ModelEMA(self.model)
             if self.args.plots:
