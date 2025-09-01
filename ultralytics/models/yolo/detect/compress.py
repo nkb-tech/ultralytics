@@ -440,13 +440,29 @@ class DetectionCompressor(BaseTrainer):
         return model
     """
     
-    def get_model(self, cfg=None, weights=None, verbose=True): # model should be trained before
+    def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
-        model = torch.load(self.args.model, map_location=self.device)
-        model = model['ema' if model.get('ema') else 'model'].float()
-        for p in model.parameters():
-            p.requires_grad_(True)
+        if isinstance(cfg, (str, Path)):
+            cfg = yaml_model_load(cfg)
     
+        if self.args.single_cls:
+            nc = [1]
+            if isinstance(self.data["nc"], list) and len(self.data["nc"]) > 1:
+                nc.extend(self.data["nc"][1:])
+        else:
+            nc = self.data["nc"]
+
+        model = DetectionModel(
+            cfg,
+            nc=nc,
+            verbose=verbose and RANK == -1,
+        )
+        if weights:
+            model.load(weights)
+        LOGGER.info(colorstr("prune_model info:"))
+        model.info()
+        return model
+
     def get_validator(self):
         """Returns a DetectionValidator for YOLO model validation."""
         self.loss_names = 'box_loss', 'cls_loss', 'dfl_loss'

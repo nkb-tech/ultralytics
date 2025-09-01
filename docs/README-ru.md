@@ -162,7 +162,23 @@ yolo detect compress model=runs/detect/pruned_yolov8s_x2/pruned_model.pt data=co
 | `sl_hyp`           | `str`   | Путь к файлу с гиперпараметрами для Sparsity Learning (например, `ultralytics/cfg/hyp.scratch.sl.yaml`).                 |
 | `reg`              | `float` | Коэффициент регуляризации для методов, использующих ее (например, `growing_reg`).                                         |
 
+**Совместимость с Multi-task**
+
+Режим прунинга полностью совместим с мультитаск-моделями. Процесс не отличается от стандартного: вы просто используете обученную мультитаск-модель в качестве входной и указываете соответствующий `data.yaml`.
+
+**Пример прунинга мультитаск-модели:**
+
+Предположим, у вас есть обученная мультитаск-модель `multitask_trained.pt` и файл конфигурации `multitask_data.yaml`.
+
+```bash
+# Этап 1: Прунинг мультитаск-модели.
+yolo detect compress model=multitask_trained.pt data=multitask_data.yaml do_prune=True do_finetune=False speed_up=2.0 prune_method=group_taylor name=pruned_multitask_x2
+
+# Этап 2: Дообучение "сжатой" мультитаск-модели.
+yolo detect compress model=runs/detect/pruned_multitask_x2/pruned_model.pt data=multitask_data.yaml do_prune=False do_finetune=True epochs=100 name=finetuned_multitask_x2
+```
+
 **Дополнительные замечания:**
--   **Пользовательские модели:** Если вы пруните не стандартную YOLOv8, а кастомную архитектуру, вам может потребоваться вручную отредактировать список игнорируемых слоев в файле `ultralytics/models/yolo/detect/compress.py`. С multi-task прунится без ошибок (сейчас отключен прунинг голов, в будущем можно и для них оптимизировать код `TODO`).
+-   **Пользовательские модели:** Если вы пруните не стандартную YOLOv8, а кастомную архитектуру, вам может потребоваться вручную отредактировать список игнорируемых слоев в файле `ultralytics/models/yolo/detect/compress.py`.
 -   **Оптимизация C2f:** В процессе прунинга модули `C2f` автоматически заменяются на более быстрые `C2f_Faster` (см. `c2f_transfer.py`).
 -   **Примеры параметров:** Удачные комбинации гиперпараметров для прунинга можно найти в файле `compress.md` в корне репозитория.
