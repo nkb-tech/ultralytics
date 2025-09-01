@@ -30,8 +30,7 @@ param_dict = {
         'reg': 0.0005,
         'sl_epochs': 500,
         'sl_hyp': '/home/jovyan/Kozlov_KY/new_ultralytics/ultralytics/ultralytics/cfg/hyp.scratch.sl.yaml',
-        'sl_model':None
-        
+        'sl_model':None   
     }
     prune_model_path = compress(copy.deepcopy(param_dict))
     
@@ -68,12 +67,10 @@ param_dict = {
 
 # Установка
 
-Установка такая же как с обычным ультралитиксом, с поправкой на способ клонирования с mlspace, почитайте инструкцию Паши, чтобы себе все настроить
+Установка такая же как с обычным ультралитиксом
 ```
-git clone https://gitlab.ai.cloud.ru/manzherok/ultralytics.git
-```
-
-```
+ https://github.com/nkb-tech/ultralytics
+ 
 cd ultralytics
 pip install -e .
 ```

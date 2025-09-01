@@ -201,4 +201,4 @@ bg_crop_prob: 0.4  # (float) probability of applying RandomCropLarge (increases 
 scale_range: (0.7, 1.3)  # (str) range in which the height and width of the crop can vary during augmentation
 erosion_factor: 0.0 # (float) 0 means crop must fully contain the reference box.
 full_image_prob: 0.0  # probability, that full image will be resize to crop size
-sahi_val_debug: True
+sahi_val_debug: False
