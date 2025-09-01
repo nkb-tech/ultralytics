@@ -69,8 +69,8 @@ param_dict = {
 
 Установка такая же как с обычным ультралитиксом
 ```
- https://github.com/nkb-tech/ultralytics
- 
+https://github.com/nkb-tech/ultralytics
+
 cd ultralytics
 pip install -e .
 ```

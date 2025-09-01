@@ -88,8 +88,6 @@ def seed_worker(worker_id):  # noqa
     worker_info = torch.utils.data.get_worker_info()
     dataset_obj = worker_info.dataset
     if dataset_obj.transforms is None:
-        prefix = colorstr(f"Worker {worker_id} initialization:")
-        LOGGER.info(f"{prefix} Initialized with seed {worker_seed}. Transforms settings:\n")
         dataset_obj.transforms = dataset_obj.build_transforms(hyp=dataset_obj._hyp_for_transforms)
 
 

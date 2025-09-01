@@ -440,29 +440,13 @@ class DetectionCompressor(BaseTrainer):
         return model
     """
     
-    def get_model(self, cfg=None, weights=None, verbose=True):
+    def get_model(self, cfg=None, weights=None, verbose=True): # model should be trained before
         """Return a YOLO detection model."""
-        if isinstance(cfg, (str, Path)):
-            cfg = yaml_model_load(cfg)
+        model = torch.load(self.args.model, map_location=self.device)
+        model = model['ema' if model.get('ema') else 'model'].float()
+        for p in model.parameters():
+            p.requires_grad_(True)
     
-        if self.args.single_cls:
-            nc = [1]
-            if isinstance(self.data["nc"], list) and len(self.data["nc"]) > 1:
-                nc.extend(self.data["nc"][1:])
-        else:
-            nc = self.data["nc"]
-
-        model = DetectionModel(
-            cfg,
-            nc=nc,
-            verbose=verbose and RANK == -1,
-        )
-        if weights:
-            model.load(weights)
-        LOGGER.info(colorstr("prune_model info:"))
-        model.info()
-        return model
-
     def get_validator(self):
         """Returns a DetectionValidator for YOLO model validation."""
         self.loss_names = 'box_loss', 'cls_loss', 'dfl_loss'
@@ -546,6 +530,31 @@ class DetectionCompressor(BaseTrainer):
         torch.cuda.empty_cache()
         return metrice
 
+    def extract_metrics(self, result_dict):
+        metrics = {}
+        i = 0
+        while True:
+            task_name = f"task{i}"
+            key_map50 = f"{task_name}_m/mAP50(B)"
+            key_map = f"{task_name}_m/mAP50-95(B)"
+            if key_map50 in result_dict:
+                metrics[task_name] = {'map50': result_dict[key_map50], 'map': result_dict[key_map]}
+                i += 1
+            else:
+                break
+        
+        if not metrics:
+            key_map50 = 'metrics/mAP50(B)'
+            key_map = 'metrics/mAP50-95(B)'
+            if key_map50 in result_dict:
+                LOGGER.info("Multi-task metrics not found, falling back to standard single-task metrics.")
+                metrics['all'] = {'map50': result_dict[key_map50], 'map': result_dict[key_map]}
+            else:
+                LOGGER.warning("Could not find any mAP metrics to track for pruning.")
+                metrics['all'] = {'map50': 0.0, 'map': 0.0}
+
+        return metrics
+    
     def model_prune(self, imp, prune, example_inputs):
         N_batchs = 10
 
@@ -555,7 +564,7 @@ class DetectionCompressor(BaseTrainer):
         ori_flops = ori_flops * 2.0
         ori_flops_f, ori_params_f = clever_format([ori_flops, ori_params], "%.3f")
         ori_result = self.validate_prune()
-        ori_map50, ori_map = ori_result['metrics/mAP50(B)'], ori_result['metrics/mAP50-95(B)']
+        ori_metrics = self.extract_metrics(ori_result)
         iter_idx, prune_flops = 0, ori_flops
         speed_up = 1.0
         LOGGER.info('begin pruning...')
@@ -581,14 +590,30 @@ class DetectionCompressor(BaseTrainer):
             iter_idx += 1
             prune.step(interactive=False)
             prune_result = self.validate_prune()
-            prune_map50, prune_map = prune_result['metrics/mAP50(B)'], prune_result['metrics/mAP50-95(B)']
+            prune_metrics = self.extract_metrics(prune_result)
+            metrics_log_parts = []
+            for task_name in ori_metrics.keys():
+                if task_name in prune_metrics:
+                    ori_map50 = ori_metrics[task_name]['map50']
+                    prune_map50 = prune_metrics[task_name]['map50']
+                    map50_diff = prune_map50 - ori_map50
+
+                    ori_map = ori_metrics[task_name]['map']
+                    prune_map = prune_metrics[task_name]['map']
+                    map_diff = prune_map - ori_map
+                    
+                    part = (f"{task_name} mAP50: {prune_map50:.3f} ({map50_diff:+.3f}) | "
+                            f"{task_name} mAP: {prune_map:.3f} ({map_diff:+.3f})")
+                    metrics_log_parts.append(part)
+            
+            metrics_log_str = ' || '.join(metrics_log_parts)
+            
             with HiddenPrints():
                 prune_flops, prune_params = tp.utils.count_ops_and_params(self.model, example_inputs)
             prune_flops = prune_flops * 2.0
             prune_flops_f, prune_params_f = clever_format([prune_flops, prune_params], "%.3f")
             speed_up = ori_flops / prune_flops # ori_model_GFLOPs / prune_model_GFLOPs
-            LOGGER.info(f'pruning... iter:{iter_idx} ori model flops:{ori_flops_f} => {prune_flops_f}({prune_flops / ori_flops * 100:.2f}%) params:{ori_params_f} => {prune_params_f}({prune_params / ori_params * 100:.2f}%) map@50:{ori_map50:.3f} => {prune_map50:.3f}({prune_map50 - ori_map50:.3f}) map@50:95:{ori_map:.3f} => {prune_map:.3f}({prune_map - ori_map:.3f}) Speed Up:{ori_flops / prune_flops:.2f}')
-
+            LOGGER.info(f'pruning... iter:{iter_idx} flops:{prune_flops_f} ({prune_flops / ori_flops:.2%}) params:{prune_params_f} ({prune_params / ori_params:.2%}) Speed Up:{speed_up:.2f} || {metrics_log_str}')
             if prune.current_step == prune.iterative_steps:
                 break
 
@@ -600,8 +625,16 @@ class DetectionCompressor(BaseTrainer):
         LOGGER.info('pruning done...')
         LOGGER.info(f'model flops:{ori_flops_f} => {prune_flops_f}({prune_flops / ori_flops * 100:.2f}%) Speed Up:{ori_flops / prune_flops:.2f}')
         LOGGER.info(f'model params:{ori_params_f} => {prune_params_f}({prune_params / ori_params * 100:.2f}%)')
-        LOGGER.info(f'model map@50:{ori_map50:.3f} => {prune_map50:.3f}({prune_map50 - ori_map50:.3f})')
-        LOGGER.info(f'model map@50:95:{ori_map:.3f} => {prune_map:.3f}({prune_map - ori_map:.3f})')
+        
+        LOGGER.info('Final metrics comparison:')
+        prune_metrics_final = self.extract_metrics(self.validate_prune())
+        for task_name in ori_metrics.keys():
+            if task_name in prune_metrics_final:
+                ori_map50, ori_map = ori_metrics[task_name]['map50'], ori_metrics[task_name]['map']
+                prune_map50, prune_map = prune_metrics_final[task_name]['map50'], prune_metrics_final[task_name]['map']
+                
+                LOGGER.info(f'  - {task_name} mAP@50:   {ori_map50:.3f} => {prune_map50:.3f} (change: {prune_map50 - ori_map50:+.3f})')
+                LOGGER.info(f'  - {task_name} mAP@50-95:{ori_map:.3f} => {prune_map:.3f} (change: {prune_map - ori_map:+.3f})')
 
     def optimizer_step(self):
         """Perform a single step of the training optimizer with gradient clipping and EMA update."""
