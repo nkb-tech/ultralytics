@@ -314,8 +314,11 @@ def check_det_dataset(dataset, autodownload=True):
         raw_names = data.get("names")
         if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
             data["names"] = [check_class_names(n) for n in raw_names]
+        elif isinstance(raw_names, (dict, list)):
+            names_list = check_class_names(raw_names)
+            data["names"] = [names_list]
         else:
-            raise SyntaxError(emojis(f"{dataset} 'names' must be a list of lists or a dictionary."))
+            raise SyntaxError(emojis(f"{dataset} 'names' must be a list of lists, a list, or a dictionary."))
         data["nc"] = [len(names) for names in data["names"]]
     elif "nc" in data:
         nc = data["nc"]
