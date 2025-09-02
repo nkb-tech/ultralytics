@@ -18,44 +18,49 @@ from glob import glob
 
 
 class DistillationLoss(nn.Module):
-    """Criterion class for computing training losses."""
+    """Criterion class for computing training losses.
+    Calculates KL-divergence loss for each classification head separately and sums them up."""
 
     def __init__(self, model, temperature=3.0, alpha=0.5, task="detect"):  # model must be de-paralleled
         """Initializes DistillationLoss with the model, defining model-related properties and BCE loss function."""
         super().__init__()
+        self.temperature = temperature
+        self.alpha = alpha
 
         if task == "classify":
-            self.temperature = temperature
-            self.alpha = alpha
             self.forward = self.forward_classify
         else:
             m = model.model[-1]  # Detect() module
-            self.nc = m.nc  # number of classes
-            self.no = m.nc + m.reg_max * 4
             self.reg_max = m.reg_max
-            self.temperature = temperature
-            self.alpha = alpha
+            self.nc_list = m.nc if isinstance(m.nc, list) else [m.nc]
+            self.no = self.reg_max * 4 + sum(self.nc_list)
             self.forward = self.forward_detect
     
     def forward_detect(self, student_logits, teacher_logits):
         """
-        Menghitung distillation loss.
+        Calculates distillation loss for object detection, supporting multi-task heads.
         """
-        _, s_scores = torch.cat([xi.view(student_logits[0].shape[0], self.no, -1) for xi in student_logits], 2).split(
-            (self.reg_max * 4, self.nc), 1
-        )
-        _, t_scores = torch.cat([xi.view(teacher_logits[0].shape[0], self.no, -1) for xi in teacher_logits], 2).split(
-            (self.reg_max * 4, self.nc), 1
-        )
+        s_cat = torch.cat([xi.view(student_logits[0].shape[0], self.no, -1) for xi in student_logits], 2)
+        t_cat = torch.cat([xi.view(teacher_logits[0].shape[0], self.no, -1) for xi in teacher_logits], 2)
+
+        split_sizes = (self.reg_max * 4, *self.nc_list)
         
-        s_scores = s_scores.permute(0, 2, 1).contiguous()
-        t_scores = t_scores.permute(0, 2, 1).contiguous()
+        _, *s_scores_list = s_cat.split(split_sizes, 1)
+        _, *t_scores_list = t_cat.split(split_sizes, 1)
 
-        student_soft = F.log_softmax(s_scores / self.temperature, dim=1)
-        teacher_soft = F.softmax(t_scores / self.temperature, dim=1)
+        total_loss = 0.0
+        
+        for s_scores_task, t_scores_task in zip(s_scores_list, t_scores_list):
+            
+            s_scores_task = s_scores_task.permute(0, 2, 1).contiguous()
+            t_scores_task = t_scores_task.permute(0, 2, 1).contiguous()
 
-        loss = F.kl_div(student_soft, teacher_soft, reduction='batchmean') * (self.temperature ** 2) / student_soft.shape[2]
-        return self.alpha * loss
+            student_soft = F.log_softmax(s_scores_task / self.temperature, dim=-1)
+            teacher_soft = F.softmax(t_scores_task / self.temperature, dim=-1)
+            task_loss = F.kl_div(student_soft, teacher_soft, reduction='none').sum() / s_scores_task.shape[0]
+            
+            total_loss += task_loss
+        return self.alpha * total_loss * (self.temperature ** 2)
 
     def forward_classify(self, student_logits, teacher_logits):
         """
