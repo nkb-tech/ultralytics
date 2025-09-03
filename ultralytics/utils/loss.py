@@ -209,10 +209,26 @@ class DFLoss(nn.Module):
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses during training."""
 
-    def __init__(self, reg_max=16):
-        """Initialize the BboxLoss module with regularization maximum and DFL settings."""
+    def __init__(
+        self,
+        reg_max: int = 16,
+        iou_loss_fn: str = "ciou",
+        nwd_loss: bool = False,
+        use_wiseiou: bool = False,
+    ):
+        """Initialize the BboxLoss module with regularization maximum and DFL settings.
+        
+        Args:
+            reg_max (int, optional): The maximum value of the regression distribution. Defaults to 16.
+            iou_loss_fn (str, optional): The function to use for the IoU loss. Defaults to "ciou".
+            nwd_loss (bool, optional): If True, use the Wasserstein Distance loss. Defaults to False.
+            use_wiseiou (bool, optional): If True, use the Wise IoU loss. Defaults to False.
+        """
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+        self.iou_loss_fn = iou_loss_fn
+        self.nwd_loss = nwd_loss
+        self.use_wiseiou = use_wiseiou
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         """IoU loss."""
