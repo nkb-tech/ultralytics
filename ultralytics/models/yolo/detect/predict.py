@@ -24,11 +24,13 @@ class DetectionPredictor(BasePredictor):
         """Post-processes predictions and returns a list of Results objects."""
         if not self.nms:
             m = self.model.model.model[-1]  # detect head
+            is_multitask = isinstance(m.nc, (list, tuple)) and len(m.nc) > 1
+            agnostic = self.args.agnostic_nms or is_multitask
             preds = ops.non_max_suppression(
                 preds,
                 self.args.conf,
                 self.args.iou,
-                agnostic=self.args.agnostic_nms,
+                agnostic=agnostic,
                 max_det=self.args.max_det,
                 classes=self.args.classes,
                 nc=m.nc,
