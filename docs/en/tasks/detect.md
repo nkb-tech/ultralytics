@@ -280,4 +280,12 @@ Ultralytics validators automatically support custom models with multiple detecti
 also printed for quick comparison.
 
 ### Multi-head architecture
-# TODO
+The multi-head architecture extends the standard YOLOv8 `Detect` head to enable multi-task learning. The key design principles are:
+
+*   **Shared Bounding Box Head:** A single regression head (`cv2`) predicts the bounding box coordinates. This box is shared across all tasks, assuming all attributes belong to the same object instance.
+
+*   **Separate Classification Heads:** For each task defined in the `data.yaml` (e.g., primary class, state, etc.), a dedicated, parallel classification head (`cv3`) is created. This allows the model to learn task-specific features for each attribute set.
+
+*   **Unified Output Tensor:** The predictions from the single box head and all separate classification heads are concatenated along the channel dimension at each feature pyramid level. This creates a unified tensor for loss computation and inference.
+
+*   **Primary Head for NMS:** During post-processing and inference, the confidence scores and class predictions from the **first** (primary) task are used to perform Non-Max Suppression (NMS) and rank detections. The attributes predicted by the other heads are then assigned to these filtered detections.Отличная работа! Вот вариант для заполнения секции `### Multi-head architecture` в вашем README, основанный на предоставленном коде и описании. Он кратко излагает ключевые архитектурные моменты.
