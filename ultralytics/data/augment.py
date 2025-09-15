@@ -2338,21 +2338,12 @@ class Albumentations:
         Args:
             labels (Dict): A dictionary containing image data and annotations. Expected keys are:
                 - 'img': numpy.ndarray representing the image
-                - 'cls': numpy.ndarray of class labels
+                - 'cls': numpy.ndarray of class labels. Can be 1D for single-task (e.g., [class1, class2])
+                         or 2D for multi-task (e.g., [[main_class1, attr1, attr2], [main_class2, attr3, attr4]]).
                 - 'instances': object containing bounding boxes and other instance information
 
         Returns:
             (Dict): The input dictionary with augmented image and updated annotations.
-
-        Examples:
-            >>> transform = Albumentations(p=0.5)
-            >>> labels = {
-            ...     "img": np.random.rand(640, 640, 3),
-            ...     "cls": np.array([0, 1]),
-            ...     "instances": Instances(bboxes=np.array([[0, 0, 1, 1], [0.5, 0.5, 0.8, 0.8]])),
-            ... }
-            >>> augmented = transform(labels)
-            >>> assert augmented["img"].shape == (640, 640, 3)
 
         Notes:
             - The method applies transformations with probability self.p.
@@ -2370,18 +2361,24 @@ class Albumentations:
                 labels["instances"].normalize(*im.shape[:2][::-1])
                 bboxes = labels["instances"].bboxes
                 
+                # Multi-task format (2D array)
                 if isinstance(cls, np.ndarray) and cls.ndim > 1:
+                    # Store the original full labels
                     cls_full = cls.copy()
+                    # Albumentations' accepts only a simple list of classes. 
+                    # Extract primary class
                     cls_for_albu = cls[:, 0].astype(int).tolist()
                 else:
+                    # Single-task case
                     cls_full = None
                     cls_for_albu = cls.tolist() if isinstance(cls, np.ndarray) else cls
                 
                 new = self.transform(image=im, bboxes=bboxes, class_labels=cls_for_albu)
-                
+
+                # Update labels only if some objects remain after augmentation (e.g., cropping)
                 if len(new["class_labels"]) > 0 or self.crop_bg:
                     labels["img"] = new["image"]
-                    
+                    # Reconstruct multi task labels
                     if cls_full is not None:
                         new_cls_main = np.array(new["class_labels"])
                         cls_to_attr = {}
@@ -2389,8 +2386,10 @@ class Albumentations:
                             main_cls = int(cls_full[i, 0])
                             if main_cls not in cls_to_attr:
                                 cls_to_attr[main_cls] = []
+                            # Store the additional classes
                             cls_to_attr[main_cls].append(cls_full[i, 1:])
-                        
+
+                        # Reconstruct the full label for the objects that survived the augmentation
                         new_cls_full = []
                         for main_cls in new_cls_main:
                             main_cls = int(main_cls)
@@ -2399,23 +2398,22 @@ class Albumentations:
                                 new_cls_full.append([main_cls] + attrs.tolist())
                             else:
                                 new_cls_full.append([main_cls] + [0] * (cls_full.shape[1] - 1))
-                        
+
                         labels["cls"] = np.array(new_cls_full, dtype=cls_full.dtype)
                     else:
+                        # Standard single-task case: simply update with the new list of classes.
                         labels["cls"] = np.array(new["class_labels"])
                     
                     bboxes = np.array(new["bboxes"], dtype=np.float32)
                     labels["instances"].update(bboxes=bboxes)
-        else:
+        else: # Non-spatial transforms
             if isinstance(labels, dict):
                 labels["img"] = self.transform(image=labels["img"])["image"]
             elif isinstance(labels, Image.Image):
                 labels = Image.fromarray(self.transform(image=np.asarray(labels))["image"])
             else:
                 raise TypeError(f"Unexpected type for labels: {type(labels)}")
-        
         return labels
-
 
 class Format:
     """
@@ -2847,32 +2845,6 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         "saturation": hyp.albu_saturation if hasattr(hyp, "albu_saturation") else None,
         "hue": hyp.albu_hue if hasattr(hyp, "albu_hue") else None,
     }
-        
-    # alb = Albumentations(hyp=hyp, p=1.0)
-    # resize = LetterBox(new_shape=(imgsz, imgsz),
-    #                    auto=False,        # строго imgsz×imgsz
-    #                    scaleFill=False,  # паддинги вместо растяжения
-    #                    scaleup=True,      # допускаем upscale
-    #                    center=True)
-
-    # rp = RandomPerspective(degrees=hyp.degrees,
-    #                        translate=hyp.translate,
-    #                        scale=hyp.scale,
-    #                        shear=hyp.shear,
-    #                        perspective=hyp.perspective,
-    #                        border=(0, 0),      # без мозаичных бордеров
-    #                        pre_transform=None) # LetterBox уже применили
-
-    # misc = Compose([
-    #     MixUp(dataset, p=hyp.mixup),
-    #     # CutMix(dataset, p=hyp.cutmix),
-    #     RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
-    #     RandomFlip(direction="vertical",   p=hyp.flipud),
-    #     RandomFlip(direction="horizontal", p=hyp.fliplr,
-    #                flip_idx=dataset.data.get("flip_idx", [])),
-    # ])
-
-    # return Compose([resize, rp, misc])
     
     return Compose(
         [
