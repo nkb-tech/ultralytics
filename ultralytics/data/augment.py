@@ -606,10 +606,6 @@ class Mosaic(BaseMixTransform):
         """
         assert labels.get("rect_shape", None) is None, "rect and mosaic are mutually exclusive."
         assert len(labels.get("mix_labels", [])), "There are no other images for mosaic augment."
-        # print(f"DEBUG _mix_transform: main image shape: {labels['img'].shape}, resized_shape: {labels.get('resized_shape', 'N/A')}")
-        # if 'mix_labels' in labels:
-        #     for idx, mix_label in enumerate(labels['mix_labels']):
-        #         print(f"  mix_label[{idx}] image shape: {mix_label['img'].shape}, resized_shape: {mix_label.get('resized_shape', 'N/A')}")
         return (
             self._mosaic3(labels) if self.n == 3 else self._mosaic4(labels) if self.n == 4 else self._mosaic9(labels)
         )  # This code is modified for mosaic3 method.
@@ -1339,7 +1335,6 @@ class RandomPerspective:
         if "cls" in labels and labels["cls"].ndim == 1:
             labels["cls"] = labels["cls"][:, None]
 
-        # print(f"[Albumentations end]   {labels['img'].shape[0]}x{labels['img'].shape[1]}")
         return labels
 
     def box_candidates(self, box1, box2, eps=1e-16):
@@ -2098,7 +2093,6 @@ class LetterBox:
             labels = {}
         img = labels.get("img") if image is None else image
         shape = img.shape[:2]  # current shape [height, width]
-        # print(f"[LetterBox]  in  {shape[0]}x{shape[1]}")
         new_shape = labels.pop("rect_shape", self.new_shape)
         if isinstance(new_shape, int):
             new_shape = (new_shape, new_shape)
@@ -2134,7 +2128,6 @@ class LetterBox:
             labels["ratio_pad"] = (labels["ratio_pad"], (left, top))  # for evaluation
 
         if len(labels):
-            # print(f"[LetterBox]  out {img.shape[0]}x{img.shape[1]}")
             labels = self._update_labels(labels, ratio, dw, dh)
             labels["img"] = img
             labels["resized_shape"] = new_shape
@@ -2484,7 +2477,6 @@ class Albumentations:
         """
         if self.transform is None or random.random() > self.p:
             return labels
-        # print(f"[Albumentations start] {labels['img'].shape[0]}x{labels['img'].shape[1]}")
 
         if self.contains_spatial:
             cls = labels["cls"]
