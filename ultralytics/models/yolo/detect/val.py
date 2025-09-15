@@ -8,7 +8,6 @@ import numpy as np
 
 from ultralytics.data import build_dataloader, build_yolo_dataset, converter
 from ultralytics.engine.validator import BaseValidator
-from ultralytics.models.yolo.detect.sahi_debugger import SAHIValidationDebugger
 from ultralytics.models.yolo.detect.sahi_val import SAHICropAggregator
 from ultralytics.utils import LOGGER, ops
 from ultralytics.utils.checks import check_requirements
@@ -46,8 +45,6 @@ class DetectionValidator(BaseValidator):
                 "WARNING ⚠️ 'save_hybrid=True' will append ground truth to predictions for autolabelling.\n"
                 "WARNING ⚠️ 'save_hybrid=True' will cause incorrect mAP.\n"
             )
-        if self.args.sahi_val_debug:
-            self.sahi_debugger = SAHIValidationDebugger()
         self.sahi_aggregator = None
         self.sahi_enabled = False
                         
