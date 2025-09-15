@@ -19,12 +19,6 @@ from ultralytics.utils.ops import masks2segments, resample_segments, segment2box
 from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils.torch_utils import TORCHVISION_0_10, TORCHVISION_0_11, TORCHVISION_0_13
 
-from albumentations import AtLeastOneBBoxRandomCrop
-from albumentations.core.transforms_interface import DualTransform
-from albumentations.augmentations.crops.transforms import CropSizeError
-
-# from .glitche import Ntsc, VHSSpeed, NumpyRandom
-
 # from .glitche import Ntsc, VHSSpeed, NumpyRandom
 
 DEFAULT_MEAN = (0.0, 0.0, 0.0)
@@ -417,10 +411,6 @@ class BaseMixTransform:
             for i, data in enumerate(mix_labels):
                 mix_labels[i] = self.pre_transform(data)
         
-        if hasattr(self, 'mix_transform') and self.mix_transform is not None:
-            for i, data in enumerate(mix_labels):
-                mix_labels[i] = self.mix_transform(data)
-        
         labels["mix_labels"] = mix_labels
 
         # Update cls and texts
@@ -523,6 +513,7 @@ class Mosaic(BaseMixTransform):
         p (float): Probability of applying the mosaic augmentation. Must be in the range 0-1.
         n (int): The grid size, either 4 (for 2x2) or 9 (for 3x3).
         border (Tuple[int, int]): Border size for width and height.
+        pre_transform (Callable | None): Optional transform to apply before MixUp.
 
     Methods:
         get_indexes: Returns a list of random indexes from the dataset.
@@ -540,7 +531,7 @@ class Mosaic(BaseMixTransform):
         >>> augmented_labels = mosaic_aug(original_labels)
     """
 
-    def __init__(self, dataset, imgsz=640, p=1.0, n=4, mix_transform=None):
+    def __init__(self, dataset, imgsz=640, p=1.0, n=4, pre_transform=None):
         """
         Initializes the Mosaic augmentation object.
 
@@ -552,7 +543,6 @@ class Mosaic(BaseMixTransform):
             imgsz (int): Image size (height and width) after mosaic pipeline of a single image.
             p (float): Probability of applying the mosaic augmentation. Must be in the range 0-1.
             n (int): The grid size, either 4 (for 2x2) or 9 (for 3x3).
-            mix_transform (Callable, optional): Transform to apply to each image before mosaic.
             This is useful for applying crop transforms to mix_labels.
         Examples:
             >>> from ultralytics.data.augment import Mosaic
@@ -561,11 +551,10 @@ class Mosaic(BaseMixTransform):
         """
         assert 0 <= p <= 1.0, f"The probability should be in range [0, 1], but got {p}."
         assert n in {4, 9}, "grid must be equal to 4 or 9."
-        super().__init__(dataset=dataset, p=p)
+        super().__init__(dataset=dataset, p=p, pre_transform=pre_transform)
         self.imgsz = imgsz
         self.border = (-imgsz // 2, -imgsz // 2)  # width, height
         self.n = n
-        self.mix_transform = mix_transform
 
     def get_indexes(self, buffer=True):
         """
@@ -3097,7 +3086,7 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
         pre_transform=LetterBox(new_shape=(imgsz, imgsz)),
     )
 
-    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, mix_transform=crop_or_resize)
+    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, pre_transform=crop_or_resize)
     pre_transform = Compose([crop_or_resize, mosaic, affine]) # , crop_albu ,affine
     
     misc = Compose(
