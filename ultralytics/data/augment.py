@@ -2321,7 +2321,7 @@ class Albumentations:
                     if self.contains_spatial
                     else A.Compose(T)
                 )
-                LOGGER.info(prefix + ", ".join(f"{x}".replace("always_apply=False, ", "") for x in T if x.p))
+                #LOGGER.info(prefix + ", ".join(f"{x}".replace("always_apply=False, ", "") for x in T if x.p))
 
             except Exception as e:
                 LOGGER.info(f"{prefix}{e}")

@@ -77,7 +77,10 @@ class DetectionValidator(BaseValidator):
         self.is_lvis = isinstance(val, str) and "lvis" in val and not self.is_coco  # is LVIS
         data_names = self.data.get('names', [])
         LOGGER.debug(f"Loaded names: {data_names}")
-        if data_names:
+        if self.args.single_cls:
+            self.names = [{0: 'object'}]
+            self.nc = [1]
+        elif data_names:
             if isinstance(data_names[0], list):
                 # Мультитаск: names: [['heavy', 'light'], ['dmg', 'undmg']]
                 self.names = [{i: name for i, name in enumerate(task_names)} for task_names in data_names]
@@ -164,7 +167,7 @@ class DetectionValidator(BaseValidator):
             labels=self.lb,
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
-            nc=[1] + self.nc[1:] if self.args.single_cls else self.nc,
+            nc=[1] if self.args.single_cls else self.nc,
         )
 
 

@@ -119,11 +119,12 @@ class YOLODataset(BaseDataset):
                     lb = lb[valid_mask]
                     fb += len(lb)  # count boxes after filtering
 
+                    cls_cols = lb[:, :1] if self.single_cls else lb[:, 0:-4]
                     x["labels"].append(
                         {
                             "im_file": im_file,
                             "shape": shape,
-                            "cls": lb[:, 0:-4],  # n, 1
+                            "cls": cls_cols,
                             "bboxes": lb[:, -4:],  # n, 4
                             "segments": segments,
                             "keypoints": keypoint,
@@ -206,7 +207,7 @@ class YOLODataset(BaseDataset):
                 mask_ratio=hyp.mask_ratio,
                 mask_overlap=hyp.overlap_mask,
                 bgr=hyp.bgr if self.augment else 0.0,  # only affect training.
-                n_cls_tasks=len(self.nc),
+                n_cls_tasks=1 if self.single_cls else len(self.nc),
             )
         )
         return transforms
