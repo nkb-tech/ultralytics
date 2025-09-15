@@ -610,6 +610,28 @@ class Mosaic(BaseMixTransform):
             self._mosaic3(labels) if self.n == 3 else self._mosaic4(labels) if self.n == 4 else self._mosaic9(labels)
         )  # This code is modified for mosaic3 method.
 
+    def _get_image_dimensions(self, labels_patch):
+        """
+        Extract and update image dimensions from labels.
+        
+        Args:
+            labels_patch (Dict): Dictionary containing image and labels.
+            
+        Returns:
+            tuple: Height, width and image array.
+        """
+        img = labels_patch["img"]
+        actual_h, actual_w = img.shape[:2]
+        stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
+        
+        if (actual_h, actual_w) != (stored_h, stored_w):
+            h, w = actual_h, actual_w
+            labels_patch["resized_shape"] = (h, w)
+        else:
+            h, w = labels_patch.pop("resized_shape")
+        
+        return h, w, img
+
     def _mosaic3(self, labels):
         """
         Creates a 1x3 image mosaic by combining three images.
@@ -642,16 +664,8 @@ class Mosaic(BaseMixTransform):
         for i in range(3):
             labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
             # Load image
-            img = labels_patch["img"]
+            h, w, img = self._get_image_dimensions(labels_patch)
 
-            actual_h, actual_w = img.shape[:2]
-            stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
-        
-            if (actual_h, actual_w) != (stored_h, stored_w):
-                h, w = actual_h, actual_w
-                labels_patch["resized_shape"] = (h, w)
-            else:
-                h, w = labels_patch.pop("resized_shape")
             # Place img in img3
             if i == 0:  # center
                 img3 = np.full((s * 3, s * 3, img.shape[2]), 114, dtype=np.uint8)  # base image with 3 tiles
@@ -666,7 +680,6 @@ class Mosaic(BaseMixTransform):
             x1, y1, x2, y2 = (max(x, 0) for x in c)  # allocate coords
 
             img3[y1:y2, x1:x2] = img[y1 - padh :, x1 - padw :]  # img3[ymin:ymax, xmin:xmax]
-            # hp, wp = h, w  # height, width previous for next iteration
 
             # Labels assuming imgsz*2 mosaic size
             labels_patch = self._update_labels(labels_patch, padw + self.border[0], padh + self.border[1])
@@ -706,16 +719,7 @@ class Mosaic(BaseMixTransform):
         for i in range(4):
             labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
             # Load image
-            img = labels_patch["img"]
-            
-            actual_h, actual_w = img.shape[:2]
-            stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
-        
-            if (actual_h, actual_w) != (stored_h, stored_w):
-                h, w = actual_h, actual_w
-                labels_patch["resized_shape"] = (h, w)
-            else:
-                h, w = labels_patch.pop("resized_shape")
+            h, w, img = self._get_image_dimensions(labels_patch)
             
             # Place img in img4
             if i == 0:  # top left
@@ -774,16 +778,8 @@ class Mosaic(BaseMixTransform):
         for i in range(9):
             labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
             # Load image
-            img = labels_patch["img"]
-
-            actual_h, actual_w = img.shape[:2]
-            stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
-        
-            if (actual_h, actual_w) != (stored_h, stored_w):
-                h, w = actual_h, actual_w
-                labels_patch["resized_shape"] = (h, w)
-            else:
-                h, w = labels_patch.pop("resized_shape")
+            h, w, img = self._get_image_dimensions(labels_patch)
+            
             # Place img in img9
             if i == 0:  # center
                 img9 = np.full((s * 3, s * 3, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
