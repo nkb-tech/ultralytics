@@ -302,12 +302,13 @@ class v8DetectionLoss:
         ]
         cls_losses = []
         for i in range(self.n_tasks):
-            if clf_loss_fn == "bce":
-                cls_loss_fn = BCELoss
-            elif clf_loss_fn == "vfl":
-                cls_loss_fn = VarifocalLoss
-            elif clf_loss_fn == "qfl":
-                cls_loss_fn = QualityfocalLoss
+            # if clf_loss_fn == "bce":
+            #     cls_loss_fn = BCELoss
+            # elif clf_loss_fn == "vfl":
+            #     cls_loss_fn = VarifocalLoss
+            # elif clf_loss_fn == "qfl":
+            #     cls_loss_fn = QualityfocalLoss
+            cls_loss_fn = BCELoss 
             cls_losses.append(cls_loss_fn(reduction="none", weight=self.clf_loss_weights[i]))
         self.cls_losses = nn.ModuleList(cls_losses)
         LOGGER.info(f"Using {clf_loss_fn} loss for classification.")
