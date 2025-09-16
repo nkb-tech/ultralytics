@@ -47,6 +47,7 @@ class DetectionValidator(BaseValidator):
             )
         self.sahi_aggregator = None
         self.sahi_enabled = False
+        self.keep_sahi_images = getattr(self.args, "keep_sahi_images", False)
                         
     def preprocess(self, batch):
         """Preprocesses batch of images for YOLO training."""
@@ -237,15 +238,15 @@ class DetectionValidator(BaseValidator):
                 try:
                     self._process_complete_image(img_key)
                     # Increment seen counter for completed image
-                    self.seen += 1
                 except Exception as e:
                     LOGGER.error(f"Error processing complete image {img_key}: {e}")
                     import traceback
                     traceback.print_exc()
                 
             # Clean up processed images
-            for img_key in completed_images:
-                del self.sahi_aggregator.image_crops[img_key]
+            if not self.keep_sahi_images:
+                for img_key in completed_images:
+                    del self.sahi_aggregator.image_crops[img_key]
                 
             return
         
@@ -421,30 +422,6 @@ class DetectionValidator(BaseValidator):
         # Update metrics with aggregated results
         self._update_metrics_standard([aggregated_preds], synthetic_batch)
 
-        
-
-            
-    def finalize_metrics(self, *args, **kwargs):
-        """Set final values for metrics speed and confusion matrices."""
-        if self.sahi_enabled and self.sahi_aggregator is not None:
-            remaining_images = list(self.sahi_aggregator.image_crops.keys())
-            if remaining_images:
-                LOGGER.warning(f"Processing {len(remaining_images)} incomplete images at validation end")
-                for img_key in remaining_images:
-                    crops_processed = len(self.sahi_aggregator.image_crops[img_key]['processed_crops'])
-                    img_idx = self.sahi_aggregator.image_crops[img_key].get('original_img_idx', -1)
-                    expected = self.sahi_aggregator.expected_crops_per_image.get(img_idx, 'unknown')
-                    LOGGER.debug(f"Image {img_key}: {crops_processed}/{expected} crops processed")
-            try:
-                self.plotter.plot_sahi_results()
-            except Exception as e:
-                LOGGER.error(f"Error plotting SAHI complete images: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        for m, cm in zip(self.metrics, self.confusion_matrices):
-            m.speed = self.speed
-            m.confusion_matrix = cm
 
     def get_stats(self):
         """Returns metrics statistics and results dictionary."""

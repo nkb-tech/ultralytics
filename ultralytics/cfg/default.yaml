@@ -131,7 +131,7 @@ aspect_ratio_thr: 100 # aspect ratio threshold for bboxes after RandomPerspectiv
 wh_thr: 5 # after RandomPerspective width and height threshold in pixels. Boxes smaller than this in either dimension are rejected.
 area_thr: 0.1 # Boxes with an area ratio = (new_area/old_area) less than this value are rejected after RandomPerspectiveAug
 
-# Albumentations  settings ------------------------------------------------------------------------------------------------------
+# Albumentations  settings TODO: separate config ------------------------------------------------------------------------------------------------------
 albu_dropout_prob: 0.1
 albu_quality_lower: 75
 albu_max_factor: 1.1
@@ -208,3 +208,4 @@ bg_crop_prob: 0.4  # (float) probability of applying RandomCropLarge (increases 
 scale_range: (1, 1)  # TODO: fix it not working.  (str) range in which the height and width of the crop can vary during augmentation
 erosion_factor: 0.0 # (float) 0 means crop must fully contain the reference box.
 full_image_prob: 0.0  # probability, that full image will be resize to crop size
+keep_sahi_images: False
