@@ -1078,7 +1078,7 @@ class ValidatorPlotter:
         LOGGER.debug(f"Saved SAHI validation plot to {self.save_dir / fname}")
         
 
-@TryExcept()  # known issue https://github.com/ultralytics/yolov5/issues/5395
+#@TryExcept()  # known issue https://github.com/ultralytics/yolov5/issues/5395
 @plt_settings()
 def plot_labels(
     boxes: np.ndarray,

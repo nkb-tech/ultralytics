@@ -4,7 +4,6 @@ import contextlib
 import importlib.metadata
 import inspect
 import json
-import logging.config
 import os
 import platform
 import re
@@ -14,6 +13,7 @@ import threading
 import time
 import urllib
 import uuid
+import logging
 from pathlib import Path
 from threading import Lock
 from types import SimpleNamespace

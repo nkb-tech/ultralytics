@@ -2,30 +2,21 @@
 import math
 import random
 from copy import deepcopy
-from typing import Tuple, Union, Any
+from typing import Tuple, Union
 
 import cv2
 import numpy as np
 import torch
 from PIL import Image
 
-from numba import njit
 from ultralytics.utils import LOGGER, colorstr
 from ultralytics.utils.checks import check_version
 from ultralytics.utils.instance import Instances
 from ultralytics.utils.metrics import bbox_ioa
-from ultralytics.utils.ops import segment2box, xyxyxyxy2xywhr
-from ultralytics.utils.ops import masks2segments, resample_segments, segment2box
+from ultralytics.utils.ops import segment2box
+from ultralytics.utils.tf import xyxyxyxy2xywhr
 from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils.torch_utils import TORCHVISION_0_10, TORCHVISION_0_11, TORCHVISION_0_13
-
-from albumentations import AtLeastOneBBoxRandomCrop
-from albumentations.core.transforms_interface import DualTransform
-from albumentations.augmentations.crops.transforms import CropSizeError
-
-# from .glitche import Ntsc, VHSSpeed, NumpyRandom
-
-# from .glitche import Ntsc, VHSSpeed, NumpyRandom
 
 DEFAULT_MEAN = (0.0, 0.0, 0.0)
 DEFAULT_STD = (1.0, 1.0, 1.0)
@@ -3045,7 +3036,7 @@ class CropOrResize:
         else:
             return self.crop_transform(labels)
         
-def crop_transforms(dataset, imgsz, hyp, stretch=False):
+def crop_transforms(dataset, imgsz: int, hyp, stretch=False):
     """
     Compose из кастомных SAHI-кропов + стандартных аугментаций.
     """
@@ -3071,7 +3062,10 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
                 p=hyp.bg_crop_prob,
             ),
             SafeFixedRandomCrop(
-                crop_size=imgsz, erosion_factor=hyp.erosion_factor, scale_range=hyp.scale_range, p=1 - hyp.bg_crop_prob
+                crop_size=imgsz,
+                erosion_factor=hyp.erosion_factor,
+                scale_range=hyp.scale_range,
+                p=1 - hyp.bg_crop_prob,
             ),
         ],
         p=1.0,
@@ -3114,7 +3108,7 @@ def crop_transforms(dataset, imgsz, hyp, stretch=False):
     return Compose(transforms)
 
 
-def crop_val_transforms(dataset, imgsz, hyp, stretch=False):
+def crop_val_transforms(dataset, imgsz: int, hyp, stretch=False):
     """
     Compose из кастомных SAHI-кропов + стандартных аугментаций.
     """
@@ -3130,7 +3124,10 @@ def crop_val_transforms(dataset, imgsz, hyp, stretch=False):
                 p=hyp.bg_crop_prob,
             ),
             SafeFixedRandomCrop(
-                crop_size=imgsz, erosion_factor=hyp.erosion_factor, scale_range=hyp.scale_range, p=1 - hyp.bg_crop_prob
+                crop_size=imgsz,
+                erosion_factor=hyp.erosion_factor,
+                scale_range=hyp.scale_range,
+                p=1 - hyp.bg_crop_prob,
             ),
         ],
         p=1.0,

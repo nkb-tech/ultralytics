@@ -181,10 +181,8 @@ class BaseDataset(Dataset):
                 raise RuntimeError(f"{self.prefix}Corrupt JPEG buffer for {f}")
             h0, w0 = im.shape[:2]
 
-            # print(f"[load_image] #{i:05d}  ORIG  {h0}x{w0}")
             if not self.sahi:
                 im = self._resize(im, h0, w0, rect_mode)
-            # print(f"[load_image] #{i:05d}  AFTER load_image() -> {im.shape[0]}x{im.shape[1]}")
 
             if self.augment:
                 self.im_hw0[i], self.im_hw[i] = (h0, w0), im.shape[:2]
@@ -211,10 +209,8 @@ class BaseDataset(Dataset):
             raise FileNotFoundError(f"Image Not Found {f}")
 
         h0, w0 = im.shape[:2]  # orig hw
-        # print(f"[load_image] #{i:05d}  ORIG  {h0}x{w0}")
         if not self.sahi:
             im = self._resize(im, h0, w0, rect_mode)
-        # print(f"[load_image] #{i:05d}  AFTER load_image() -> {im.shape[0]}x{im.shape[1]}")
 
         if self.augment:  # Add to buffer if training with augmentations
             self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
@@ -254,6 +250,7 @@ class BaseDataset(Dataset):
         f = self.npy_files[i]
         if not f.exists():
             np.save(f.as_posix(), cv2.imread(self.im_files[i]), allow_pickle=False)
+
     def check_cache_disk(self, safety_margin=0.5):
         """Check image caching requirements vs available disk space."""
         import shutil
@@ -293,6 +290,7 @@ class BaseDataset(Dataset):
         data = buf.tobytes()
         self.ims[i] = data
         return len(data)
+
     def check_cache_ram(self, safety_margin=0.5):
         """Check image caching requirements vs available memory."""
         b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes

@@ -12,7 +12,7 @@ import subprocess
 import time
 from importlib import metadata
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import cv2
 import numpy as np

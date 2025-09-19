@@ -377,7 +377,13 @@ class DetectionModel(BaseModel):
 
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
-        return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+        return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(
+            self,
+            clf_loss_fn=self.args.clf_loss_fn,
+            iou_loss_fn=self.args.iou_loss_fn,
+            nwd_loss=self.args.nwd_loss,
+            use_wiseiou=self.args.use_wiseiou,
+        )
 
 
 class OBBModel(DetectionModel):
@@ -1324,13 +1330,11 @@ def yaml_model_load(path):
     d["scale"] = guess_model_scale(path)
     d["yaml_file"] = str(path)
 
-    raw_names = d.get("names", None)
-    if "nc" not in d:
-        if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
-            d["nc"] = [len(task) for task in raw_names]
-            
-        else:
-            raise SyntaxError(emojis(f"{yaml_file} key missing ❌. either 'names' or 'nc' are required in all model YAMLs."))
+    nc = d.get("nc", None)
+    if isinstance(nc, int):
+        d["nc"] = [nc]
+    else:
+        raise SyntaxError(emojis(f"{yaml_file} key missing ❌. either 'names' or 'nc' are required in all model YAMLs."))
     return d
 
 

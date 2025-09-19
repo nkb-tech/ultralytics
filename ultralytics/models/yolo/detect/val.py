@@ -130,7 +130,6 @@ class DetectionValidator(BaseValidator):
             dataloader=self.dataloader,
             max_det=self.args.max_det
         )
-    
 
     def get_desc(self):
         """Return a formatted string summarizing class metrics of YOLO model."""
@@ -170,7 +169,6 @@ class DetectionValidator(BaseValidator):
             nc=[1] + self.nc[1:] if self.args.single_cls else self.nc,
         )
 
-
     def _prepare_batch(self, si, batch):
         """Prepares a batch of images and annotations for validation."""
         if 'batch_idx' in batch and batch['batch_idx'].numel() > 0:
@@ -202,7 +200,6 @@ class DetectionValidator(BaseValidator):
             ops.scale_boxes(imgsz, bbox, ori_shape, ratio_pad=ratio_pad)  # native-space labels
         
         return {"cls": cls, "bbox": bbox, "ori_shape": ori_shape, "imgsz": imgsz, "ratio_pad": ratio_pad}
-
 
     def update_metrics(self, preds, batch):
         """Metrics."""
@@ -250,7 +247,6 @@ class DetectionValidator(BaseValidator):
             return
         
         self._update_metrics_standard(preds, batch)
-
 
     def _prepare_pred(self, pred, pbatch):
         """Prepares a batch of images and annotations for validation."""

@@ -10,26 +10,33 @@ import numpy as np
 import torch
 
 from ultralytics.utils import LOGGER, SimpleClass, TryExcept, plt_settings
-from ultralytics.utils.ops import xyxy2xywh
+from ultralytics.utils.tf import xyxy2xywh
 
 OKS_SIGMA = (
     np.array([0.26, 0.25, 0.25, 0.35, 0.35, 0.79, 0.79, 0.72, 0.72, 0.62, 0.62, 1.07, 1.07, 0.87, 0.87, 0.89, 0.89])
     / 10.0
 )
 
-class WiseIouLoss(torch.nn.Module):
-    ''' :param monotonous: {
-            None: origin V1
-            True: monotonic FM V2
-            False: non-monotonic FM V3
-        }'''
+class WiseIoULoss(torch.nn.Module):
     momentum = 1e-2
     alpha = 1.7
     delta = 2.7
 
-    def __init__(self, ltype='WIoU', monotonous=False, inner_iou=False, focaler_iou=False):
+    def __init__(self, ltype='wiou', monotonous=False, inner_iou=False, focaler_iou=False):
+        """Initialize the WiseIouLoss module with loss type, monotonicity, inner IoU, and focaler IoU settings.
+
+        Args:
+            ltype (str, optional): The type of loss function. Defaults to 'WIoU'.
+            monotonous (bool, optional): If None, use the origin V1;
+                if True, use the monotonic FM V2;
+                if False, use the non-monotonic FM V3.
+                Defaults to False.
+            inner_iou (bool): If True, use the inner IoU. Defaults to False.
+            focaler_iou (bool): If True, use the focaler IoU. Defaults to False.
+        """
         super().__init__()
-        assert getattr(self, f'_{ltype}', None), f'The loss function {ltype} does not exist'
+        ltype = ltype.lower()
+        assert getattr(self, f'_{ltype}', None), f'The loss function {ltype} does not exist.'
         self.ltype = ltype
         self.monotonous = monotonous
         self.inner_iou = inner_iou
@@ -92,32 +99,32 @@ class WiseIouLoss(torch.nn.Module):
                 loss *= beta / divisor
         return loss
 
-    def _IoU(self):
+    def _iou(self):
         return self['iou']
 
-    def _WIoU(self):
+    def _wiou(self):
         dist = torch.exp(self['l2_center'] / self['l2_box'].detach())
         return dist * self['iou']
 
-    def _EIoU(self):
+    def _eiou(self):
         penalty = self['l2_center'] / self['l2_box'] \
                   + torch.square(self['d_center'] / self['wh_box']).sum(dim=-1)
         return self['iou'] + penalty
 
-    def _GIoU(self):
+    def _giou(self):
         return self['iou'] + (self['s_box'] - self['s_union']) / self['s_box']
 
-    def _DIoU(self):
+    def _diou(self):
         return self['iou'] + self['l2_center'] / self['l2_box']
 
-    def _CIoU(self, eps=1e-4):
+    def _ciou(self, eps=1e-4):
         v = 4 / math.pi ** 2 * \
             (torch.atan(self['pred_wh'][..., 0] / (self['pred_wh'][..., 1] + eps)) -
              torch.atan(self['target_wh'][..., 0] / (self['target_wh'][..., 1] + eps))) ** 2
         alpha = v / (self['iou'] + v)
         return self['iou'] + self['l2_center'] / self['l2_box'] + alpha.detach() * v
 
-    def _SIoU(self, theta=4):
+    def _siou(self, theta=4):
         # Angle Cost
         angle = torch.arcsin(torch.abs(self['d_center']).min(dim=-1)[0] / (self['l2_center'].sqrt() + 1e-4))
         angle = torch.sin(2 * angle) - 2
@@ -132,12 +139,12 @@ class WiseIouLoss(torch.nn.Module):
         shape = w_shape ** theta + h_shape ** theta
         return self['iou'] + (dist + shape) / 2
 
-    def _MPDIoU(self, mpdiou_hw):
+    def _mpdiou(self, mpdiou_hw):
         d1 = (self['target'][..., 0] - self['pred'][..., 0]) ** 2 + (self['target'][..., 1] - self['pred'][..., 1]) ** 2
         d2 = (self['target'][..., 2] - self['pred'][..., 2]) ** 2 + (self['target'][..., 3] - self['pred'][..., 3]) ** 2
         return self['iou'] + d1 / mpdiou_hw + d2 / mpdiou_hw
 
-    def _ShapeIoU(self, scale=0.0):
+    def _shapeiou(self, scale=0.0):
         b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
         b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
         w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + 1e-7
@@ -160,7 +167,7 @@ class WiseIouLoss(torch.nn.Module):
         shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
         return self['iou'] + distance.squeeze() + 0.5 * shape_cost.squeeze()
 
-    def _PIoU(self):
+    def _piouv1(self):
         b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
         b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
         w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + 1e-7
@@ -174,7 +181,7 @@ class WiseIouLoss(torch.nn.Module):
         piou_v1 = self['iou'] - torch.exp(-P.squeeze() ** 2) + 1
         return piou_v1
 
-    def _PIoU2(self, Lambda=1.3):
+    def _piouv2(self, Lambda=1.3):
         b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
         b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
         w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + 1e-7
@@ -287,14 +294,14 @@ def bbox_iou(
     box1,
     box2,
     xywh=True,
-    GIoU=False,
-    DIoU=False,
-    CIoU=False,
-    EIoU=False,
-    SIoU=False,
-    ShapeIoU=False,
-    PIoU=False,
-    PIoU2=False,
+    giou=False,
+    diou=False,
+    ciou=False,
+    eiou=False,
+    siou=False,
+    shapeiou=False,
+    piouv1=False,
+    piouv2=False,
     eps=1e-7,
     scale=0.0,
     Lambda=1.3,
@@ -307,20 +314,20 @@ def bbox_iou(
         box2 (torch.Tensor): A tensor representing n bounding boxes with shape (n, 4).
         xywh (bool, optional): If True, input boxes are in (x, y, w, h) format. If False, input boxes are in
                                (x1, y1, x2, y2) format. Defaults to True.
-        GIoU (bool, optional): If True, calculate Generalized IoU. Defaults to False.
-        DIoU (bool, optional): If True, calculate Distance IoU. Defaults to False.
-        CIoU (bool, optional): If True, calculate Complete IoU. Defaults to False.
-        EIoU (bool, optional): If True, calculate Efficient IoU. Defaults to False.
-        SIoU (bool, optional): If True, calculate Scylla IoU. Defaults to False.
-        ShapeIoU (bool, optional): If True, calculate Shape IoU. Defaults to False.
-        PIoU (bool, optional): If True, calculate Pixel IoU. Defaults to False.
-        PIoU2 (bool, optional): If True, calculate Pixel IoU 2. Defaults to False.
+        giou (bool, optional): If True, calculate Generalized IoU. Defaults to False.
+        diou (bool, optional): If True, calculate Distance IoU. Defaults to False.
+        ciou (bool, optional): If True, calculate Complete IoU. Defaults to False.
+        eiou (bool, optional): If True, calculate Efficient IoU. Defaults to False.
+        siou (bool, optional): If True, calculate Scylla IoU. Defaults to False.
+        shapeiou (bool, optional): If True, calculate Shape IoU. Defaults to False.
+        piouv1 (bool, optional): If True, powerfull IoUv1. Defaults to False.
+        piouv2 (bool, optional): If True, powerfull IoUv2. Defaults to False.
         scale (float, optional): The scale of the shape IoU. Defaults to 0.0.
         Lambda (float, optional): The Lambda of the shape IoU. Defaults to 1.3.
         eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
 
     Returns:
-        (torch.Tensor): IoU, GIoU, DIoU, or CIoU or EIoU or SIoU or ShapeIoU or PIoU or PIoU2
+        (torch.Tensor): iou, giou, diou, or ciou or eiou or siou or shapeiou or piouv1 or piouv2
         values depending on the specified flags.
     """
 
@@ -345,24 +352,24 @@ def bbox_iou(
 
     # IoU
     iou = inter / union
-    if CIoU or DIoU or GIoU or EIoU or SIoU or ShapeIoU or PIoU or PIoU2:
+    if ciou or diou or giou or eiou or siou or shapeiou or piouv1 or piouv2:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
-        if CIoU or DIoU or EIoU or SIoU or PIoU or PIoU2 or ShapeIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+        if ciou or diou or eiou or siou or piouv1 or piouv2 or shapeiou:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
             c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
             rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center dist ** 2
-            if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
+            if ciou:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
                 v = (4 / math.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
                 with torch.no_grad():
                     alpha = v / (v - iou + (1 + eps))
                 return iou - (rho2 / c2 + v * alpha)  # CIoU
-            elif EIoU:
+            elif eiou:
                 rho_w2 = ((b2_x2 - b2_x1) - (b1_x2 - b1_x1)) ** 2
                 rho_h2 = ((b2_y2 - b2_y1) - (b1_y2 - b1_y1)) ** 2
                 cw2 = cw ** 2 + eps
                 ch2 = ch ** 2 + eps
                 return iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)  # EIoU
-            elif SIoU:
+            elif siou:
                 # SIoU Loss https://arxiv.org/pdf/2205.12740.pdf
                 s_cw = (b2_x1 + b2_x2 - b1_x1 - b1_x2) * 0.5 + eps
                 s_ch = (b2_y1 + b2_y2 - b1_y1 - b1_y2) * 0.5 + eps
@@ -380,7 +387,7 @@ def bbox_iou(
                 omiga_h = torch.abs(h1 - h2) / torch.max(h1, h2)
                 shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
                 return iou - 0.5 * (distance_cost + shape_cost) + eps  # SIoU
-            elif ShapeIoU:
+            elif shapeiou:
                 # Shape-Distance
                 ww = 2 * torch.pow(w2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
                 hh = 2 * torch.pow(h2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
@@ -397,16 +404,16 @@ def bbox_iou(
                 omiga_h = ww * torch.abs(h1 - h2) / torch.max(h1, h2)
                 shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
                 return iou - distance - 0.5 * shape_cost
-            elif PIoU or PIoU2:
+            elif piouv1 or piouv2:
                 dw1 = torch.abs(b1_x2.minimum(b1_x1) - b2_x2.minimum(b2_x1))
                 dw2 = torch.abs(b1_x2.maximum(b1_x1) - b2_x2.maximum(b2_x1))
                 dh1 = torch.abs(b1_y2.minimum(b1_y1) - b2_y2.minimum(b2_y1))
                 dh2 = torch.abs(b1_y2.maximum(b1_y1) - b2_y2.maximum(b2_y1))
                 P = ((dw1 + dw2) / torch.abs(w2) + (dh1 + dh2) / torch.abs(h2)) / 4
                 piou_v1 = 1 - iou - torch.exp(-P ** 2) + 1
-                if PIoU:
+                if piouv1:
                     return 1 - piou_v1
-                elif PIoU2:
+                elif piouv2:
                     q = torch.exp(-P)
                     x = q * Lambda
                     return 1 - 3 * x * torch.exp(-x ** 2) * piou_v1
