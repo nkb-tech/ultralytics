@@ -50,13 +50,18 @@ class SAHICropAggregator:
         original_img_idx = batch.get('original_img_idx', [])
         slice_idx = batch.get('slice_idx', [])
         slice_coords = batch.get('slice_coords', [])
-        ori_shapes = batch.get('ori_shape', [])
+        ori_shapes = batch.get('ori_shape', []) # shape of the original full image
+        
+        imgsz = batch['img'].shape[2:] # shape of the padded crop tensor
+        resized_shapes = batch.get('resized_shape', []) # shape of the crop before padding
+        ratio_pads = batch.get('ratio_pad', [])
+
         if preds_before_nms is not None:
             if isinstance(preds_before_nms, tuple):
                 preds_before_nms = preds_before_nms[0] if len(preds_before_nms) > 0 else None
 
-        if not original_img_idx:
-            LOGGER.warning("SAHI metadata missing in batch, skipping aggregation")
+        if not original_img_idx or not resized_shapes or not ratio_pads:
+            LOGGER.warning("SAHI metadata (original_img_idx, resized_shape, ratio_pad) missing in batch, skipping aggregation")
             return False
             
         # Process each crop in the batch
@@ -71,26 +76,27 @@ class SAHICropAggregator:
             
             if preds_before_nms is not None and hasattr(preds_before_nms, 'shape'):
                 if len(preds_before_nms.shape) == 3:
-                    # Format: [batch, outputs, anchors]
-                    crop_preds = preds_before_nms[i]  # [outputs, anchors]
+                    crop_preds = preds_before_nms[i].T  # [outputs, anchors] -> [anchors, outputs]
                     
-                    crop_preds = crop_preds.T
                     conf_threshold = 0.001
                     valid_mask = crop_preds[:, 4] > conf_threshold
                     
                     crop_preds_filtered = crop_preds[valid_mask]
                     
                     if len(crop_preds_filtered) > 0:
-                        x_min, y_min, _, _ = slice_coords[i]
+                        boxes_xyxy_padded = ops.xywh2xyxy(crop_preds_filtered[:, :4])
 
-                        boxes_xyxy_crop = ops.xywh2xyxy(crop_preds_filtered[:, :4])
-                        
-                        boxes_xyxy_crop[:, 0] += x_min  # x1
-                        boxes_xyxy_crop[:, 1] += y_min  # y1
-                        boxes_xyxy_crop[:, 2] += x_min  # x2
-                        boxes_xyxy_crop[:, 3] += y_min  # y2
-                        boxes_xywh_full = ops.xyxy2xywh(boxes_xyxy_crop)
-                        
+                        # scale boxes from padded to original crop size
+                        ops.scale_boxes(imgsz, boxes_xyxy_padded, resized_shapes[i], ratio_pad=ratio_pads[i])
+
+                        # shift coordinates to the full image space
+                        x_min, y_min, _, _ = slice_coords[i]
+                        boxes_xyxy_padded[:, 0] += x_min  # x1
+                        boxes_xyxy_padded[:, 1] += y_min  # y1
+                        boxes_xyxy_padded[:, 2] += x_min  # x2
+                        boxes_xyxy_padded[:, 3] += y_min  # y2
+                        boxes_xywh_full = ops.xyxy2xywh(boxes_xyxy_padded)
+        
                         crop_preds_transformed = crop_preds_filtered.clone()
                         crop_preds_transformed[:, :4] = boxes_xywh_full
                 
