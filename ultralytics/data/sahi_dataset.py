@@ -118,6 +118,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
             Args:
                 x: 1D int64 array
                 y: 1D int64 array
+
             Returns:
                 tuple[np.ndarray, np.ndarray]: 2D int64 arrays
             """
