@@ -170,7 +170,6 @@ class WiseIoULoss(torch.nn.Module):
     def _piouv1(self):
         b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
         b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
-        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + 1e-7
         w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + 1e-7
 
         dw1 = torch.abs(b1_x2.minimum(b1_x1) - b2_x2.minimum(b2_x1))
@@ -184,7 +183,6 @@ class WiseIoULoss(torch.nn.Module):
     def _piouv2(self, Lambda=1.3):
         b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
         b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
-        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + 1e-7
         w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + 1e-7
 
         dw1 = torch.abs(b1_x2.minimum(b1_x1) - b2_x2.minimum(b2_x1))
@@ -196,6 +194,28 @@ class WiseIoULoss(torch.nn.Module):
         q = torch.exp(-P.squeeze())
         x = q * Lambda
         return 3 * x * torch.exp(-x ** 2) * piou_v1
+
+    def _iterpiou(self, interp_coe=0.98):
+        b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
+        bi_x1, bi_y1, bi_x2, bi_y2 = ((1 - interp_coe) * b1_x1 + interp_coe * b2_x1,
+                                      (1 - interp_coe) * b1_y1 + interp_coe * b2_y1,
+                                      (1 - interp_coe) * b1_x2 + interp_coe * b2_x2,
+                                      (1 - interp_coe) * b1_y2 + interp_coe * b2_y2)
+
+        inter_i = (torch.min(bi_x2, b2_x2) - torch.max(bi_x1, b2_x1)).clamp_(0) * \
+                  (torch.min(bi_y2, b2_y2) - torch.max(bi_y1, b2_y1)).clamp_(0)
+
+        wi, hi = bi_x2 - bi_x1 + 1e-7, bi_y2 - bi_y1 + 1e-7
+        w2, h2 = b2_x2 - b2_x1 + 1e-7, b2_y2 - b2_y1 + 1e-7
+
+        union_i = wi * hi + w2 * h2 - inter_i + 1e-7
+        iou_i = inter_i / union_i
+        return self['iou'] + iou_i - 1
+
+    def _d_iterpiou(self, interp_coe=0.98, lv=0.6, hv=0.9):
+        interp_coe = torch.clamp((1 - self['iou'].detach()), min=lv, max=hv)
+        return self._iterpiou(interp_coe)
 
     def __repr__(self):
         return f'{self.__name__}(iou_mean={self.iou_mean.item():.3f})'
