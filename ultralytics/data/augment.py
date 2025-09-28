@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from ultralytics.utils import LOGGER, colorstr
+from ultralytics.utils import LOGGER
 from ultralytics.utils.checks import check_version
 from ultralytics.utils.instance import Instances
 from ultralytics.utils.metrics import bbox_ioa
@@ -17,6 +17,7 @@ from ultralytics.utils.ops import segment2box
 from ultralytics.utils.tf import xyxyxyxy2xywhr
 from ultralytics.data.utils import polygons2masks, polygons2masks_overlap
 from ultralytics.utils.torch_utils import TORCHVISION_0_10, TORCHVISION_0_11, TORCHVISION_0_13
+from ultralytics.data.glitche import Ntsc, VHSSpeed, NumpyRandom
 
 DEFAULT_MEAN = (0.0, 0.0, 0.0)
 DEFAULT_STD = (1.0, 1.0, 1.0)
@@ -929,6 +930,9 @@ class Mosaic(BaseMixTransform):
             final_labels["texts"] = mosaic_labels[0]["texts"]
         return final_labels
 
+    def __repr__(self):
+        return f"Mosaic(p={self.p}, n={self.n}, imgsz={self.imgsz}, border={self.border})"
+
 
 class MixUp(BaseMixTransform):
     """
@@ -1013,6 +1017,9 @@ class MixUp(BaseMixTransform):
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
         return labels
+
+    def __repr__(self):
+        return f"MixUp(p={self.p})"
 
 
 class RandomPerspective:
@@ -1341,7 +1348,6 @@ class RandomPerspective:
         if "cls" in labels and labels["cls"].ndim == 1:
             labels["cls"] = labels["cls"][:, None]
 
-        # print(f"[Albumentations end]   {labels['img'].shape[0]}x{labels['img'].shape[1]}")
         return labels
 
     def box_candidates(self, box1, box2, eps=1e-16):
@@ -1387,6 +1393,9 @@ class RandomPerspective:
             & (ar < self.aspect_ratio_thr)
         )  # candidates
 
+    def __repr__(self):
+        return f"RandomPerspective(degrees={self.degrees}, translate={self.translate}, scale={self.scale}, shear={self.shear}, perspective={self.perspective})"
+
 
 class CutMix(BaseMixTransform):
     """
@@ -1498,6 +1507,10 @@ class CutMix(BaseMixTransform):
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         return labels
 
+    def __repr__(self):
+        return f"CutMix(p={self.p}, beta={self.beta})"
+
+
 class CutMix(BaseMixTransform):
     """
     Applies CutMix augmentation to image datasets as described in the paper https://arxiv.org/abs/1905.04899.
@@ -1608,6 +1621,8 @@ class CutMix(BaseMixTransform):
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         return labels
 
+    def __repr__(self):
+        return f"CutMix(p={self.p}, beta={self.beta})"
 
 
 class RandomHSV:
@@ -1689,142 +1704,147 @@ class RandomHSV:
             cv2.cvtColor(im_hsv, cv2.COLOR_HSV2BGR, dst=img)  # no return needed
         return labels
 
-
-# class RandomGlitche:
-#     """
-#     Randomly adjusts the Hue, Saturation, and Value (HSV) channels of an image.
-
-#     This class applies random HSV augmentation to images within predefined limits set by hgain, sgain, and vgain.
-
-#     Attributes:
-#         hgain (float): Maximum variation for hue. Range is typically [0, 1].
-#         sgain (float): Maximum variation for saturation. Range is typically [0, 1].
-#         vgain (float): Maximum variation for value. Range is typically [0, 1].
-
-#     Methods:
-#         __call__: Applies random HSV augmentation to an image.
-
-#     Examples:
-#         >>> import numpy as np
-#         >>> from ultralytics.data.augment import RandomHSV
-#         >>> augmenter = RandomHSV(hgain=0.5, sgain=0.5, vgain=0.5)
-#         >>> image = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
-#         >>> labels = {"img": image}
-#         >>> augmented_labels = augmenter(labels)
-#         >>> augmented_image = augmented_labels["img"]
-#     """
-
-#     def __init__(self, p=0.5):
-#         self.p = p
-
-#     @staticmethod
-#     def __generate(seed=None) -> Ntsc:
-#         rnd = random.Random(seed)
-#         params = {
-#             "composite_preemphasis": rnd.triangular(0, 8, 0),
-#             "vhs_out_sharpen": rnd.triangular(1, 5, 1.5),
-#             "composite_in_chroma_lowpass": rnd.random() < 0.8,
-#             "composite_out_chroma_lowpass": rnd.random() < 0.8,
-#             "composite_out_chroma_lowpass_lite": rnd.random() < 0.8,
-#             "video_chroma_noise": int(rnd.triangular(0, 16384, 2)),
-#             "video_chroma_phase_noise": int(rnd.triangular(0, 50, 2)),
-#             "video_chroma_loss": int(rnd.triangular(0, 800, 10)),
-#             "video_noise": int(rnd.triangular(0, 4200, 2)),
-#             "emulating_vhs": False, #rnd.random() < 0.2,
-#             "vhs_edge_wave": int(rnd.triangular(0, 5, 0)),
-#             "video_scanline_phase_shift": rnd.choice([0, 90, 180, 270]),
-#             "video_scanline_phase_shift_offset": rnd.randint(0, 3),
-#             "output_vhs_tape_speed": rnd.choice([VHSSpeed.VHS_SP, VHSSpeed.VHS_LP, VHSSpeed.VHS_EP]),
-#             "color_bleed_before": 1 == rnd.randint(0, 1),
-#             "color_bleed_horiz": int(rnd.triangular(0, 8, 0)),
-#             "color_bleed_vert": int(rnd.triangular(0, 8, 0)),
-#         }
-
-#         # Additional parameters for ringing
-#         enable_ringing = rnd.random() < 0.8
-#         if enable_ringing:
-#             params["ringing"] = rnd.uniform(0.3, 0.7)
-#             enable_freq_noise = rnd.random() < 0.8
-#             if enable_freq_noise:
-#                 params["freq_noise_size"] = rnd.uniform(0.5, 0.99)
-#                 params["freq_noise_amplitude"] = rnd.uniform(0.5, 2.0)
-#             params["enable_ringing2"] = rnd.random() < 0.5
-#             params["ringing_power"] = rnd.randint(2, 7)
-
-#         # Initialize Ntsc class
-#         ntsc = Ntsc(random=NumpyRandom(seed))
-#         ntsc._composite_preemphasis = params["composite_preemphasis"]
-#         ntsc._vhs_out_sharpen = params["vhs_out_sharpen"]
-#         ntsc._composite_in_chroma_lowpass = params["composite_in_chroma_lowpass"]
-#         ntsc._composite_out_chroma_lowpass = params["composite_out_chroma_lowpass"]
-#         ntsc._composite_out_chroma_lowpass_lite = params["composite_out_chroma_lowpass_lite"]
-#         ntsc._video_chroma_noise = params["video_chroma_noise"]
-#         ntsc._video_chroma_phase_noise = params["video_chroma_phase_noise"]
-#         ntsc._video_chroma_loss = params["video_chroma_loss"]
-#         ntsc._video_noise = params["video_noise"]
-#         ntsc._emulating_vhs = params["emulating_vhs"]
-#         ntsc._vhs_edge_wave = params["vhs_edge_wave"]
-#         ntsc._video_scanline_phase_shift = params["video_scanline_phase_shift"]
-#         ntsc._video_scanline_phase_shift_offset = params["video_scanline_phase_shift_offset"]
-#         ntsc._output_vhs_tape_speed = params["output_vhs_tape_speed"]
-#         ntsc._color_bleed_before = params["color_bleed_before"]
-#         ntsc._color_bleed_horiz = params["color_bleed_horiz"]
-#         ntsc._color_bleed_vert = params["color_bleed_vert"]
-
-#         if enable_ringing:
-#             ntsc._ringing = params["ringing"]
-#             if "freq_noise_size" in params:
-#                 ntsc._freq_noise_size = params["freq_noise_size"]
-#                 ntsc._freq_noise_amplitude = params["freq_noise_amplitude"]
-#             ntsc._enable_ringing2 = params["enable_ringing2"]
-#             ntsc._ringing_power = params["ringing_power"]
-
-#         return ntsc
-
-#     def __call__(self, labels):
-#         """
-#         Applies random HSV augmentation to an image within predefined limits.
-
-#         This method modifies the input image by randomly adjusting its Hue, Saturation, and Value (HSV) channels.
-#         The adjustments are made within the limits set by hgain, sgain, and vgain during initialization.
-
-#         Args:
-#             labels (Dict): A dictionary containing image data and metadata. Must include an 'img' key with
-#                 the image as a numpy array.
-
-#         Returns:
-#             (None): The function modifies the input 'labels' dictionary in-place, updating the 'img' key
-#                 with the HSV-augmented image.
-
-#         Examples:
-#             >>> hsv_augmenter = RandomHSV(hgain=0.5, sgain=0.5, vgain=0.5)
-#             >>> labels = {"img": np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)}
-#             >>> hsv_augmenter(labels)
-#             >>> augmented_img = labels["img"]
-#         """
-#         if random.random() > self.p:
-#             return labels
+    def __repr__(self):
+        return f"RandomHSV(hgain={self.hgain}, sgain={self.sgain}, vgain={self.vgain})"
 
 
-#         if isinstance(labels, dict):
-#             frame1 = labels["img"]
-#             is_pil = False
+class RandomGlitche:
+    """
+    Randomly adjusts the Hue, Saturation, and Value (HSV) channels of an image.
 
-#         elif isinstance(labels, Image.Image):
-#             frame1 = np.asarray(labels)
-#             is_pil = True
+    This class applies random HSV augmentation to images within predefined limits set by hgain, sgain, and vgain.
 
-#         ntsc = self.__generate()
-#         frame1 = ntsc.composite_layer(frame1, frame1, field=0, fieldno=1)
-#         frame1 = cv2.convertScaleAbs(frame1)
-#         frame1[1:-1:2] = frame1[0:-2:2] / 2 + frame1[2::2] / 2
+    Attributes:
+        hgain (float): Maximum variation for hue. Range is typically [0, 1].
+        sgain (float): Maximum variation for saturation. Range is typically [0, 1].
+        vgain (float): Maximum variation for value. Range is typically [0, 1].
 
-#         if is_pil:
-#             labels = Image.fromarray(frame1)
-#         else:
-#             labels["img"] = frame1
+    Methods:
+        __call__: Applies random HSV augmentation to an image.
 
-#         return labels
+    Examples:
+        >>> import numpy as np
+        >>> from ultralytics.data.augment import RandomHSV
+        >>> augmenter = RandomHSV(hgain=0.5, sgain=0.5, vgain=0.5)
+        >>> image = np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)
+        >>> labels = {"img": image}
+        >>> augmented_labels = augmenter(labels)
+        >>> augmented_image = augmented_labels["img"]
+    """
+
+    def __init__(self, p=0.5):
+        self.p = p
+
+    @staticmethod
+    def __generate(seed=None) -> Ntsc:
+        rnd = random.Random(seed)
+        params = {
+            "composite_preemphasis": rnd.triangular(0, 8, 0),
+            "vhs_out_sharpen": rnd.triangular(1, 5, 1.5),
+            "composite_in_chroma_lowpass": rnd.random() < 0.8,
+            "composite_out_chroma_lowpass": rnd.random() < 0.8,
+            "composite_out_chroma_lowpass_lite": rnd.random() < 0.8,
+            "video_chroma_noise": int(rnd.triangular(0, 16384, 2)),
+            "video_chroma_phase_noise": int(rnd.triangular(0, 50, 2)),
+            "video_chroma_loss": int(rnd.triangular(0, 800, 10)),
+            "video_noise": int(rnd.triangular(0, 4200, 2)),
+            "emulating_vhs": rnd.random() < 0.2,
+            "vhs_edge_wave": int(rnd.triangular(0, 5, 0)),
+            "video_scanline_phase_shift": rnd.choice([0, 90, 180, 270]),
+            "video_scanline_phase_shift_offset": rnd.randint(0, 3),
+            "output_vhs_tape_speed": rnd.choice([VHSSpeed.VHS_SP, VHSSpeed.VHS_LP, VHSSpeed.VHS_EP]),
+            "color_bleed_before": 1 == rnd.randint(0, 1),
+            "color_bleed_horiz": int(rnd.triangular(0, 8, 0)),
+            "color_bleed_vert": int(rnd.triangular(0, 8, 0)),
+        }
+
+        # Additional parameters for ringing
+        enable_ringing = rnd.random() < 0.8
+        if enable_ringing:
+            params["ringing"] = rnd.uniform(0.3, 0.7)
+            enable_freq_noise = rnd.random() < 0.8
+            if enable_freq_noise:
+                params["freq_noise_size"] = rnd.uniform(0.5, 0.99)
+                params["freq_noise_amplitude"] = rnd.uniform(0.5, 2.0)
+            params["enable_ringing2"] = rnd.random() < 0.5
+            params["ringing_power"] = rnd.randint(2, 7)
+
+        # Initialize Ntsc class
+        ntsc = Ntsc(random=NumpyRandom(seed))
+        ntsc._composite_preemphasis = params["composite_preemphasis"]
+        ntsc._vhs_out_sharpen = params["vhs_out_sharpen"]
+        ntsc._composite_in_chroma_lowpass = params["composite_in_chroma_lowpass"]
+        ntsc._composite_out_chroma_lowpass = params["composite_out_chroma_lowpass"]
+        ntsc._composite_out_chroma_lowpass_lite = params["composite_out_chroma_lowpass_lite"]
+        ntsc._video_chroma_noise = params["video_chroma_noise"]
+        ntsc._video_chroma_phase_noise = params["video_chroma_phase_noise"]
+        ntsc._video_chroma_loss = params["video_chroma_loss"]
+        ntsc._video_noise = params["video_noise"]
+        ntsc._emulating_vhs = params["emulating_vhs"]
+        ntsc._vhs_edge_wave = params["vhs_edge_wave"]
+        ntsc._video_scanline_phase_shift = params["video_scanline_phase_shift"]
+        ntsc._video_scanline_phase_shift_offset = params["video_scanline_phase_shift_offset"]
+        ntsc._output_vhs_tape_speed = params["output_vhs_tape_speed"]
+        ntsc._color_bleed_before = params["color_bleed_before"]
+        ntsc._color_bleed_horiz = params["color_bleed_horiz"]
+        ntsc._color_bleed_vert = params["color_bleed_vert"]
+
+        if enable_ringing:
+            ntsc._ringing = params["ringing"]
+            if "freq_noise_size" in params:
+                ntsc._freq_noise_size = params["freq_noise_size"]
+                ntsc._freq_noise_amplitude = params["freq_noise_amplitude"]
+            ntsc._enable_ringing2 = params["enable_ringing2"]
+            ntsc._ringing_power = params["ringing_power"]
+
+        return ntsc
+
+    def __call__(self, labels):
+        """
+        Applies random HSV augmentation to an image within predefined limits.
+
+        This method modifies the input image by randomly adjusting its Hue, Saturation, and Value (HSV) channels.
+        The adjustments are made within the limits set by hgain, sgain, and vgain during initialization.
+
+        Args:
+            labels (Dict): A dictionary containing image data and metadata. Must include an 'img' key with
+                the image as a numpy array.
+
+        Returns:
+            (None): The function modifies the input 'labels' dictionary in-place, updating the 'img' key
+                with the HSV-augmented image.
+
+        Examples:
+            >>> hsv_augmenter = RandomHSV(hgain=0.5, sgain=0.5, vgain=0.5)
+            >>> labels = {"img": np.random.randint(0, 255, (100, 100, 3), dtype=np.uint8)}
+            >>> hsv_augmenter(labels)
+            >>> augmented_img = labels["img"]
+        """
+        if random.random() > self.p:
+            return labels
+
+        if isinstance(labels, dict):
+            frame1 = labels["img"]
+            is_pil = False
+
+        elif isinstance(labels, Image.Image):
+            frame1 = np.asarray(labels)
+            is_pil = True
+
+        ntsc = self.__generate()
+        frame1 = ntsc.composite_layer(frame1, frame1, field=0, fieldno=1)
+        frame1 = cv2.convertScaleAbs(frame1)
+        frame1[1:-1:2] = frame1[0:-2:2] / 2 + frame1[2::2] / 2
+
+        if is_pil:
+            labels = Image.fromarray(frame1)
+        else:
+            labels["img"] = frame1
+
+        return labels
+
+    def __repr__(self):
+        return f"RandomGlitche(p={self.p})"
 
 
 class RGB2TIR:
@@ -1921,6 +1941,9 @@ class RGB2TIR:
 
         return labels
 
+    def __repr__(self):
+        return f"RGB2TIR(gamma={self.gamma}, alpha={self.alpha}, beta={self.beta}, clahe_clip={self.clahe_clip}, clahe_tile={self.clahe_tile})"
+
 
 class RandomFlip:
     """
@@ -2014,6 +2037,9 @@ class RandomFlip:
         labels["img"] = np.ascontiguousarray(img)
         labels["instances"] = instances
         return labels
+
+    def __repr__(self):
+        return f"RandomFlip(p={self.p}, direction={self.direction}, flip_idx={self.flip_idx})"
 
 
 class LetterBox:
@@ -2173,6 +2199,9 @@ class LetterBox:
         labels["instances"].add_padding(padw, padh)
         return labels
 
+    def __repr__(self):
+        return f"LetterBox(new_shape={self.new_shape}, auto={self.auto}, scaleFill={self.scaleFill}, scaleup={self.scaleup}, center={self.center}, stride={self.stride})"
+
 
 class CopyPaste(BaseMixTransform):
     """
@@ -2274,6 +2303,9 @@ class CopyPaste(BaseMixTransform):
         labels1["instances"] = instances
         return labels1
 
+    def __repr__(self):
+        return f"CopyPaste(p={self.p}, mode={self.mode})"
+
 
 class Albumentations:
     """
@@ -2291,7 +2323,7 @@ class Albumentations:
         self.transform = None
         self.crop_bg = crop_bg
         assert task in ("detect", "classify", "segment", "pose"), f"Got {task}, expected yolo-like tasks."
-        prefix = colorstr(f"albumentations for {task}: ")
+        self.task = task
 
         if ALBU_AVAILABLE:
             try:
@@ -2424,13 +2456,13 @@ class Albumentations:
                             p=0.1,
                         ),    
                         A.ShotNoise(
-                        scale_range=(0.01, 0.06),
-                        p=0.15 ,
+                            scale_range=(0.01, 0.06),
+                            p=0.15 ,
                         ),
                         A.UnsharpMask(
-                        blur_limit=(3, 5),
-                        sigma_limit=(0.5, 1.0),
-                        p=0.1,
+                            blur_limit=(3, 5),
+                            sigma_limit=(0.5, 1.0),
+                            p=0.1,
                         )
                     ]
 
@@ -2446,10 +2478,9 @@ class Albumentations:
                     if self.contains_spatial
                     else A.Compose(T)
                 )
-                LOGGER.info(prefix + ", ".join(f"{x}".replace("always_apply=False, ", "") for x in T if x.p))
 
             except Exception as e:
-                LOGGER.info(f"{prefix}{e}")
+                LOGGER.info(f"{e}")
         else:
             LOGGER.info("Albumentations is not installed, skip.")
 
@@ -2486,7 +2517,6 @@ class Albumentations:
         """
         if self.transform is None or random.random() > self.p:
             return labels
-        # print(f"[Albumentations start] {labels['img'].shape[0]}x{labels['img'].shape[1]}")
 
         if self.contains_spatial:
             cls = labels["cls"]
@@ -2541,6 +2571,19 @@ class Albumentations:
                 raise TypeError(f"Unexpected type for labels: {type(labels)}")
         
         return labels
+
+    def __repr__(self):
+        lines = [
+            f"{self.__class__.__name__}(",
+            f"    p={self.p}",
+            f"    task='{self.task}'",
+        ]
+        if self.transform is None:
+            lines.append("    transforms=[]")
+        else:
+            lines.append(f"    transforms=[{self.transform.__repr__()}]")
+        lines.append(")")
+        return "\n".join(lines)
 
 
 class Format:
@@ -2768,6 +2811,9 @@ class Format:
 
         return masks, instances, cls
 
+    def __repr__(self):
+        return f"Format(bbox_format={self.bbox_format}, normalize={self.normalize})"
+
 
 class RandomLoadText:
     """
@@ -2954,6 +3000,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
                 mode=hyp.copy_paste_mode,
             )
         )
+
     flip_idx = dataset.data.get("flip_idx", [])  # for keypoints augmentation
     if dataset.use_keypoints:
         kpt_shape = dataset.data.get("kpt_shape", None)
@@ -2973,33 +3020,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         "saturation": hyp.albu_saturation if hasattr(hyp, "albu_saturation") else None,
         "hue": hyp.albu_hue if hasattr(hyp, "albu_hue") else None,
     }
-        
-    # alb = Albumentations(hyp=hyp, p=1.0)
-    # resize = LetterBox(new_shape=(imgsz, imgsz),
-    #                    auto=False,        # строго imgsz×imgsz
-    #                    scaleFill=False,  # паддинги вместо растяжения
-    #                    scaleup=True,      # допускаем upscale
-    #                    center=True)
 
-    # rp = RandomPerspective(degrees=hyp.degrees,
-    #                        translate=hyp.translate,
-    #                        scale=hyp.scale,
-    #                        shear=hyp.shear,
-    #                        perspective=hyp.perspective,
-    #                        border=(0, 0),      # без мозаичных бордеров
-    #                        pre_transform=None) # LetterBox уже применили
-
-    # misc = Compose([
-    #     MixUp(dataset, p=hyp.mixup),
-    #     # CutMix(dataset, p=hyp.cutmix),
-    #     RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
-    #     RandomFlip(direction="vertical",   p=hyp.flipud),
-    #     RandomFlip(direction="horizontal", p=hyp.fliplr,
-    #                flip_idx=dataset.data.get("flip_idx", [])),
-    # ])
-
-    # return Compose([resize, rp, misc])
-    
     return Compose(
         [
             pre_transform,
@@ -3011,7 +3032,6 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
         ]
     )  # transforms
-
 
 
 class CropOrResize:
@@ -3035,10 +3055,14 @@ class CropOrResize:
             return self.resize_transform(labels)
         else:
             return self.crop_transform(labels)
-        
+
+    def __repr__(self):
+        return f"CropOrResize(crop_transform={self.crop_transform}, resize_prob={self.resize_prob}, target_size={self.target_size})"
+
+
 def crop_transforms(dataset, imgsz: int, hyp, stretch=False):
     """
-    Compose из кастомных SAHI-кропов + стандартных аугментаций.
+    Compose for custom SAHI crops + standard augmentations.
     """
 
     albu_args = {
@@ -3092,7 +3116,7 @@ def crop_transforms(dataset, imgsz: int, hyp, stretch=False):
     )
 
     mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, mix_transform=crop_or_resize)
-    pre_transform = Compose([crop_or_resize, mosaic, affine]) # , crop_albu ,affine
+    pre_transform = Compose([crop_or_resize, mosaic, affine])
     
     misc = Compose(
         [
@@ -3104,13 +3128,13 @@ def crop_transforms(dataset, imgsz: int, hyp, stretch=False):
         ]
     )
 
-    transforms = [pre_transform, alb, misc] #[crop_albu, affine, alb, misc]
+    transforms = [pre_transform, alb, misc]
     return Compose(transforms)
 
 
 def crop_val_transforms(dataset, imgsz: int, hyp, stretch=False):
     """
-    Compose из кастомных SAHI-кропов + стандартных аугментаций.
+    Compose for custom SAHI crops + standard augmentations.
     """
     transforms = []
 
@@ -3134,10 +3158,9 @@ def crop_val_transforms(dataset, imgsz: int, hyp, stretch=False):
     )
 
     crop_albu = Albumentations(hyp, transforms=crop_transform, crop_bg=True)
-
     misc = LetterBox(new_shape=(imgsz, imgsz), scaleup=False)
-
     transforms.extend([crop_albu, misc])
+
     return Compose(transforms)
 
 

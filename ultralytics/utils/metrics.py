@@ -203,8 +203,8 @@ class WiseIoULoss(torch.nn.Module):
                                       (1 - interp_coe) * b1_x2 + interp_coe * b2_x2,
                                       (1 - interp_coe) * b1_y2 + interp_coe * b2_y2)
 
-        inter_i = (torch.min(bi_x2, b2_x2) - torch.max(bi_x1, b2_x1)).clamp_(0) * \
-                  (torch.min(bi_y2, b2_y2) - torch.max(bi_y1, b2_y1)).clamp_(0)
+        inter_i = (torch.min(bi_x2, b2_x2) - torch.max(bi_x1, b2_x1)).clamp_min_(0) * \
+                  (torch.min(bi_y2, b2_y2) - torch.max(bi_y1, b2_y1)).clamp_min_(0)
 
         wi, hi = bi_x2 - bi_x1 + 1e-7, bi_y2 - bi_y1 + 1e-7
         w2, h2 = b2_x2 - b2_x1 + 1e-7, b2_y2 - b2_y1 + 1e-7
@@ -214,7 +214,7 @@ class WiseIoULoss(torch.nn.Module):
         return self['iou'] + iou_i - 1
 
     def _d_iterpiou(self, interp_coe=0.98, lv=0.6, hv=0.9):
-        interp_coe = torch.clamp((1 - self['iou'].detach()), min=lv, max=hv)
+        interp_coe = (1 - self['iou'].detach()).clamp(min=lv, max=hv)
         return self._iterpiou(interp_coe)
 
     def __repr__(self):
@@ -322,9 +322,11 @@ def bbox_iou(
     shapeiou=False,
     piouv1=False,
     piouv2=False,
+    interpiou=False,
     eps=1e-7,
     scale=0.0,
     Lambda=1.3,
+    interp_coe=0.98,
 ):
     """
     Calculate Intersection over Union (IoU) of box1(1, 4) to box2(n, 4).
@@ -340,11 +342,13 @@ def bbox_iou(
         eiou (bool, optional): If True, calculate Efficient IoU. Defaults to False.
         siou (bool, optional): If True, calculate Scylla IoU. Defaults to False.
         shapeiou (bool, optional): If True, calculate Shape IoU. Defaults to False.
-        piouv1 (bool, optional): If True, powerfull IoUv1. Defaults to False.
-        piouv2 (bool, optional): If True, powerfull IoUv2. Defaults to False.
+        piouv1 (bool, optional): If True, PowerfullIoUv1. Defaults to False.
+        piouv2 (bool, optional): If True, PowerfullIoUv2. Defaults to False.
+        interpiou (bool, optional): If True, calculate InterpIoU. Defaults to False.
         scale (float, optional): The scale of the shape IoU. Defaults to 0.0.
         Lambda (float, optional): The Lambda of the shape IoU. Defaults to 1.3.
         eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
+        interp_coe (float, optional): The coefficient of the InterpIoU. Defaults to 0.98.
 
     Returns:
         (torch.Tensor): iou, giou, diou, or ciou or eiou or siou or shapeiou or piouv1 or piouv2
@@ -437,6 +441,20 @@ def bbox_iou(
                     q = torch.exp(-P)
                     x = q * Lambda
                     return 1 - 3 * x * torch.exp(-x ** 2) * piou_v1
+            elif interpiou:
+                bi_x1, bi_y1, bi_x2, bi_y2 = ((1 - interp_coe) * b1_x1 + interp_coe * b2_x1,
+                                      (1 - interp_coe) * b1_y1 + interp_coe * b2_y1,
+                                      (1 - interp_coe) * b1_x2 + interp_coe * b2_x2,
+                                      (1 - interp_coe) * b1_y2 + interp_coe * b2_y2)
+                inter_i = (torch.min(bi_x2, b2_x2) - torch.max(bi_x1, b2_x1)).clamp_min_(0) * \
+                        (torch.min(bi_y2, b2_y2) - torch.max(bi_y1, b2_y1)).clamp_min_(0)
+
+                wi, hi = bi_x2 - bi_x1 + eps, bi_y2 - bi_y1 + eps
+                w2, h2 = b2_x2 - b2_x1 + eps, b2_y2 - b2_y1 + eps
+
+                union_i = wi * hi + w2 * h2 - inter_i + eps
+                iou_i = inter_i / union_i
+                return iou + iou_i - 1
             return iou - rho2 / c2  # DIoU
         c_area = cw * ch + eps  # convex area
         return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
@@ -485,7 +503,7 @@ def mask_iou(mask1, mask2, eps=1e-7):
     Returns:
         (torch.Tensor): A tensor of shape (N, M) representing masks IoU.
     """
-    intersection = torch.matmul(mask1, mask2.T).clamp_(0)
+    intersection = torch.matmul(mask1, mask2.T).clamp_min_(0)
     union = (mask1.sum(1)[:, None] + mask2.sum(1)[None]) - intersection  # (area1 + area2) - intersection
     return intersection / (union + eps)
 

@@ -89,6 +89,8 @@ def seed_worker(worker_id):  # noqa
     dataset_obj = worker_info.dataset
     if dataset_obj.transforms is None:
         dataset_obj.transforms = dataset_obj.build_transforms(hyp=dataset_obj._hyp_for_transforms)
+    if worker_id == 0:
+        LOGGER.info(f'{colorstr("Transforms: ")}{dataset_obj.transforms}')
 
 
 def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, stride=32, multi_modal=False):
@@ -118,7 +120,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         augment=mode == "train",  # augmentation
         sahi=cfg.sahi,
         hyp=cfg,  # TODO: probably add a get_hyps_from_cfg function
-        rect=cfg.rect or rect,  # rectangular batches
+        rect=(cfg.rect or rect) and not cfg.sahi,  # rectangular batches
         cache=cfg.cache or None,
         single_cls=cfg.single_cls or False,
         stride=int(stride),

@@ -764,6 +764,25 @@ def cuda_is_available() -> bool:
     return cuda_device_count() > 0
 
 
+def truncate_middle(text: str, max_length: int = 50) -> str:
+    """
+    Truncate a string to a maximum length, keeping the middle part.
+
+    Args:
+        text (str): The string to truncate.
+        max_length (int): The maximum length of the string.
+
+    Returns:
+        (str): The truncated string.
+    """
+    if len(text) <= max_length:
+        return text
+    keep = max_length - 3
+    head = keep // 2
+    tail = keep - head
+    return f"{text[:head]}...{text[-tail:]}"
+
+
 # Define constants
 IS_PYTHON_MINIMUM_3_10 = check_python("3.10", hard=False)
 IS_PYTHON_3_12 = PYTHON_VERSION.startswith("3.12")

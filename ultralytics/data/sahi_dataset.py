@@ -9,7 +9,6 @@ import numpy as np
 import numba as nb
 
 from ultralytics.utils import NUM_THREADS, LOGGER, TQDM, colorstr
-from ultralytics.utils.checks import to_tuple
 
 from .augment import Compose, Format, LetterBox, crop_transforms, crop_val_transforms, v8_transforms
 from .dataset import YOLODataset
@@ -208,7 +207,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
                 self.overlap_ratio,
             )
             
-            return idx, coordinates
+            return idx, np.stack(coordinates, axis=1)
 
         @lru_cache(maxsize=64)
         @nb.jit(
@@ -221,7 +220,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
             imgsz: tuple[int, int],
             crop_size: tuple[int, int],
             overlap_ratio: float,
-        ) -> Tuple[int, int]:
+        ) -> int:
             """
             Calculate the number of slices for an image.
 
@@ -235,6 +234,10 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
             """
             img_h, img_w = imgsz
             crop_h, crop_w = crop_size
+
+            if img_h <= crop_h and img_w <= crop_w:
+                return 1
+
             overlap_h, overlap_w = int(overlap_ratio * crop_h), int(overlap_ratio * crop_w)
 
             # stride is how far the sliding window moves each step
@@ -242,8 +245,8 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
             stride_w = crop_w - overlap_w
 
             # number of window positions in each direction
-            n_h = math.ceil((img_h - crop_h) / stride_h) + 1
-            n_w = math.ceil((img_w - crop_w) / stride_w) + 1
+            n_h = max(math.ceil((img_h - crop_h) / stride_h) + 1, 1)
+            n_w = max(math.ceil((img_w - crop_w) / stride_w) + 1, 1)
 
             return n_h * n_w
 
@@ -275,22 +278,20 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
             pbar = TQDM(results, total=self.ni, desc=desc)
             for idx, calculated_data in pbar:
                 if self.cut_strategy == "random_crop":
-                    total_grid_slices = calculated_data  # calculated_data is the slice count
-                    sampled_slices = max(1, round(total_grid_slices * self.sampling_rate))
+                    sampled_slices = max(1, round(calculated_data * self.sampling_rate))
                     slice_indices.extend([(idx, s) for s in range(sampled_slices)])
                     slices_per_image.append(sampled_slices)
                 else:  # grid
-                    image_slice_coords = calculated_data  # calculated_data is the list of coords
-                    for s_idx, coords in enumerate(image_slice_coords):
-                        slice_indices.append((idx, s_idx, np.stack(coords)))
-                    slices_per_image.append(len(image_slice_coords))
+                    for s_idx, coords in enumerate(calculated_data):
+                        slice_indices.append((idx, s_idx, coords))
+                    slices_per_image.append(len(calculated_data))
 
                 # Store statistics
                 avg_slices = sum(slices_per_image) / len(slices_per_image)
                 min_slices = min(slices_per_image)
                 max_slices = max(slices_per_image)
 
-                pbar.desc = f"{desc}: min {min_slices}, max {max_slices}, avg {avg_slices:.2f} per image."
+                pbar.desc = f"{desc}: min {min_slices}, max {max_slices}, avg {avg_slices:.2f} per image"
 
             pbar.close()
 
@@ -329,6 +330,8 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         labels = deepcopy(self.labels[img_idx])
 
         slice_im = im[start_y:end_y, start_x:end_x]
+        if slice_im.shape[0] == 0 or slice_im.shape[1] == 0:
+            raise ValueError(f"Slice image is empty. Image size: {im.shape}, slice coords: {slice_bbox_coords}, overlap_ratio: {self.overlap_ratio}")
         slice_bbox = [start_x, start_y, end_x, end_y]
 
         slice_labels = self._filter_and_transform_annotations(labels, slice_bbox, h0, w0)

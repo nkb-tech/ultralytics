@@ -18,13 +18,8 @@ M_PI = math.pi
 Int_MIN_VALUE = -2147483648
 Int_MAX_VALUE = 2147483647
 
-ring_pattern_real_path = 'ringPattern.npy'
 
-ring_pattern_path = Path(ring_pattern_real_path)
-RingPattern = np.load(str(ring_pattern_path.resolve()))
-
-
-def ringing(img2d, alpha=0.5, noiseSize=0, noiseValue=2, clip=True, seed=None):
+def ringing(img2d: np.ndarray, alpha=0.5, noiseSize=0, noiseValue=2, clip=True, seed=None):
     """
     https://bavc.github.io/avaa/artifacts/ringing.html
     :param img2d: 2d image
@@ -59,7 +54,7 @@ def ringing(img2d, alpha=0.5, noiseSize=0, noiseValue=2, clip=True, seed=None):
         return img_back[:, :, 0]
 
 
-def ringing2(img2d, power=4, shift=0, clip=True):
+def ringing2(img2d: np.ndarray, ring_pattern: np.ndarray, power=4, shift=0, clip=True):
     """
     https://bavc.github.io/avaa/artifacts/ringing.html
     :param img2d: 2d image
@@ -69,10 +64,10 @@ def ringing2(img2d, power=4, shift=0, clip=True):
     dft = cv2.dft(np.float32(img2d), flags=cv2.DFT_COMPLEX_OUTPUT)
     dft_shift = np.fft.fftshift(dft)
 
-    rows, cols = img2d.shape
+    _, cols = img2d.shape
 
     scalecols = int(cols * (1 + shift))
-    mask = cv2.resize(RingPattern[np.newaxis, :], (scalecols, 1), interpolation=cv2.INTER_LINEAR)[0]
+    mask = cv2.resize(ring_pattern[np.newaxis, :], (scalecols, 1), interpolation=cv2.INTER_LINEAR)[0]
 
     mask = mask[(scalecols // 2) - (cols // 2):(scalecols // 2) + (cols // 2)]
     mask = mask ** power
@@ -284,7 +279,7 @@ class Ntsc:
     # https://en.wikipedia.org/wiki/NTSC
     NTSC_RATE = 315000000.00 / 88 * 4  # 315/88 Mhz rate * 4
 
-    def __init__(self, precise=False, random=None):
+    def __init__(self, precise=False, random=None, ring_pattern_path: str="../assets/ringPattern.npy"):
         self.precise = precise
         self.random = random if random is not None else XorWowRandom(31374242, 0)
         self._composite_preemphasis_cut = 1000000.0
@@ -294,6 +289,8 @@ class Ntsc:
         self._vhs_out_sharpen = 1.5  # 1.0..5.0
 
         self._vhs_edge_wave = 0  # 0..10
+
+        self.ring_pattern = np.load(str(Path(ring_pattern_path).resolve()))
 
         self._vhs_head_switching = False  # turn this on only on frames height 486 pixels or more
         self._head_switching_speed = 0  # 0..100 this is /1000 increment for _vhs_head_switching_point 0 is static
@@ -716,9 +713,9 @@ class Ntsc:
             I[field::2] = ringing(I[field::2], self._ringing, noiseSize=sz, noiseValue=amp, clip=False)
             Q[field::2] = ringing(Q[field::2], self._ringing, noiseSize=sz, noiseValue=amp, clip=False)
         else:
-            Y[field::2] = ringing2(Y[field::2], power=self._ringing_power, shift=shift, clip=False)
-            I[field::2] = ringing2(I[field::2], power=self._ringing_power, shift=shift, clip=False)
-            Q[field::2] = ringing2(Q[field::2], power=self._ringing_power, shift=shift, clip=False)
+            Y[field::2] = ringing2(Y[field::2], self.ring_pattern, power=self._ringing_power, shift=shift, clip=False)
+            I[field::2] = ringing2(I[field::2], self.ring_pattern, power=self._ringing_power, shift=shift, clip=False)
+            Q[field::2] = ringing2(Q[field::2], self.ring_pattern, power=self._ringing_power, shift=shift, clip=False)
 
 
 def initialize_ntsc(seed=None):

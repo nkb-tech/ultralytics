@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ultralytics.utils import LOGGER
+from ultralytics.utils import LOGGER, colorstr
 
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
@@ -73,9 +73,9 @@ class DistillationLoss(nn.Module):
         return self.alpha * loss
 
 
-class QualityfocalLoss(nn.Module):
+class QualityFocalLoss(nn.Module):
     """
-    Quality focal loss by Xiang et al.
+    Quality Focal Loss by Xiang et al.
 
     https://arxiv.org/abs/2006.04388.
     """
@@ -105,7 +105,7 @@ class QualityfocalLoss(nn.Module):
         cls_iou_targets, targets_onehot_pos = self.preprocess(pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask)
         
         # negatives are supervised by 0 quality score
-        pred_sigmoid = pred_scores.sigmoid()
+        pred_sigmoid = pred_scores.float().sigmoid()
         scale_factor = pred_sigmoid
         zerolabel = torch.zeros_like(pred_scores)
 
@@ -118,6 +118,7 @@ class QualityfocalLoss(nn.Module):
             ) * scale_factor.pow(beta)
         scale_factor = cls_iou_targets[targets_onehot_pos] - pred_sigmoid[targets_onehot_pos]
         with autocast(enabled=False):
+            # print(loss.dtype, pred_scores.dtype, cls_iou_targets.dtype, scale_factor.dtype)
             loss[targets_onehot_pos] = F.binary_cross_entropy_with_logits(
                 pred_scores[targets_onehot_pos],
                 cls_iou_targets[targets_onehot_pos],
@@ -231,7 +232,7 @@ class BboxLoss(nn.Module):
         self.nwd_loss = nwd_loss
         self.iou_loss_fn = iou_loss_fn.lower()
         self.iou_ratio = iou_ratio
-        assert self.iou_loss_fn in ('wiou', 'eiou', 'giou', 'diou', 'ciou', 'siou', 'shapeiou', 'piouv1', 'piouv2'), \
+        assert self.iou_loss_fn in ('wiou', 'eiou', 'giou', 'diou', 'ciou', 'siou', 'shapeiou', 'piouv1', 'piouv2', 'interpiou'), \
              f"Invalid IoU loss function: {self.iou_loss_fn}"
 
         self.wiou_loss = WiseIoULoss(
@@ -329,7 +330,7 @@ class v8DetectionLoss:
         use_wiseiou: bool = False,
         iou_ratio: float = 0.5,
     ):  # model must be de-paralleled
-        """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
+        """Initializes v8DetectionLoss with the model, defining model-related properties."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
 
@@ -354,10 +355,9 @@ class v8DetectionLoss:
             elif clf_loss_fn == "vfl":
                 cls_loss_fn = VarifocalLoss
             elif clf_loss_fn == "qfl":
-                cls_loss_fn = QualityfocalLoss
+                cls_loss_fn = QualityFocalLoss
             cls_losses.append(cls_loss_fn(reduction="none", weight=self.clf_loss_weights[i]))
         self.cls_losses = nn.ModuleList(cls_losses)
-        LOGGER.info(f"Using {clf_loss_fn} loss for classification.")
 
         self.hyp = h
         self.stride = m.stride  # model strides
@@ -381,7 +381,7 @@ class v8DetectionLoss:
             use_wiseiou=use_wiseiou,
             iou_ratio=iou_ratio,
         ).to(device)
-        LOGGER.info(f"Using {iou_loss_fn} loss for BBox Regression.")
+        LOGGER.info(f"{colorstr('Using losses')}: {clf_loss_fn} loss & {iou_loss_fn} loss.")
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets, batch_size, scale_tensor):

@@ -228,7 +228,6 @@ class BaseTrainer:
         """Initializes and sets the DistributedDataParallel parameters for training."""
         torch.cuda.set_device(RANK)
         self.device = torch.device("cuda", RANK)
-        # LOGGER.info(f'DDP info: RANK {RANK}, WORLD_SIZE {world_size}, DEVICE {self.device}')
         os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"  # set to enforce timeout
         dist.init_process_group(
             backend="nccl" if dist.is_nccl_available() else "gloo",
@@ -351,14 +350,24 @@ class BaseTrainer:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
         # Weighted loss (for classify task)
-        if self.args.weighted_loss and self.args.task == "classify":
-            weights = self.train_loader.dataset.calculate_weights(0.5)
-            weights = torch.tensor([weights[k] for k in sorted(weights)], device=self.device, dtype=torch.float)
-            LOGGER.info(f'Classify loss weights = {weights}')
-            if world_size > 1:
-                self.model.criterion = self.model.module.init_criterion(weights)
-            else:
-                self.model.criterion = self.model.init_criterion(weights)
+        loss_weights = None
+        if self.args.weighted_loss:
+            loss_weights = self.train_loader.dataset.calculate_weights(0.5)
+            loss_weights = torch.tensor([loss_weights[k] for k in sorted(loss_weights)], device=self.device, dtype=torch.float)
+            LOGGER.info(f'Loss weights for {self.args.task} task = {loss_weights}')
+
+        # Initialize criterion
+        if world_size > 1:
+            criterion = self.model.module.init_criterion(weights=loss_weights)
+            self.model.module.criterion = criterion
+        else:
+            criterion = self.model.init_criterion(weights=loss_weights)
+            self.model.criterion = criterion
+
+        if getattr(self, "ema", None):
+            ema_model = getattr(self.ema, "ema", None)
+            if ema_model is not None:
+                ema_model.criterion = criterion
 
         nb = len(self.train_loader)  # number of batches
         nw = max(round(self.args.warmup_epochs * nb), 100) if self.args.warmup_epochs > 0 else -1  # warmup iterations
@@ -416,11 +425,6 @@ class BaseTrainer:
                     batch = self.preprocess_batch(batch)
                     if self.args.teacher is not None:
                         model_out = self.model(batch['img'])
-                        if getattr(self.model, "criterion", None) is None:
-                            if world_size > 1:
-                                self.model.criterion = self.model.module.init_criterion()
-                            else:
-                                self.model.criterion = self.model.init_criterion()
                         self.loss, self.loss_items = self.model.criterion(model_out, batch)
                     else:
                         self.loss, self.loss_items = self.model(batch)
