@@ -409,10 +409,6 @@ class BaseMixTransform:
             for i, data in enumerate(mix_labels):
                 mix_labels[i] = self.pre_transform(data)
         
-        if hasattr(self, 'mix_transform') and self.mix_transform is not None:
-            for i, data in enumerate(mix_labels):
-                mix_labels[i] = self.mix_transform(data)
-        
         labels["mix_labels"] = mix_labels
 
         # Update cls and texts
@@ -515,6 +511,7 @@ class Mosaic(BaseMixTransform):
         p (float): Probability of applying the mosaic augmentation. Must be in the range 0-1.
         n (int): The grid size, either 4 (for 2x2) or 9 (for 3x3).
         border (Tuple[int, int]): Border size for width and height.
+        pre_transform (Callable | None): Optional transform to apply before MixUp.
 
     Methods:
         get_indexes: Returns a list of random indexes from the dataset.
@@ -532,7 +529,7 @@ class Mosaic(BaseMixTransform):
         >>> augmented_labels = mosaic_aug(original_labels)
     """
 
-    def __init__(self, dataset, imgsz=640, p=1.0, n=4, mix_transform=None):
+    def __init__(self, dataset, imgsz=640, p=1.0, n=4, pre_transform=None):
         """
         Initializes the Mosaic augmentation object.
 
@@ -544,7 +541,6 @@ class Mosaic(BaseMixTransform):
             imgsz (int): Image size (height and width) after mosaic pipeline of a single image.
             p (float): Probability of applying the mosaic augmentation. Must be in the range 0-1.
             n (int): The grid size, either 4 (for 2x2) or 9 (for 3x3).
-            mix_transform (Callable, optional): Transform to apply to each image before mosaic.
             This is useful for applying crop transforms to mix_labels.
         Examples:
             >>> from ultralytics.data.augment import Mosaic
@@ -553,11 +549,10 @@ class Mosaic(BaseMixTransform):
         """
         assert 0 <= p <= 1.0, f"The probability should be in range [0, 1], but got {p}."
         assert n in {4, 9}, "grid must be equal to 4 or 9."
-        super().__init__(dataset=dataset, p=p)
+        super().__init__(dataset=dataset, p=p, pre_transform=pre_transform)
         self.imgsz = imgsz
         self.border = (-imgsz // 2, -imgsz // 2)  # width, height
         self.n = n
-        self.mix_transform = mix_transform
 
     def get_indexes(self, buffer=True):
         """
@@ -609,13 +604,31 @@ class Mosaic(BaseMixTransform):
         """
         assert labels.get("rect_shape", None) is None, "rect and mosaic are mutually exclusive."
         assert len(labels.get("mix_labels", [])), "There are no other images for mosaic augment."
-        # print(f"DEBUG _mix_transform: main image shape: {labels['img'].shape}, resized_shape: {labels.get('resized_shape', 'N/A')}")
-        # if 'mix_labels' in labels:
-        #     for idx, mix_label in enumerate(labels['mix_labels']):
-        #         print(f"  mix_label[{idx}] image shape: {mix_label['img'].shape}, resized_shape: {mix_label.get('resized_shape', 'N/A')}")
         return (
             self._mosaic3(labels) if self.n == 3 else self._mosaic4(labels) if self.n == 4 else self._mosaic9(labels)
         )  # This code is modified for mosaic3 method.
+
+    def _get_image_dimensions(self, labels_patch):
+        """
+        Extract and update image dimensions from labels.
+        
+        Args:
+            labels_patch (Dict): Dictionary containing image and labels.
+            
+        Returns:
+            tuple: Height, width and image array.
+        """
+        img = labels_patch["img"]
+        actual_h, actual_w = img.shape[:2]
+        stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
+        
+        if (actual_h, actual_w) != (stored_h, stored_w):
+            h, w = actual_h, actual_w
+            labels_patch["resized_shape"] = (h, w)
+        else:
+            h, w = labels_patch.pop("resized_shape")
+        
+        return h, w, img
 
     def _mosaic3(self, labels):
         """
@@ -649,16 +662,8 @@ class Mosaic(BaseMixTransform):
         for i in range(3):
             labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
             # Load image
-            img = labels_patch["img"]
+            h, w, img = self._get_image_dimensions(labels_patch)
 
-            actual_h, actual_w = img.shape[:2]
-            stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
-        
-            if (actual_h, actual_w) != (stored_h, stored_w):
-                h, w = actual_h, actual_w
-                labels_patch["resized_shape"] = (h, w)
-            else:
-                h, w = labels_patch.pop("resized_shape")
             # Place img in img3
             if i == 0:  # center
                 img3 = np.full((s * 3, s * 3, img.shape[2]), 114, dtype=np.uint8)  # base image with 3 tiles
@@ -673,7 +678,6 @@ class Mosaic(BaseMixTransform):
             x1, y1, x2, y2 = (max(x, 0) for x in c)  # allocate coords
 
             img3[y1:y2, x1:x2] = img[y1 - padh :, x1 - padw :]  # img3[ymin:ymax, xmin:xmax]
-            # hp, wp = h, w  # height, width previous for next iteration
 
             # Labels assuming imgsz*2 mosaic size
             labels_patch = self._update_labels(labels_patch, padw + self.border[0], padh + self.border[1])
@@ -713,16 +717,7 @@ class Mosaic(BaseMixTransform):
         for i in range(4):
             labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
             # Load image
-            img = labels_patch["img"]
-            
-            actual_h, actual_w = img.shape[:2]
-            stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
-        
-            if (actual_h, actual_w) != (stored_h, stored_w):
-                h, w = actual_h, actual_w
-                labels_patch["resized_shape"] = (h, w)
-            else:
-                h, w = labels_patch.pop("resized_shape")
+            h, w, img = self._get_image_dimensions(labels_patch)
             
             # Place img in img4
             if i == 0:  # top left
@@ -781,16 +776,8 @@ class Mosaic(BaseMixTransform):
         for i in range(9):
             labels_patch = labels if i == 0 else labels["mix_labels"][i - 1]
             # Load image
-            img = labels_patch["img"]
-
-            actual_h, actual_w = img.shape[:2]
-            stored_h, stored_w = labels_patch.get("resized_shape", (actual_h, actual_w))
-        
-            if (actual_h, actual_w) != (stored_h, stored_w):
-                h, w = actual_h, actual_w
-                labels_patch["resized_shape"] = (h, w)
-            else:
-                h, w = labels_patch.pop("resized_shape")
+            h, w, img = self._get_image_dimensions(labels_patch)
+            
             # Place img in img9
             if i == 0:  # center
                 img9 = np.full((s * 3, s * 3, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
@@ -1511,120 +1498,6 @@ class CutMix(BaseMixTransform):
         return f"CutMix(p={self.p}, beta={self.beta})"
 
 
-class CutMix(BaseMixTransform):
-    """
-    Applies CutMix augmentation to image datasets as described in the paper https://arxiv.org/abs/1905.04899.
-
-    CutMix combines two images by replacing a random rectangular region of one image with the corresponding region from another image,
-    and adjusts the labels proportionally to the area of the mixed region.
-
-    Attributes:
-        dataset (Any): The dataset to which CutMix augmentation will be applied.
-        pre_transform (Callable | None): Optional transform to apply before CutMix.
-        p (float): Probability of applying CutMix augmentation.
-        beta (float): Beta distribution parameter for sampling the mixing ratio (default=1.0).
-
-    Methods:
-        get_indexes: Returns a random index from the dataset.
-        _mix_transform: Applies CutMix augmentation to the input labels.
-        _rand_bbox: Generates random bounding box coordinates for the cut region.
-
-    Examples:
-        >>> from ultralytics.data.augment import CutMix
-        >>> dataset = YourDataset(...)  # Your image dataset
-        >>> cutmix = CutMix(dataset, p=0.5)
-        >>> augmented_labels = cutmix(original_labels)
-    """
-
-    def __init__(self, dataset, pre_transform=None, p=0.0, beta=1.0) -> None:
-        """
-        Initializes the CutMix augmentation object.
-
-        Args:
-            dataset (Any): The dataset to which CutMix augmentation will be applied.
-            pre_transform (Callable | None): Optional transform to apply before CutMix.
-            p (float): Probability of applying CutMix augmentation.
-            beta (float): Beta distribution parameter for sampling the mixing ratio (default=1.0).
-        """
-        super().__init__(dataset=dataset, pre_transform=pre_transform, p=p)
-        self.beta = beta
-
-    def get_indexes(self):
-        """
-        Get a random index from the dataset.
-
-        Returns:
-            (int): A random integer index within the range of the dataset length.
-        """
-        return random.randint(0, len(self.dataset) - 1)
-
-    def _rand_bbox(self, width, height, lam):
-        """
-        Generates random bounding box coordinates for the cut region.
-
-        Args:
-            width (int): Width of the image.
-            height (int): Height of the image.
-            lam (float): Mixing ratio from the Beta distribution.
-
-        Returns:
-            (tuple): (x1, y1, x2, y2) coordinates of the bounding box.
-        """
-        cut_ratio = np.sqrt(1.0 - lam)
-        cut_w = int(width * cut_ratio)
-        cut_h = int(height * cut_ratio)
-
-        # Random center
-        cx = np.random.randint(width)
-        cy = np.random.randint(height)
-
-        # Bounding box coordinates
-        x1 = np.clip(cx - cut_w // 2, 0, width)
-        y1 = np.clip(cy - cut_h // 2, 0, height)
-        x2 = np.clip(cx + cut_w // 2, 0, width)
-        y2 = np.clip(cy + cut_h // 2, 0, height)
-
-        return x1, y1, x2, y2
-
-    def _mix_transform(self, labels):
-        """
-        Applies CutMix augmentation to the input labels.
-
-        Args:
-            labels (dict): A dictionary containing the original image and label information.
-
-        Returns:
-            (dict): A dictionary containing the mixed image and adjusted labels.
-
-        Examples:
-            >>> cutter = CutMix(dataset)
-            >>> mixed_labels = cutter._mix_transform(labels)
-        """
-        # Sample mixing ratio from Beta distribution
-        lam = np.random.beta(self.beta, self.beta)
-
-        # Get a random second image
-        labels2 = labels["mix_labels"][0]
-        img2 = labels2["img"]
-        h, w = labels["img"].shape[:2]
-
-        # Generate random bounding box
-        x1, y1, x2, y2 = self._rand_bbox(w, h, lam)
-
-        # Apply CutMix
-        labels["img"][y1:y2, x1:x2] = img2[y1:y2, x1:x2]
-
-        # Adjust lambda to match the actual area ratio
-        lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
-
-        labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], axis=0)
-        labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
-        return labels
-
-    def __repr__(self):
-        return f"CutMix(p={self.p}, beta={self.beta})"
-
-
 class RandomHSV:
     """
     Randomly adjusts the Hue, Saturation, and Value (HSV) channels of an image.
@@ -2126,7 +1999,6 @@ class LetterBox:
             labels = {}
         img = labels.get("img") if image is None else image
         shape = img.shape[:2]  # current shape [height, width]
-        # print(f"[LetterBox]  in  {shape[0]}x{shape[1]}")
         new_shape = labels.pop("rect_shape", self.new_shape)
         if isinstance(new_shape, int):
             new_shape = (new_shape, new_shape)
@@ -2162,7 +2034,6 @@ class LetterBox:
             labels["ratio_pad"] = (labels["ratio_pad"], (left, top))  # for evaluation
 
         if len(labels):
-            # print(f"[LetterBox]  out {img.shape[0]}x{img.shape[1]}")
             labels = self._update_labels(labels, ratio, dw, dh)
             labels["img"] = img
             labels["resized_shape"] = new_shape
@@ -2494,21 +2365,12 @@ class Albumentations:
         Args:
             labels (Dict): A dictionary containing image data and annotations. Expected keys are:
                 - 'img': numpy.ndarray representing the image
-                - 'cls': numpy.ndarray of class labels
+                - 'cls': numpy.ndarray of class labels. Can be 1D for single-task (e.g., [class1, class2])
+                         or 2D for multi-task (e.g., [[main_class1, attr1, attr2], [main_class2, attr3, attr4]]).
                 - 'instances': object containing bounding boxes and other instance information
 
         Returns:
             (Dict): The input dictionary with augmented image and updated annotations.
-
-        Examples:
-            >>> transform = Albumentations(p=0.5)
-            >>> labels = {
-            ...     "img": np.random.rand(640, 640, 3),
-            ...     "cls": np.array([0, 1]),
-            ...     "instances": Instances(bboxes=np.array([[0, 0, 1, 1], [0.5, 0.5, 0.8, 0.8]])),
-            ... }
-            >>> augmented = transform(labels)
-            >>> assert augmented["img"].shape == (640, 640, 3)
 
         Notes:
             - The method applies transformations with probability self.p.
@@ -2526,18 +2388,24 @@ class Albumentations:
                 labels["instances"].normalize(*im.shape[:2][::-1])
                 bboxes = labels["instances"].bboxes
                 
+                # Multi-task format (2D array)
                 if isinstance(cls, np.ndarray) and cls.ndim > 1:
+                    # Store the original full labels
                     cls_full = cls.copy()
+                    # Albumentations' accepts only a simple list of classes. 
+                    # Extract primary class
                     cls_for_albu = cls[:, 0].astype(int).tolist()
                 else:
+                    # Single-task case
                     cls_full = None
                     cls_for_albu = cls.tolist() if isinstance(cls, np.ndarray) else cls
                 
                 new = self.transform(image=im, bboxes=bboxes, class_labels=cls_for_albu)
-                
+
+                # Update labels only if some objects remain after augmentation (e.g., cropping)
                 if len(new["class_labels"]) > 0 or self.crop_bg:
                     labels["img"] = new["image"]
-                    
+                    # Reconstruct multi task labels
                     if cls_full is not None:
                         new_cls_main = np.array(new["class_labels"])
                         cls_to_attr = {}
@@ -2545,8 +2413,10 @@ class Albumentations:
                             main_cls = int(cls_full[i, 0])
                             if main_cls not in cls_to_attr:
                                 cls_to_attr[main_cls] = []
+                            # Store the additional classes
                             cls_to_attr[main_cls].append(cls_full[i, 1:])
-                        
+
+                        # Reconstruct the full label for the objects that survived the augmentation
                         new_cls_full = []
                         for main_cls in new_cls_main:
                             main_cls = int(main_cls)
@@ -2555,21 +2425,21 @@ class Albumentations:
                                 new_cls_full.append([main_cls] + attrs.tolist())
                             else:
                                 new_cls_full.append([main_cls] + [0] * (cls_full.shape[1] - 1))
-                        
+
                         labels["cls"] = np.array(new_cls_full, dtype=cls_full.dtype)
                     else:
+                        # Standard single-task case: simply update with the new list of classes.
                         labels["cls"] = np.array(new["class_labels"])
                     
                     bboxes = np.array(new["bboxes"], dtype=np.float32)
                     labels["instances"].update(bboxes=bboxes)
-        else:
+        else: # Non-spatial transforms
             if isinstance(labels, dict):
                 labels["img"] = self.transform(image=labels["img"])["image"]
             elif isinstance(labels, Image.Image):
                 labels = Image.fromarray(self.transform(image=np.asarray(labels))["image"])
             else:
                 raise TypeError(f"Unexpected type for labels: {type(labels)}")
-        
         return labels
 
     def __repr__(self):
@@ -2583,6 +2453,7 @@ class Albumentations:
         else:
             lines.append(f"    transforms=[{self.transform.__repr__()}]")
         lines.append(")")
+
         return "\n".join(lines)
 
 
@@ -3115,8 +2986,8 @@ def crop_transforms(dataset, imgsz: int, hyp, stretch=False):
         pre_transform=LetterBox(new_shape=(imgsz, imgsz)),
     )
 
-    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, mix_transform=crop_or_resize)
-    pre_transform = Compose([crop_or_resize, mosaic, affine])
+    mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, pre_transform=crop_or_resize)
+    pre_transform = Compose([crop_or_resize, mosaic, affine]) # , crop_albu ,affine
     
     misc = Compose(
         [
@@ -3197,20 +3068,6 @@ def classify_transforms(
     """
     import torchvision.transforms as T  # scope for faster 'import ultralytics'
 
-    # if isinstance(size, (tuple, list)):
-    #     assert len(size) == 2, f"'size' tuples must be length 2, not length {len(size)}"
-    #     scale_size = tuple(math.floor(x / crop_fraction) for x in size)
-    # else:
-    #     scale_size = math.floor(size / crop_fraction)
-    #     scale_size = (scale_size, scale_size)
-
-    # # Aspect ratio is preserved, crops center within image, no borders are added, image is lost
-    # if scale_size[0] == scale_size[1]:
-    #     # Simple case, use torchvision built-in Resize with the shortest edge mode (scalar size arg)
-    #     tfl = [T.Resize(scale_size[0], interpolation=getattr(T.InterpolationMode, interpolation))]
-    # else:
-    #     # Resize the shortest edge to matching target dim for non-square target
-    #     tfl = [T.Resize(scale_size)]
     tfl = []
     size = (size, size) if isinstance(size, int) else size
     tfl.extend(

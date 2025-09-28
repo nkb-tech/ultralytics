@@ -2,14 +2,9 @@ import random
 from typing import Any
 import numpy as np
 
-try:
-    import albumentations as A
-
-    ALBU_AVAILABLE = True
-    from albumentations import AtLeastOneBBoxRandomCrop
-    from albumentations.core.transforms_interface import DualTransform
-except:
-    ALBU_AVAILABLE = False
+import albumentations as A
+from albumentations import AtLeastOneBBoxRandomCrop
+from albumentations.core.transforms_interface import DualTransform
 
 
 class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):

@@ -471,7 +471,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
                 mask_ratio=hyp.mask_ratio if hyp else 0.5,
                 mask_overlap=hyp.overlap_mask if hyp else False,
                 bgr=hyp.bgr if hyp and self.augment else 0.0,
-                n_cls_tasks=len(self.nc),
+                n_cls_tasks=1 if self.single_cls else len(self.nc),
             )
         )
 

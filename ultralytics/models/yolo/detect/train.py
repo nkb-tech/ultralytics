@@ -86,12 +86,8 @@ class DetectionTrainer(BaseTrainer):
         # Подготовка nc и names для модели
         if self.args.single_cls:
             # single_cls case
-            if isinstance(self.data["nc"], list):
-                model_nc = [1] + self.data["nc"][1:]  # [1, nc2, nc3, ...]
-                model_names = [{0: "object"}] + self.data["names"][1:]
-            else:
-                model_nc = 1
-                model_names = {0: "object"}
+            model_nc = 1
+            model_names = {0: "object"}
         else:
             model_nc = self.data["nc"]
             model_names = self.data["names"]
@@ -108,8 +104,6 @@ class DetectionTrainer(BaseTrainer):
     
         if self.args.single_cls:
             nc = [1]
-            if isinstance(self.data["nc"], list) and len(self.data["nc"]) > 1:
-                nc.extend(self.data["nc"][1:])
         else:
             nc = self.data["nc"]
 

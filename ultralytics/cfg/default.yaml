@@ -16,7 +16,7 @@ min_bbox: 20 # (int) min size of original bbox for detect task
 min_imgsz: 25 # (int) min size of original image
 save: True # (bool) save train checkpoints and predict results
 save_period: -1 # (int) Save checkpoint every x epochs (disabled if < 1)
-cache: False # (bool) True/ram, low-ram, disc or False. Use cache for data loading. Use low-ram if you have unsufficient ram memory, but want better speed than False variant
+cache: False # (bool) True/ram, low-ram, disk or False. Use cache for data loading. Use low-ram if you have unsufficient ram memory, but want better speed than False variant
 device: # (int | str | list, optional) device to run on, i.e. cuda device=0 or device=0,1,2,3 or device=cpu
 workers: 8 # (int) number of worker threads for data loading (per RANK if DDP)
 project: # (str, optional) project name
@@ -132,11 +132,12 @@ auto_augment: randaugment # (str) auto augmentation policy for classification (r
 erasing: 0.4 # (float) probability of random erasing during classification training (0-0.9), 0 means no erasing, must be less than 1.0.
 crop_fraction: 1.0 # (float) image crop fraction for classification (0.1-1), 1.0 means no crop, must be greater than 0.
 
-#RandomPerspectiveAugs
-aspect_ratio_thr: 100 # aspect ratio threshold after RandomPerspective augmentation
+# params for box filtration after RandomPerspectiveAug (become too small or with unusual aspect_ratio)
+aspect_ratio_thr: 100 # aspect ratio threshold for bboxes after RandomPerspective augmentation
 wh_thr: 5 # after RandomPerspective width and height threshold in pixels. Boxes smaller than this in either dimension are rejected.
-area_thr: 0.1 # after RandomPerspective area ratio threshold. Boxes with an area ratio (new/old) less than this value are rejected.
-# Albumentations
+area_thr: 0.1 # Boxes with an area ratio = (new_area/old_area) less than this value are rejected after RandomPerspectiveAug
+
+# Albumentations  settings TODO: separate config ------------------------------------------------------------------------------------------------------
 albu_dropout_prob: 0.1
 albu_quality_lower: 75
 albu_max_factor: 1.1
@@ -178,22 +179,28 @@ temperature: 3.0 # (float) temperature for softening logits
 alpha: 0.5 # (float) weight for distillation loss
 
 
-# Prune settings
-prune_method:
-speed_up: 2.0
-global_pruning: False
+
+# Pruning settings -------------------------------------------------------------------------------------------------
+do_prune: True       # Set to True to enable the pruning stage.
+do_finetune: True    # Set to True to enable the fine-tuning stage. Recommended: False for the first stage (pruning), True for the second.
+
+prune_method: group_slim # Pruning method to be used. Available: `random`, `l1`, `lamp`, `slim`, `group_slim`, `group_sl`, `group_taylor`, `group_norm`, `growing_reg`.
+speed_up: 2.0        # Target GFLOPs reduction factor (e.g., 2.0 for a 2x reduction).
+global_pruning: False # Set to True for global pruning across the entire model, False for layer-wise pruning.
 max_sparsity: 1.0
 iterative_steps: 200
-reg: 0.0005
+
+# Regularization settings (for methods like 'growing_reg')
+reg: 0.0005          # Regularization coefficient for methods that support it (e.g., 'growing_reg').
 delta_reg: 0.0001
-sl_epochs: 100
-sl_model:
-sl_hyp: ultralytics/cfg/hyp.scratch.sl.yaml
-reg_decay_type: linear # constant, linear, step
+reg_decay_type: linear # Regularization decay type. Available: `constant`, `linear`, `step`.
 reg_decay: 0.1
 reg_decay_step: 10
-do_prune: True
-do_finetune: True
+
+# Sparsity Learning settings (for methods like 'slim', 'group_sl')
+sl_epochs: 100       # Number of epochs for Sparsity Learning, if the method supports it ('slim', 'group_sl').
+sl_model:            # Path to the model for Sparsity Learning (optional).
+sl_hyp: ultralytics/cfg/hyp.scratch.sl.yaml # Path to the hyperparameter file for Sparsity Learning.
 
 # SAHI settings -------------------------------------------------------------------------------------------------
 sahi: False
@@ -204,7 +211,7 @@ overlap_ratio: 0.2  # (float) overlap between neighboring crops (range: 0 to 1);
 sampling_rate: 0.3  # (float) portion of random crops taken from an image relative to the number of grid crops
 crop_threshold: 1024  # (int) minimum image width and height (in pixels) to apply RandomCropLarge (i.e., enables background cropping for images larger than this size)
 bg_crop_prob: 0.4  # (float) probability of applying RandomCropLarge (increases background-focused crops)
-scale_range: (0.7, 1.3)  # (str) range in which the height and width of the crop can vary during augmentation
+scale_range: (1, 1)  # TODO: fix it not working.  (str) range in which the height and width of the crop can vary during augmentation
 erosion_factor: 0.0 # (float) 0 means crop must fully contain the reference box.
 full_image_prob: 0.0  # probability, that full image will be resize to crop size
-sahi_val_debug: False
+keep_sahi_images: False
