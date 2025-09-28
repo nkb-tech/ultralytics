@@ -1026,7 +1026,7 @@ class Boxes(BaseTensor):
         if boxes.ndim == 1:
             boxes = boxes[None, :]
         n = boxes.shape[-1]
-        assert n > 6, f"expected more than 6 values but got {n}"  # xywh, rotation, track_id, conf, cls
+        assert n >= 6, f"expected more than 6 values but got {n}"  # xywh, rotation, track_id, conf, cls
         super().__init__(boxes, orig_shape)
         self.is_track = is_track
         self.orig_shape = orig_shape

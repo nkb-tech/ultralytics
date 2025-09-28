@@ -1,5 +1,6 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
+import re
 import contextlib
 import pickle
 import types
@@ -276,7 +277,7 @@ class BaseModel(nn.Module):
         preds = self.forward(batch["img"]) if preds is None else preds
         return self.criterion(preds, batch)
 
-    def init_criterion(self):
+    def init_criterion(self, weights=None):
         """Initialize the loss criterion for the BaseModel."""
         raise NotImplementedError("compute_loss() needs to be implemented by task heads")
 
@@ -375,9 +376,15 @@ class DetectionModel(BaseModel):
         y[-1] = y[-1][..., i:]  # small
         return y
 
-    def init_criterion(self):
+    def init_criterion(self, weights=None):
         """Initialize the loss criterion for the DetectionModel."""
-        return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(self)
+        return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(
+            self,
+            clf_loss_fn=self.args.clf_loss_fn,
+            iou_loss_fn=self.args.iou_loss_fn,
+            nwd_loss=self.args.nwd_loss,
+            use_wiseiou=self.args.use_wiseiou,
+        )
 
 
 class OBBModel(DetectionModel):
@@ -387,7 +394,7 @@ class OBBModel(DetectionModel):
         """Initialize YOLOv8 OBB model with given config and parameters."""
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self):
+    def init_criterion(self, weights=None):
         """Initialize the loss criterion for the model."""
         return v8OBBLoss(self)
 
@@ -399,7 +406,7 @@ class SegmentationModel(DetectionModel):
         """Initialize YOLOv8 segmentation model with given config and parameters."""
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self):
+    def init_criterion(self, weights=None):
         """Initialize the loss criterion for the SegmentationModel."""
         return E2ESegmentLoss(self) if getattr(self, "end2end", False) else v8SegmentationLoss(self)
 
@@ -416,7 +423,7 @@ class PoseModel(DetectionModel):
             cfg["kpt_shape"] = data_kpt_shape
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self):
+    def init_criterion(self, weights=None):
         """Initialize the loss criterion for the PoseModel."""
         return E2EPoseLoss(self) if getattr(self, "end2end", False) else v8PoseLoss(self)
 
@@ -956,9 +963,6 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
     # Return model and ckpt
     return model, ckpt
 
-import re
-import torch
-import torch.nn as nn
 
 def install_cv3_compat_hook(model: nn.Module):
     """
@@ -1324,13 +1328,11 @@ def yaml_model_load(path):
     d["scale"] = guess_model_scale(path)
     d["yaml_file"] = str(path)
 
-    raw_names = d.get("names", None)
-    if "nc" not in d:
-        if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
-            d["nc"] = [len(task) for task in raw_names]
-            
-        else:
-            raise SyntaxError(emojis(f"{yaml_file} key missing ❌. either 'names' or 'nc' are required in all model YAMLs."))
+    nc = d.get("nc", None)
+    if isinstance(nc, int):
+        d["nc"] = [nc]
+    else:
+        raise SyntaxError(emojis(f"{yaml_file} key missing ❌. either 'names' or 'nc' are required in all model YAMLs."))
     return d
 
 

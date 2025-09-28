@@ -1,5 +1,6 @@
 import random
 from typing import Any
+import numpy as np
 
 import albumentations as A
 from albumentations import AtLeastOneBBoxRandomCrop
@@ -12,14 +13,6 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
 
     If the image is smaller than the requested crop size, no cropping is applied.
     When the image is large enough, this transform ensures that at least one bounding box remains inside the crop.
-
-    Args:
-        crop_size (int): The size of the square crop in pixels (height and width). Default: 640.
-         scale_range (Tuple[float, float]): Range to randomly scale the crop size.
-                                           The final size will be crop_size * random_scale.
-                                           Default: (1.0, 1.0), i.e., fixed size.
-        erosion_factor (float): Erosion factor applied to bounding boxes before computing the crop. Helps avoid too tight crops. Default: 0.0.
-        p (float): Probability of applying the transform. Default: 1.0.
     """
 
     def __init__(
@@ -28,14 +21,21 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
         erosion_factor: float = 0.0,
         scale_range: tuple[float, float] = (0.7, 1.3),
         p: float = 1.0,
-    ):
+    ) -> "SafeFixedRandomCrop":
+        """
+        Args:
+            crop_size (int): The size of the square crop in pixels. Default: 640.
+            scale_range (tuple[float, float]): Range to randomly scale the crop size.
+            erosion_factor (float): Erosion factor applied to bounding boxes before computing the crop. Helps avoid too tight crops. Default: 0.0.
+            p (float): Probability of applying the transform. Default: 1.0.
+        """
+
         self.crop_size = crop_size
         self.scale_range = scale_range
-        self.random_crop_height = crop_size
-        self.random_crop_width = crop_size
+
         super().__init__(
-            height=self.random_crop_height,
-            width=self.random_crop_width,
+            height=crop_size,
+            width=crop_size,
             erosion_factor=erosion_factor,
             p=p,
         )
@@ -48,10 +48,7 @@ class SafeFixedRandomCrop(AtLeastOneBBoxRandomCrop):
         image_height, image_width = params["shape"][:2]
 
         # scaled h and w
-        h_scale_range = self.scale_range
-        w_scale_range = self.scale_range
-        h_scale = random.uniform(*h_scale_range)
-        w_scale = random.uniform(*w_scale_range)
+        h_scale, w_scale = random.uniform(*self.scale_range), random.uniform(*self.scale_range)
         self.height = int(round(self.crop_size * h_scale))
         self.width = int(round(self.crop_size * w_scale))
         if image_height < self.height or image_width < self.width:
@@ -65,12 +62,6 @@ class RandomCropLarge(DualTransform):
 
     This transform applies `albumentations.RandomCrop` if the image is larger than both `crop_size` and `threshold`.
     Otherwise, it falls back to `SafeFixedRandomCrop`, which guarantees that at least one bounding box remains inside the crop.
-
-    Args:
-        crop_size (int): The size of the square crop in pixels (height and width). Default: 1024.
-        threshold (int): Minimum dimension (either height or width) for the image to be considered "large" and allow strict random cropping. Default: 1024.
-        erosion_factor (float): Erosion factor applied to bounding boxes before computing the crop. Helps avoid too tight crops. Default: 0.0.
-        p (float): Probability of applying the transform. Default: 1.0.
     """
 
     def __init__(
@@ -80,7 +71,14 @@ class RandomCropLarge(DualTransform):
         threshold: int = 1024,
         erosion_factor: float = 0.0,
         p: float = 1.0,
-    ):
+    ) -> "RandomCropLarge":
+        """
+        Args:
+            crop_size (int): The size of the square crop in pixels. Default: 1024.
+            threshold (int): Minimum dimension (either height or width) for the image to be considered "large" and allow strict random cropping. Default: 1024.
+            erosion_factor (float): Erosion factor applied to bounding boxes before computing the crop. Helps avoid too tight crops. Default: 0.0.
+            p (float): Probability of applying the transform. Default: 1.0.
+        """
         super().__init__(p=p)
         self.crop_size = crop_size
         self.threshold = threshold
@@ -94,11 +92,7 @@ class RandomCropLarge(DualTransform):
             height > self.threshold or width > self.threshold  # big enough for background
         )
 
-    def apply(
-        self,
-        img,
-        **params,
-    ):
+    def apply(self, img, **params) -> np.ndarray:
         height, width = img.shape[:2]
         if self._use_random(height, width):
             return self.random_crop.apply(img, **params)
@@ -106,10 +100,7 @@ class RandomCropLarge(DualTransform):
             return self.safe_fixed_crop.apply(img, **params)
 
     def apply_to_bboxes(
-        self,
-        bboxes: list[list[float]],
-        **params,
-    ) -> list[list[float]]:
+        self, bboxes: list[list[float]], **params) -> list[list[float]]:
         height, width = params["shape"][:2]
         if self._use_random(height, width):
             return self.random_crop.apply_to_bboxes(bboxes, **params)
@@ -117,17 +108,12 @@ class RandomCropLarge(DualTransform):
             return self.safe_fixed_crop.apply_to_bboxes(bboxes, **params)
 
     def get_params_dependent_on_data(
-        self,
-        params: dict[str, Any],
-        data: dict[str, Any],
+        self, params: dict[str, Any], data: dict[str, Any]
     ) -> dict[str, Any]:
         height, width = params["shape"][:2]
 
         # scaled h and w
-        h_scale_range = self.scale_range
-        w_scale_range = self.scale_range
-        h_scale = random.uniform(*h_scale_range)
-        w_scale = random.uniform(*w_scale_range)
+        h_scale, w_scale = random.uniform(*self.scale_range), random.uniform(*self.scale_range)
         self.height = int(round(self.crop_size * h_scale))
         self.width = int(round(self.crop_size * w_scale))
 

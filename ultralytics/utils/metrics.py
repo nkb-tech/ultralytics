@@ -10,11 +10,217 @@ import numpy as np
 import torch
 
 from ultralytics.utils import LOGGER, SimpleClass, TryExcept, plt_settings
+from ultralytics.utils.tf import xyxy2xywh
 
 OKS_SIGMA = (
     np.array([0.26, 0.25, 0.25, 0.35, 0.35, 0.79, 0.79, 0.72, 0.72, 0.62, 0.62, 1.07, 1.07, 0.87, 0.87, 0.89, 0.89])
     / 10.0
 )
+
+class WiseIoULoss(torch.nn.Module):
+    momentum = 1e-2
+    alpha = 1.7
+    delta = 2.7
+
+    def __init__(self, ltype='wiou', monotonous=False, inner_iou=False, focaler_iou=False):
+        """Initialize the WiseIouLoss module with loss type, monotonicity, inner IoU, and focaler IoU settings.
+
+        Args:
+            ltype (str, optional): The type of loss function. Defaults to 'WIoU'.
+            monotonous (bool, optional): If None, use the origin V1;
+                if True, use the monotonic FM V2;
+                if False, use the non-monotonic FM V3.
+                Defaults to False.
+            inner_iou (bool): If True, use the inner IoU. Defaults to False.
+            focaler_iou (bool): If True, use the focaler IoU. Defaults to False.
+        """
+        super().__init__()
+        ltype = ltype.lower()
+        assert getattr(self, f'_{ltype}', None), f'The loss function {ltype} does not exist.'
+        self.ltype = ltype
+        self.monotonous = monotonous
+        self.inner_iou = inner_iou
+        self.focaler_iou = focaler_iou
+        self.register_buffer('iou_mean', torch.tensor(1.))
+
+    def __getitem__(self, item):
+        if callable(self._fget[item]):
+            self._fget[item] = self._fget[item]()
+        return self._fget[item]
+
+    def forward(self, pred, target, ret_iou=False, ratio=1.0, d=0.0, u=0.95, **kwargs):
+        self._fget = {
+            # pred, target: x0,y0,x1,y1
+            'pred': pred,
+            'target': target,
+            # x,y,w,h
+            'pred_xy': lambda: (self['pred'][..., :2] + self['pred'][..., 2: 4]) / 2,
+            'pred_wh': lambda: self['pred'][..., 2: 4] - self['pred'][..., :2],
+            'target_xy': lambda: (self['target'][..., :2] + self['target'][..., 2: 4]) / 2,
+            'target_wh': lambda: self['target'][..., 2: 4] - self['target'][..., :2],
+            # x0,y0,x1,y1
+            'min_coord': lambda: torch.minimum(self['pred'][..., :4], self['target'][..., :4]),
+            'max_coord': lambda: torch.maximum(self['pred'][..., :4], self['target'][..., :4]),
+            # The overlapping region
+            'wh_inter': lambda: torch.relu(self['min_coord'][..., 2: 4] - self['max_coord'][..., :2]),
+            's_inter': lambda: torch.prod(self['wh_inter'], dim=-1),
+            # The area covered
+            's_union': lambda: torch.prod(self['pred_wh'], dim=-1) +
+                               torch.prod(self['target_wh'], dim=-1) - self['s_inter'],
+            # The smallest enclosing box
+            'wh_box': lambda: self['max_coord'][..., 2: 4] - self['min_coord'][..., :2],
+            's_box': lambda: torch.prod(self['wh_box'], dim=-1),
+            'l2_box': lambda: torch.square(self['wh_box']).sum(dim=-1),
+            # The central points' connection of the bounding boxes
+            'd_center': lambda: self['pred_xy'] - self['target_xy'],
+            'l2_center': lambda: torch.square(self['d_center']).sum(dim=-1),
+            # IoU / Inner-IoU / Focaler-IoU
+            'iou': lambda: (1 - box_inner_iou(pred, target, xywh=False, ratio=ratio).squeeze()) if self.inner_iou else (
+                1 - ((self['s_inter'] / self['s_union'] - d) / (u - d)).clamp(0, 1) if self.focaler_iou else 1 - self[
+                    's_inter'] / self['s_union']),
+        }
+
+        if self.training:
+            self.iou_mean.mul_(1 - self.momentum)
+            self.iou_mean.add_(self.momentum * self['iou'].detach().mean())
+
+        ret = self._scaled_loss(getattr(self, f'_{self.ltype}')(**kwargs)), self['iou']
+        delattr(self, '_fget')
+        return ret if ret_iou else ret[0]
+
+    def _scaled_loss(self, loss, iou=None):
+        if isinstance(self.monotonous, bool):
+            beta = (self['iou'].detach() if iou is None else iou) / self.iou_mean
+
+            if self.monotonous:
+                loss *= beta.sqrt()
+            else:
+                divisor = self.delta * torch.pow(self.alpha, beta - self.delta)
+                loss *= beta / divisor
+        return loss
+
+    def _iou(self):
+        return self['iou']
+
+    def _wiou(self):
+        dist = torch.exp(self['l2_center'] / self['l2_box'].detach())
+        return dist * self['iou']
+
+    def _eiou(self):
+        penalty = self['l2_center'] / self['l2_box'] \
+                  + torch.square(self['d_center'] / self['wh_box']).sum(dim=-1)
+        return self['iou'] + penalty
+
+    def _giou(self):
+        return self['iou'] + (self['s_box'] - self['s_union']) / self['s_box']
+
+    def _diou(self):
+        return self['iou'] + self['l2_center'] / self['l2_box']
+
+    def _ciou(self, eps=1e-4):
+        v = 4 / math.pi ** 2 * \
+            (torch.atan(self['pred_wh'][..., 0] / (self['pred_wh'][..., 1] + eps)) -
+             torch.atan(self['target_wh'][..., 0] / (self['target_wh'][..., 1] + eps))) ** 2
+        alpha = v / (self['iou'] + v)
+        return self['iou'] + self['l2_center'] / self['l2_box'] + alpha.detach() * v
+
+    def _siou(self, theta=4):
+        # Angle Cost
+        angle = torch.arcsin(torch.abs(self['d_center']).min(dim=-1)[0] / (self['l2_center'].sqrt() + 1e-4))
+        angle = torch.sin(2 * angle) - 2
+        # Dist Cost
+        dist = angle[..., None] * torch.square(self['d_center'] / self['wh_box'])
+        dist = 2 - torch.exp(dist[..., 0]) - torch.exp(dist[..., 1])
+        # Shape Cost
+        d_shape = torch.abs(self['pred_wh'] - self['target_wh'])
+        big_shape = torch.maximum(self['pred_wh'], self['target_wh'])
+        w_shape = 1 - torch.exp(- d_shape[..., 0] / big_shape[..., 0])
+        h_shape = 1 - torch.exp(- d_shape[..., 1] / big_shape[..., 1])
+        shape = w_shape ** theta + h_shape ** theta
+        return self['iou'] + (dist + shape) / 2
+
+    def _mpdiou(self, mpdiou_hw):
+        d1 = (self['target'][..., 0] - self['pred'][..., 0]) ** 2 + (self['target'][..., 1] - self['pred'][..., 1]) ** 2
+        d2 = (self['target'][..., 2] - self['pred'][..., 2]) ** 2 + (self['target'][..., 3] - self['pred'][..., 3]) ** 2
+        return self['iou'] + d1 / mpdiou_hw + d2 / mpdiou_hw
+
+    def _shapeiou(self, scale=0.0):
+        b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
+        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + 1e-7
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + 1e-7
+
+        # Shape-Distance
+        ww = 2 * torch.pow(w2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
+        hh = 2 * torch.pow(h2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
+        cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)  # convex width
+        ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)  # convex height
+        c2 = cw ** 2 + ch ** 2 + 1e-7  # convex diagonal squared
+        center_distance_x = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2) / 4
+        center_distance_y = ((b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4
+        center_distance = hh * center_distance_x + ww * center_distance_y
+        distance = center_distance / c2
+
+        # Shape-Shape
+        omiga_w = hh * torch.abs(w1 - w2) / torch.max(w1, w2)
+        omiga_h = ww * torch.abs(h1 - h2) / torch.max(h1, h2)
+        shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
+        return self['iou'] + distance.squeeze() + 0.5 * shape_cost.squeeze()
+
+    def _piouv1(self):
+        b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + 1e-7
+
+        dw1 = torch.abs(b1_x2.minimum(b1_x1) - b2_x2.minimum(b2_x1))
+        dw2 = torch.abs(b1_x2.maximum(b1_x1) - b2_x2.maximum(b2_x1))
+        dh1 = torch.abs(b1_y2.minimum(b1_y1) - b2_y2.minimum(b2_y1))
+        dh2 = torch.abs(b1_y2.maximum(b1_y1) - b2_y2.maximum(b2_y1))
+        P = ((dw1 + dw2) / torch.abs(w2) + (dh1 + dh2) / torch.abs(h2)) / 4
+        piou_v1 = self['iou'] - torch.exp(-P.squeeze() ** 2) + 1
+        return piou_v1
+
+    def _piouv2(self, Lambda=1.3):
+        b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + 1e-7
+
+        dw1 = torch.abs(b1_x2.minimum(b1_x1) - b2_x2.minimum(b2_x1))
+        dw2 = torch.abs(b1_x2.maximum(b1_x1) - b2_x2.maximum(b2_x1))
+        dh1 = torch.abs(b1_y2.minimum(b1_y1) - b2_y2.minimum(b2_y1))
+        dh2 = torch.abs(b1_y2.maximum(b1_y1) - b2_y2.maximum(b2_y1))
+        P = ((dw1 + dw2) / torch.abs(w2) + (dh1 + dh2) / torch.abs(h2)) / 4
+        piou_v1 = self['iou'] - torch.exp(-P.squeeze() ** 2) + 1
+        q = torch.exp(-P.squeeze())
+        x = q * Lambda
+        return 3 * x * torch.exp(-x ** 2) * piou_v1
+
+    def _iterpiou(self, interp_coe=0.98):
+        b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
+        bi_x1, bi_y1, bi_x2, bi_y2 = ((1 - interp_coe) * b1_x1 + interp_coe * b2_x1,
+                                      (1 - interp_coe) * b1_y1 + interp_coe * b2_y1,
+                                      (1 - interp_coe) * b1_x2 + interp_coe * b2_x2,
+                                      (1 - interp_coe) * b1_y2 + interp_coe * b2_y2)
+
+        inter_i = (torch.min(bi_x2, b2_x2) - torch.max(bi_x1, b2_x1)).clamp_min_(0) * \
+                  (torch.min(bi_y2, b2_y2) - torch.max(bi_y1, b2_y1)).clamp_min_(0)
+
+        wi, hi = bi_x2 - bi_x1 + 1e-7, bi_y2 - bi_y1 + 1e-7
+        w2, h2 = b2_x2 - b2_x1 + 1e-7, b2_y2 - b2_y1 + 1e-7
+
+        union_i = wi * hi + w2 * h2 - inter_i + 1e-7
+        iou_i = inter_i / union_i
+        return self['iou'] + iou_i - 1
+
+    def _d_iterpiou(self, interp_coe=0.98, lv=0.6, hv=0.9):
+        interp_coe = (1 - self['iou'].detach()).clamp(min=lv, max=hv)
+        return self._iterpiou(interp_coe)
+
+    def __repr__(self):
+        return f'{self.__name__}(iou_mean={self.iou_mean.item():.3f})'
+
+    __name__ = property(lambda self: self.ltype)
 
 
 def bbox_ioa(box1, box2, iou=False, eps=1e-7):
@@ -71,7 +277,57 @@ def box_iou(box1, box2, eps=1e-7):
     return inter / ((a2 - a1).prod(2) + (b2 - b1).prod(2) - inter + eps)
 
 
-def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):
+def box_inner_iou(box1, box2, xywh=True, eps=1e-7, ratio=0.7):
+    """
+    Calculate inner IoU of boxes.
+
+    Args:
+        box1 (torch.Tensor): A tensor of shape (N, 4) representing N bounding boxes.
+        box2 (torch.Tensor): A tensor of shape (M, 4) representing M bounding boxes.
+        xywh (bool, optional): If True, input boxes are in (x, y, w, h) format. If False, input boxes are in
+                               (x1, y1, x2, y2) format. Defaults to True.
+        eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
+        ratio (float, optional): The ratio of the inner box to the original box. Defaults to 0.7.
+
+    Returns:
+        (torch.Tensor): An NxM tensor containing the pairwise inner IoU values for every element in box1 and box2.
+    """
+    if not xywh:
+        box1, box2 = xyxy2xywh(box1), xyxy2xywh(box2)
+
+    (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
+    b1_x1, b1_x2, b1_y1, b1_y2 = x1 - (w1 * ratio) / 2, x1 + (w1 * ratio) / 2, y1 - (h1 * ratio) / 2, y1 + (
+                h1 * ratio) / 2
+    b2_x1, b2_x2, b2_y1, b2_y2 = x2 - (w2 * ratio) / 2, x2 + (w2 * ratio) / 2, y2 - (h2 * ratio) / 2, y2 + (
+                h2 * ratio) / 2
+
+    # Intersection area
+    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * \
+            (b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)).clamp_(0)
+
+    # Union Area
+    union = w1 * h1 * ratio * ratio + w2 * h2 * ratio * ratio - inter + eps
+    return inter / union
+
+
+def bbox_iou(
+    box1,
+    box2,
+    xywh=True,
+    giou=False,
+    diou=False,
+    ciou=False,
+    eiou=False,
+    siou=False,
+    shapeiou=False,
+    piouv1=False,
+    piouv2=False,
+    interpiou=False,
+    eps=1e-7,
+    scale=0.0,
+    Lambda=1.3,
+    interp_coe=0.98,
+):
     """
     Calculate Intersection over Union (IoU) of box1(1, 4) to box2(n, 4).
 
@@ -80,14 +336,25 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7
         box2 (torch.Tensor): A tensor representing n bounding boxes with shape (n, 4).
         xywh (bool, optional): If True, input boxes are in (x, y, w, h) format. If False, input boxes are in
                                (x1, y1, x2, y2) format. Defaults to True.
-        GIoU (bool, optional): If True, calculate Generalized IoU. Defaults to False.
-        DIoU (bool, optional): If True, calculate Distance IoU. Defaults to False.
-        CIoU (bool, optional): If True, calculate Complete IoU. Defaults to False.
+        giou (bool, optional): If True, calculate Generalized IoU. Defaults to False.
+        diou (bool, optional): If True, calculate Distance IoU. Defaults to False.
+        ciou (bool, optional): If True, calculate Complete IoU. Defaults to False.
+        eiou (bool, optional): If True, calculate Efficient IoU. Defaults to False.
+        siou (bool, optional): If True, calculate Scylla IoU. Defaults to False.
+        shapeiou (bool, optional): If True, calculate Shape IoU. Defaults to False.
+        piouv1 (bool, optional): If True, PowerfullIoUv1. Defaults to False.
+        piouv2 (bool, optional): If True, PowerfullIoUv2. Defaults to False.
+        interpiou (bool, optional): If True, calculate InterpIoU. Defaults to False.
+        scale (float, optional): The scale of the shape IoU. Defaults to 0.0.
+        Lambda (float, optional): The Lambda of the shape IoU. Defaults to 1.3.
         eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
+        interp_coe (float, optional): The coefficient of the InterpIoU. Defaults to 0.98.
 
     Returns:
-        (torch.Tensor): IoU, GIoU, DIoU, or CIoU values depending on the specified flags.
+        (torch.Tensor): iou, giou, diou, or ciou or eiou or siou or shapeiou or piouv1 or piouv2
+        values depending on the specified flags.
     """
+
     # Get the coordinates of bounding boxes
     if xywh:  # transform from xywh to xyxy
         (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
@@ -101,32 +368,125 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7
         w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
 
     # Intersection area
-    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * (
-        b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)
-    ).clamp_(0)
+    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * \
+            (b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)).clamp_(0)
 
     # Union Area
     union = w1 * h1 + w2 * h2 - inter + eps
 
     # IoU
     iou = inter / union
-    if CIoU or DIoU or GIoU:
+    if ciou or diou or giou or eiou or siou or shapeiou or piouv1 or piouv2:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
-        if CIoU or DIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
-            c2 = cw.pow(2) + ch.pow(2) + eps  # convex diagonal squared
-            rho2 = (
-                (b2_x1 + b2_x2 - b1_x1 - b1_x2).pow(2) + (b2_y1 + b2_y2 - b1_y1 - b1_y2).pow(2)
-            ) / 4  # center dist**2
-            if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
-                v = (4 / math.pi**2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
+        if ciou or diou or eiou or siou or piouv1 or piouv2 or shapeiou:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+            c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
+            rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center dist ** 2
+            if ciou:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
+                v = (4 / math.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
                 with torch.no_grad():
                     alpha = v / (v - iou + (1 + eps))
                 return iou - (rho2 / c2 + v * alpha)  # CIoU
+            elif eiou:
+                rho_w2 = ((b2_x2 - b2_x1) - (b1_x2 - b1_x1)) ** 2
+                rho_h2 = ((b2_y2 - b2_y1) - (b1_y2 - b1_y1)) ** 2
+                cw2 = cw ** 2 + eps
+                ch2 = ch ** 2 + eps
+                return iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)  # EIoU
+            elif siou:
+                # SIoU Loss https://arxiv.org/pdf/2205.12740.pdf
+                s_cw = (b2_x1 + b2_x2 - b1_x1 - b1_x2) * 0.5 + eps
+                s_ch = (b2_y1 + b2_y2 - b1_y1 - b1_y2) * 0.5 + eps
+                sigma = torch.pow(s_cw ** 2 + s_ch ** 2, 0.5)
+                sin_alpha_1 = torch.abs(s_cw) / sigma
+                sin_alpha_2 = torch.abs(s_ch) / sigma
+                threshold = pow(2, 0.5) / 2
+                sin_alpha = torch.where(sin_alpha_1 > threshold, sin_alpha_2, sin_alpha_1)
+                angle_cost = torch.cos(torch.arcsin(sin_alpha) * 2 - math.pi / 2)
+                rho_x = (s_cw / cw) ** 2
+                rho_y = (s_ch / ch) ** 2
+                gamma = angle_cost - 2
+                distance_cost = 2 - torch.exp(gamma * rho_x) - torch.exp(gamma * rho_y)
+                omiga_w = torch.abs(w1 - w2) / torch.max(w1, w2)
+                omiga_h = torch.abs(h1 - h2) / torch.max(h1, h2)
+                shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
+                return iou - 0.5 * (distance_cost + shape_cost) + eps  # SIoU
+            elif shapeiou:
+                # Shape-Distance
+                ww = 2 * torch.pow(w2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
+                hh = 2 * torch.pow(h2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
+                cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)  # convex width
+                ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)  # convex height
+                c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
+                center_distance_x = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2) / 4
+                center_distance_y = ((b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4
+                center_distance = hh * center_distance_x + ww * center_distance_y
+                distance = center_distance / c2
+
+                # Shape-Shape
+                omiga_w = hh * torch.abs(w1 - w2) / torch.max(w1, w2)
+                omiga_h = ww * torch.abs(h1 - h2) / torch.max(h1, h2)
+                shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
+                return iou - distance - 0.5 * shape_cost
+            elif piouv1 or piouv2:
+                dw1 = torch.abs(b1_x2.minimum(b1_x1) - b2_x2.minimum(b2_x1))
+                dw2 = torch.abs(b1_x2.maximum(b1_x1) - b2_x2.maximum(b2_x1))
+                dh1 = torch.abs(b1_y2.minimum(b1_y1) - b2_y2.minimum(b2_y1))
+                dh2 = torch.abs(b1_y2.maximum(b1_y1) - b2_y2.maximum(b2_y1))
+                P = ((dw1 + dw2) / torch.abs(w2) + (dh1 + dh2) / torch.abs(h2)) / 4
+                piou_v1 = 1 - iou - torch.exp(-P ** 2) + 1
+                if piouv1:
+                    return 1 - piou_v1
+                elif piouv2:
+                    q = torch.exp(-P)
+                    x = q * Lambda
+                    return 1 - 3 * x * torch.exp(-x ** 2) * piou_v1
+            elif interpiou:
+                bi_x1, bi_y1, bi_x2, bi_y2 = ((1 - interp_coe) * b1_x1 + interp_coe * b2_x1,
+                                      (1 - interp_coe) * b1_y1 + interp_coe * b2_y1,
+                                      (1 - interp_coe) * b1_x2 + interp_coe * b2_x2,
+                                      (1 - interp_coe) * b1_y2 + interp_coe * b2_y2)
+                inter_i = (torch.min(bi_x2, b2_x2) - torch.max(bi_x1, b2_x1)).clamp_min_(0) * \
+                        (torch.min(bi_y2, b2_y2) - torch.max(bi_y1, b2_y1)).clamp_min_(0)
+
+                wi, hi = bi_x2 - bi_x1 + eps, bi_y2 - bi_y1 + eps
+                w2, h2 = b2_x2 - b2_x1 + eps, b2_y2 - b2_y1 + eps
+
+                union_i = wi * hi + w2 * h2 - inter_i + eps
+                iou_i = inter_i / union_i
+                return iou + iou_i - 1
             return iou - rho2 / c2  # DIoU
         c_area = cw * ch + eps  # convex area
         return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
     return iou  # IoU
+
+
+def wasserstein_loss(pred, target, eps=1e-7, constant=12.8):
+    r"""`Implementation of paper `Enhancing Geometric Factors into
+    Model Learning and Inference for Object Detection and Instance
+    Segmentation <https://arxiv.org/abs/2005.03572>`_.
+    Code is modified from https://github.com/Zzh-tju/CIoU.
+    Args:
+        pred (Tensor): Predicted bboxes of format (x_min, y_min, x_max, y_max),
+            shape (n, 4).
+        target (Tensor): Corresponding gt bboxes, shape (n, 4).
+        eps (float): Eps to avoid log(0).
+    Return:
+        Tensor: Loss tensor.
+    """
+
+    b1_x1, b1_y1, b1_x2, b1_y2 = pred.chunk(4, -1)
+    b2_x1, b2_y1, b2_x2, b2_y2 = target.chunk(4, -1)
+    w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
+    w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
+
+    b1_x_center, b1_y_center = b1_x1 + w1 / 2, b1_y1 + h1 / 2
+    b2_x_center, b2_y_center = b2_x1 + w2 / 2, b2_y1 + h2 / 2
+    center_distance = (b1_x_center - b2_x_center) ** 2 + (b1_y_center - b2_y_center) ** 2 + eps
+    wh_distance = ((w1 - w2) ** 2 + (h1 - h2) ** 2) / 4
+
+    wasserstein_2 = center_distance + wh_distance
+    return torch.exp(-torch.sqrt(wasserstein_2) / constant)
 
 
 def mask_iou(mask1, mask2, eps=1e-7):
@@ -143,7 +503,7 @@ def mask_iou(mask1, mask2, eps=1e-7):
     Returns:
         (torch.Tensor): A tensor of shape (N, M) representing masks IoU.
     """
-    intersection = torch.matmul(mask1, mask2.T).clamp_(0)
+    intersection = torch.matmul(mask1, mask2.T).clamp_min_(0)
     union = (mask1.sum(1)[:, None] + mask2.sum(1)[None]) - intersection  # (area1 + area2) - intersection
     return intersection / (union + eps)
 

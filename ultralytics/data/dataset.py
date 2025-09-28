@@ -16,6 +16,7 @@ from torch.utils.data import ConcatDataset
 from ultralytics.utils import LOCAL_RANK, NUM_THREADS, TQDM, colorstr
 from ultralytics.utils.ops import resample_segments
 from ultralytics.utils.torch_utils import TORCHVISION_0_18
+from ultralytics.utils.checks import truncate_middle
 
 from .augment import (
     Compose,
@@ -79,7 +80,10 @@ class YOLODataset(BaseDataset):
         """
         x = {"labels": []}
         nm, nf, ne, ncpt, fb, ab, msgs = 0, 0, 0, 0, 0, 0, []  # number missing, found, empty, corrupt, filtered boxes, all boxes, messages
-        desc = f"{self.prefix}Scanning {path.parent / path.stem}..."
+        initial_scan_dir = truncate_middle(str(Path(self.im_files[0]).parent))
+        current_scan_dir = initial_scan_dir
+        desc_prefix = f"{self.prefix}Scanning {current_scan_dir}"
+        desc = f"{desc_prefix}..."
         total = len(self.im_files)
         nkpt, ndim = self.data.get("kpt_shape", (0, 0))
         if self.use_keypoints and (nkpt <= 0 or ndim not in {2, 3}):
@@ -108,6 +112,11 @@ class YOLODataset(BaseDataset):
                 nf += nf_f
                 ne += ne_f
                 ncpt += ncpt_f
+                if im_file:
+                    scan_dir = truncate_middle(str(Path(im_file).parent))
+                    if scan_dir != current_scan_dir:
+                        current_scan_dir = scan_dir
+                desc_prefix = f"{self.prefix}Scanning {current_scan_dir}"
                 if im_file and len(lb):
                     # Filter out small boxes
                     ab += len(lb)  # count total boxes before filtering
@@ -134,7 +143,8 @@ class YOLODataset(BaseDataset):
                     )
                 if msg:
                     msgs.append(msg)
-                pbar.desc = f"{desc} {nf} images, {nm + ne} backgrounds, {ncpt} corrupt, {fb}/{ab} boxes"
+                stats = f"{nf} images, {nm + ne} backgrounds, {ncpt} corrupt, {fb}/{ab} boxes"
+                pbar.set_description(f"{desc_prefix}... {stats}")
             pbar.close()
 
         if msgs:
@@ -161,7 +171,8 @@ class YOLODataset(BaseDataset):
         # Display cache
         nf, nm, ne, nc, n = cache.pop("results")  # found, missing, empty, corrupt, total
         if exists and LOCAL_RANK in {-1, 0}:
-            d = f"Scanning {cache_path}... {nf} images, {nm + ne} backgrounds, {nc} corrupt"
+            scan_path = truncate_middle(str(cache_path))
+            d = f"Scanning {scan_path}... {nf} images, {nm + ne} backgrounds, {nc} corrupt"
             TQDM(None, desc=self.prefix + d, total=n, initial=n)  # display results
             if cache["msgs"]:
                 LOGGER.info("\n".join(cache["msgs"]))  # display warnings

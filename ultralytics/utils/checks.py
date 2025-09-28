@@ -12,7 +12,7 @@ import subprocess
 import time
 from importlib import metadata
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import cv2
 import numpy as np
@@ -762,6 +762,25 @@ def cuda_is_available() -> bool:
         (bool): True if one or more NVIDIA GPUs are available, False otherwise.
     """
     return cuda_device_count() > 0
+
+
+def truncate_middle(text: str, max_length: int = 50) -> str:
+    """
+    Truncate a string to a maximum length, keeping the middle part.
+
+    Args:
+        text (str): The string to truncate.
+        max_length (int): The maximum length of the string.
+
+    Returns:
+        (str): The truncated string.
+    """
+    if len(text) <= max_length:
+        return text
+    keep = max_length - 3
+    head = keep // 2
+    tail = keep - head
+    return f"{text[:head]}...{text[-tail:]}"
 
 
 # Define constants

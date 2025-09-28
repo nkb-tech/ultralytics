@@ -4,17 +4,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ultralytics.utils import LOGGER
+from ultralytics.utils import LOGGER, colorstr
 
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
-from .metrics import bbox_iou, probiou
+from .metrics import bbox_iou, probiou, WiseIoULoss, wasserstein_loss
 from .tal import bbox2dist
 
-from glob import glob
 
 
 class DistillationLoss(nn.Module):
@@ -74,9 +73,9 @@ class DistillationLoss(nn.Module):
         return self.alpha * loss
 
 
-class QualityfocalLoss(nn.Module):
+class QualityFocalLoss(nn.Module):
     """
-    Quality focal loss by Xiang et al.
+    Quality Focal Loss by Xiang et al.
 
     https://arxiv.org/abs/2006.04388.
     """
@@ -106,7 +105,7 @@ class QualityfocalLoss(nn.Module):
         cls_iou_targets, targets_onehot_pos = self.preprocess(pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask)
         
         # negatives are supervised by 0 quality score
-        pred_sigmoid = pred_scores.sigmoid()
+        pred_sigmoid = pred_scores.float().sigmoid()
         scale_factor = pred_sigmoid
         zerolabel = torch.zeros_like(pred_scores)
 
@@ -119,6 +118,7 @@ class QualityfocalLoss(nn.Module):
             ) * scale_factor.pow(beta)
         scale_factor = cls_iou_targets[targets_onehot_pos] - pred_sigmoid[targets_onehot_pos]
         with autocast(enabled=False):
+            # print(loss.dtype, pred_scores.dtype, cls_iou_targets.dtype, scale_factor.dtype)
             loss[targets_onehot_pos] = F.binary_cross_entropy_with_logits(
                 pred_scores[targets_onehot_pos],
                 cls_iou_targets[targets_onehot_pos],
@@ -209,16 +209,60 @@ class DFLoss(nn.Module):
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses during training."""
 
-    def __init__(self, reg_max=16):
-        """Initialize the BboxLoss module with regularization maximum and DFL settings."""
+    def __init__(
+        self,
+        reg_max: int = 16,
+        iou_loss_fn: str = "ciou",
+        nwd_loss: bool = False,
+        use_wiseiou: bool = False,
+        iou_ratio: float = 0.5,
+    ):
+        """Initialize the BboxLoss module with regularization maximum and DFL settings.
+        
+        Args:
+            reg_max (int, optional): The maximum value of the regression distribution. Defaults to 16.
+            iou_loss_fn (str, optional): The function to use for the IoU loss. Defaults to "ciou".
+            nwd_loss (bool, optional): If True, use the Wasserstein Distance loss. Defaults to False.
+            use_wiseiou (bool, optional): If True, use the Wise IoU loss. Defaults to False.
+            iou_ratio (float, optional): The ratio of the IoU loss to the Wasserstein Distance loss. Defaults to 0.5.
+        """
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+        self.iou_loss_fn = iou_loss_fn
+        self.nwd_loss = nwd_loss
+        self.iou_loss_fn = iou_loss_fn.lower()
+        self.iou_ratio = iou_ratio
+        assert self.iou_loss_fn in ('wiou', 'eiou', 'giou', 'diou', 'ciou', 'siou', 'shapeiou', 'piouv1', 'piouv2', 'interpiou'), \
+             f"Invalid IoU loss function: {self.iou_loss_fn}"
+
+        self.wiou_loss = WiseIoULoss(
+            ltype=self.iou_loss_fn,
+            monotonous=False,
+            inner_iou=False,
+            focaler_iou=False,
+        ) if use_wiseiou else None
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
         """IoU loss."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        if self.wiou_loss:
+            iou = self.wiou_loss(
+                pred_bboxes[fg_mask],
+                target_bboxes[fg_mask],
+                ret_iou=False,
+                ratio=0.7,
+                d=0.0,
+                u=0.95,
+            ).unsqueeze(-1)
+        else:
+            iou = 1.0 - bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, **{self.iou_loss_fn: True})
+
+        loss_iou = (iou * weight).sum() / target_scores_sum
+
+        if self.nwd_loss:
+            nwd = wasserstein_loss(pred_bboxes[fg_mask], target_bboxes[fg_mask])
+            nwd_loss = ((1.0 - nwd) * weight).sum() / target_scores_sum
+            loss_iou = self.iou_ratio * loss_iou + (1 - self.iou_ratio) * nwd_loss
 
         # DFL loss
         if self.dfl_loss:
@@ -281,8 +325,12 @@ class v8DetectionLoss:
         tal_topk=10,
         clf_loss_weights: list[list[float]] | None = None,
         clf_loss_fn: str = "qfl",
+        iou_loss_fn: str = "ciou",
+        nwd_loss: bool = False,
+        use_wiseiou: bool = False,
+        iou_ratio: float = 0.5,
     ):  # model must be de-paralleled
-        """Initializes v8DetectionLoss with the model, defining model-related properties and BCE loss function."""
+        """Initializes v8DetectionLoss with the model, defining model-related properties."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
 
@@ -302,16 +350,14 @@ class v8DetectionLoss:
         ]
         cls_losses = []
         for i in range(self.n_tasks):
-            # if clf_loss_fn == "bce":
-            #     cls_loss_fn = BCELoss
-            # elif clf_loss_fn == "vfl":
-            #     cls_loss_fn = VarifocalLoss
-            # elif clf_loss_fn == "qfl":
-            #     cls_loss_fn = QualityfocalLoss
-            cls_loss_fn = BCELoss 
+            if clf_loss_fn == "bce":
+                cls_loss_fn = BCELoss
+            elif clf_loss_fn == "vfl":
+                cls_loss_fn = VarifocalLoss
+            elif clf_loss_fn == "qfl":
+                cls_loss_fn = QualityFocalLoss
             cls_losses.append(cls_loss_fn(reduction="none", weight=self.clf_loss_weights[i]))
         self.cls_losses = nn.ModuleList(cls_losses)
-        LOGGER.info(f"Using {clf_loss_fn} loss for classification.")
 
         self.hyp = h
         self.stride = m.stride  # model strides
@@ -320,9 +366,22 @@ class v8DetectionLoss:
         self.device = device
 
         self.use_dfl = m.reg_max > 1
-        
-        self.assigner = TaskAlignedAssigner(topk=tal_topk, alpha=0.5, beta=6.0) # use main class for the assigner
-        self.bbox_loss = BboxLoss(m.reg_max).to(device)
+
+        self.assigner = TaskAlignedAssigner(
+            topk=tal_topk,
+            alpha=0.5,
+            beta=6.0,
+            iou_loss_fn=iou_loss_fn,
+        ) # use main class for the assigner
+
+        self.bbox_loss = BboxLoss(
+            reg_max=m.reg_max,
+            iou_loss_fn=iou_loss_fn,
+            nwd_loss=nwd_loss,
+            use_wiseiou=use_wiseiou,
+            iou_ratio=iou_ratio,
+        ).to(device)
+        LOGGER.info(f"{colorstr('Using losses')}: {clf_loss_fn} loss & {iou_loss_fn} loss.")
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets, batch_size, scale_tensor):
