@@ -133,7 +133,7 @@ erasing: 0.4 # (float) probability of random erasing during classification train
 crop_fraction: 1.0 # (float) image crop fraction for classification (0.1-1), 1.0 means no crop, must be greater than 0.
 
 # params for box filtration after RandomPerspectiveAug (become too small or with unusual aspect_ratio)
-aspect_ratio_thr: 100 # aspect ratio threshold for bboxes after RandomPerspective augmentation
+ar_thr: 100 # aspect ratio threshold for bboxes after RandomPerspective augmentation
 wh_thr: 5 # after RandomPerspective width and height threshold in pixels. Boxes smaller than this in either dimension are rejected.
 area_thr: 0.1 # Boxes with an area ratio = (new_area/old_area) less than this value are rejected after RandomPerspectiveAug
 

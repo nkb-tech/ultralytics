@@ -1051,7 +1051,7 @@ class RandomPerspective:
         shear=0.0,
         perspective=0.0,
         border=(0, 0),
-        aspect_ratio_thr=100,
+        ar_thr=100,
         wh_thr=2,
         area_thr=0.1,
         pre_transform=None,
@@ -1071,9 +1071,12 @@ class RandomPerspective:
             border (Tuple[int, int]): Tuple specifying mosaic border (top/bottom, left/right).
             pre_transform (Callable | None): Function/transform to apply to the image before starting the random
                 transformation.
-            aspect_ratio_thr (float): Пороговое значение для соотношения сторон bounding box'а.
-            wh_thr (float): Порог ширины и высоты (в пикселях) для фильтрации слишком маленьких box'ов.
-            area_thr (float): Пороговое отношение площадей (после/до) для фильтрации чрезмерно обрезанных box'ов.
+            wh_thr (int): Width and height threshold in pixels. Boxes smaller than this in either
+                dimension are rejected.
+            ar_thr (int): Aspect ratio threshold. Boxes with an aspect ratio greater than this
+                value are rejected.
+            area_thr (float): Area ratio threshold. Boxes with an area ratio (new/old) less than
+                this value are rejected.
 
         Examples:
             >>> transform = RandomPerspective(degrees=10.0, translate=0.1, scale=0.5, shear=5.0)
@@ -1086,7 +1089,7 @@ class RandomPerspective:
         self.perspective = perspective
         self.border = border  # mosaic border
         self.pre_transform = pre_transform
-        self.aspect_ratio_thr = aspect_ratio_thr
+        self.ar_thr = ar_thr
         self.wh_thr = wh_thr
         self.area_thr = area_thr
 
@@ -1332,8 +1335,6 @@ class RandomPerspective:
         labels["cls"] = cls[i]
         labels["img"] = img
         labels["resized_shape"] = img.shape[:2]
-        if "cls" in labels and labels["cls"].ndim == 1:
-            labels["cls"] = labels["cls"][:, None]
 
         return labels
 
@@ -1377,7 +1378,7 @@ class RandomPerspective:
             (w2 > self.wh_thr)
             & (h2 > self.wh_thr)
             & (w2 * h2 / (w1 * h1 + eps) > self.area_thr)
-            & (ar < self.aspect_ratio_thr)
+            & (ar < self.ar_thr)
         )  # candidates
 
     def __repr__(self):
@@ -2315,7 +2316,7 @@ class Albumentations:
                                 r_shift_limit=[-10, 10],
                                 g_shift_limit=[-10, 10],
                                 b_shift_limit=[-10, 10],
-                                        p=0.15,
+                                p=0.15,
                             ),
                         A.Emboss(
                             alpha=(0.2, 0.5), 
@@ -2343,7 +2344,10 @@ class Albumentations:
                     A.Compose(
                         T,
                         bbox_params=A.BboxParams(
-                            format="yolo", label_fields=["class_labels"], min_visibility=0.5, filter_invalid_bboxes=True
+                            format="yolo",
+                            label_fields=["class_labels"],
+                            min_visibility=0.5,
+                            filter_invalid_bboxes=True,
                         ),
                     )
                     if self.contains_spatial
@@ -2382,64 +2386,31 @@ class Albumentations:
 
         if self.contains_spatial:
             cls = labels["cls"]
-            if len(cls) or self.crop_bg:
-                im = labels["img"]
-                labels["instances"].convert_bbox("xywh")
-                labels["instances"].normalize(*im.shape[:2][::-1])
-                bboxes = labels["instances"].bboxes
-                
-                # Multi-task format (2D array)
-                if isinstance(cls, np.ndarray) and cls.ndim > 1:
-                    # Store the original full labels
-                    cls_full = cls.copy()
-                    # Albumentations' accepts only a simple list of classes. 
-                    # Extract primary class
-                    cls_for_albu = cls[:, 0].astype(int).tolist()
-                else:
-                    # Single-task case
-                    cls_full = None
-                    cls_for_albu = cls.tolist() if isinstance(cls, np.ndarray) else cls
-                
-                new = self.transform(image=im, bboxes=bboxes, class_labels=cls_for_albu)
+            im = labels["img"]
+            labels["instances"].convert_bbox("xywh")
+            labels["instances"].normalize(*im.shape[:2][::-1])
+            bboxes = labels["instances"].bboxes
 
-                # Update labels only if some objects remain after augmentation (e.g., cropping)
-                if len(new["class_labels"]) > 0 or self.crop_bg:
-                    labels["img"] = new["image"]
-                    # Reconstruct multi task labels
-                    if cls_full is not None:
-                        new_cls_main = np.array(new["class_labels"])
-                        cls_to_attr = {}
-                        for i in range(len(cls_full)):
-                            main_cls = int(cls_full[i, 0])
-                            if main_cls not in cls_to_attr:
-                                cls_to_attr[main_cls] = []
-                            # Store the additional classes
-                            cls_to_attr[main_cls].append(cls_full[i, 1:])
+            # Multi-task format (2D array)
+            unique_id_to_full_cls = {i: row for i, row in enumerate(cls)} 
+            cls_for_albu = list(unique_id_to_full_cls.keys())
 
-                        # Reconstruct the full label for the objects that survived the augmentation
-                        new_cls_full = []
-                        for main_cls in new_cls_main:
-                            main_cls = int(main_cls)
-                            if main_cls in cls_to_attr and len(cls_to_attr[main_cls]) > 0:
-                                attrs = cls_to_attr[main_cls].pop(0)
-                                new_cls_full.append([main_cls] + attrs.tolist())
-                            else:
-                                new_cls_full.append([main_cls] + [0] * (cls_full.shape[1] - 1))
+            tf_out = self.transform(image=im, bboxes=bboxes, class_labels=cls_for_albu)
 
-                        labels["cls"] = np.array(new_cls_full, dtype=cls_full.dtype)
-                    else:
-                        # Standard single-task case: simply update with the new list of classes.
-                        labels["cls"] = np.array(new["class_labels"])
-                    
-                    bboxes = np.array(new["bboxes"], dtype=np.float32)
-                    labels["instances"].update(bboxes=bboxes)
-        else: # Non-spatial transforms
-            if isinstance(labels, dict):
-                labels["img"] = self.transform(image=labels["img"])["image"]
-            elif isinstance(labels, Image.Image):
-                labels = Image.fromarray(self.transform(image=np.asarray(labels))["image"])
+            labels["img"] = tf_out["image"]
+            # Reconstruct multi task labels
+            surviving_unique_ids = tf_out["class_labels"]
+            if surviving_unique_ids:
+                reconstructed_cls = [unique_id_to_full_cls[uid] for uid in surviving_unique_ids]
+                labels["cls"] = np.array(reconstructed_cls, dtype=cls.dtype)
             else:
-                raise TypeError(f"Unexpected type for labels: {type(labels)}")
+                labels["cls"] = np.empty((0, cls.shape[1]), dtype=cls.dtype)
+
+            bboxes = np.array(tf_out["bboxes"], dtype=np.float32)
+            labels["instances"].update(bboxes=bboxes)
+        else: # Non-spatial transforms
+            labels["img"] = self.transform(image=labels["img"])["image"]
+
         return labels
 
     def __repr__(self):
@@ -2853,7 +2824,7 @@ def v8_transforms(dataset, imgsz, hyp, stretch=False):
         scale=hyp.scale,
         shear=hyp.shear,
         perspective=hyp.perspective,
-        aspect_ratio_thr=hyp.aspect_ratio_thr,
+        ar_thr=hyp.ar_thr,
         wh_thr=hyp.wh_thr,
         area_thr=hyp.area_thr,
         pre_transform=None if stretch else LetterBox(new_shape=(imgsz, imgsz)),
@@ -2980,7 +2951,7 @@ def crop_transforms(dataset, imgsz: int, hyp, stretch=False):
         scale=hyp.scale,
         shear=hyp.shear,
         perspective=hyp.perspective,
-        aspect_ratio_thr=hyp.aspect_ratio_thr,
+        ar_thr=hyp.ar_thr,
         wh_thr=hyp.wh_thr,
         area_thr=hyp.area_thr,
         pre_transform=LetterBox(new_shape=(imgsz, imgsz)),

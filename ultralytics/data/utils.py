@@ -180,7 +180,7 @@ def verify_image_label(args, min_imgsz=9):
         return im_file, lb, shape, segments, keypoints, nm, nf, ne, ncpt, msg
     except Exception as e:
         ncpt = 1
-        msg = f"{prefix}{im_file}: ignoring corrupt image/label: {e}"
+        msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
         return [None, None, None, None, None, nm, nf, ne, ncpt, msg]
 
 

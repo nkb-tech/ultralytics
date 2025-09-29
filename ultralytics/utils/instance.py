@@ -54,7 +54,6 @@ class Bboxes:
         assert bboxes.shape[1] == 4, f"Invalid bboxes shape: {bboxes.shape[1]}, it should be equal 4. {bboxes}"
         self.bboxes = bboxes
         self.format = format
-        # self.normalized = normalized
 
     def convert(self, format):
         """Converts bounding box format from one type to another."""
@@ -77,22 +76,6 @@ class Bboxes:
             if self.format == "xyxy"
             else self.bboxes[:, 3] * self.bboxes[:, 2]  # format xywh or ltwh
         )
-
-    # def denormalize(self, w, h):
-    #    if not self.normalized:
-    #         return
-    #     assert (self.bboxes <= 1.0).all()
-    #     self.bboxes[:, 0::2] *= w
-    #     self.bboxes[:, 1::2] *= h
-    #     self.normalized = False
-    #
-    # def normalize(self, w, h):
-    #     if self.normalized:
-    #         return
-    #     assert (self.bboxes > 1.0).any()
-    #     self.bboxes[:, 0::2] /= w
-    #     self.bboxes[:, 1::2] /= h
-    #     self.normalized = True
 
     def mul(self, scale):
         """
