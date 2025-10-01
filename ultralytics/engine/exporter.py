@@ -432,7 +432,7 @@ class Exporter:
         """YOLOv8 ONNX export."""
         requirements = ["onnx>=1.12.0"]
         if self.args.simplify:
-            requirements += ["onnxslim==0.1.34", "onnxruntime" + ("-gpu" if torch.cuda.is_available() else "")]
+            requirements += ["onnxslim", "onnxscript", "onnxruntime" + ("-gpu" if torch.cuda.is_available() else "")]
         check_requirements(requirements)
         import onnx  # noqa
 
@@ -528,11 +528,10 @@ class Exporter:
                 model_onnx_slimmed = onnxslim.slim(model_onnx)
                 end_time = time.time()
 
-                original_info = summarize_model(model_onnx)
-                slimmed_info = summarize_model(model_onnx_slimmed)
+                original_info = summarize_model(model_onnx, 'original')
+                slimmed_info = summarize_model(model_onnx_slimmed, 'slimmed')
 
                 print_model_info_as_table(
-                    self.pretty_name,
                     [original_info, slimmed_info],
                     end_time - start_time,
                 )

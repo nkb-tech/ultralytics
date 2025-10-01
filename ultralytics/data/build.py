@@ -155,7 +155,7 @@ def build_grounding(cfg, img_path, json_file, batch, mode="train", rect=False, s
     )
 
 
-def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1):
+def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, drop_last=False):
     """Return an InfiniteDataLoader or DataLoader for training or validation set."""
     batch = min(batch, len(dataset))
     nd = torch.cuda.device_count()  # number of CUDA devices
@@ -173,6 +173,7 @@ def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1):
         collate_fn=getattr(dataset, "collate_fn", None),
         worker_init_fn=seed_worker,
         generator=generator,
+        drop_last=drop_last and len(dataset) % batch != 0,
     )
 
 

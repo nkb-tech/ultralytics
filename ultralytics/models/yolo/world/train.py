@@ -6,7 +6,7 @@ from ultralytics.data import build_yolo_dataset
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import WorldModel
 from ultralytics.utils import DEFAULT_CFG, RANK, checks
-from ultralytics.utils.torch_utils import de_parallel
+from ultralytics.utils.torch_utils import unwrap_model
 
 
 def on_pretrain_routine_end(trainer):
@@ -14,7 +14,7 @@ def on_pretrain_routine_end(trainer):
     if RANK in {-1, 0}:
         # NOTE: for evaluation
         names = [name.split("/")[0] for name in list(trainer.test_loader.dataset.data["names"].values())]
-        de_parallel(trainer.ema.ema).set_classes(names, cache_clip_model=False)
+        unwrap_model(trainer.ema.ema).set_classes(names, cache_clip_model=False)
     device = next(trainer.model.parameters()).device
     trainer.text_model, _ = trainer.clip.load("ViT-B/32", device=device)
     for p in trainer.text_model.parameters():
@@ -74,7 +74,7 @@ class WorldTrainer(yolo.detect.DetectionTrainer):
             mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
-        gs = max(int(de_parallel(self.model).stride.max() if self.model else 0), 32)
+        gs = max(int(unwrap_model(self.model).stride.max() if self.model else 0), 32)
         return build_yolo_dataset(
             self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=gs, multi_modal=mode == "train"
         )

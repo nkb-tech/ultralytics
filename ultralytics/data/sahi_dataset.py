@@ -266,7 +266,7 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
 
         desc = f"{colorstr('SAHI Calculating slices')}"
         slice_indices: List[Tuple[int, Any]] = []
-        slices_per_image: List[int] = []
+        total_slices, min_slices, max_slices, processed_images = 0, math.inf, 0, 0
 
         with ThreadPool(NUM_THREADS) as pool:
             # Thread-pool map over all images
@@ -280,18 +280,18 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
                 if self.cut_strategy == "random_crop":
                     sampled_slices = max(1, round(calculated_data * self.sampling_rate))
                     slice_indices.extend([(idx, s) for s in range(sampled_slices)])
-                    slices_per_image.append(sampled_slices)
+                    current_slices = sampled_slices
                 else:  # grid
-                    for s_idx, coords in enumerate(calculated_data):
-                        slice_indices.append((idx, s_idx, coords))
-                    slices_per_image.append(len(calculated_data))
+                    slice_indices.extend((idx, s_idx, coords) for s_idx, coords in enumerate(calculated_data))
+                    current_slices = len(calculated_data)
 
-                # Store statistics
-                avg_slices = sum(slices_per_image) / len(slices_per_image)
-                min_slices = min(slices_per_image)
-                max_slices = max(slices_per_image)
+                processed_images += 1
+                total_slices += current_slices
+                min_slices = min(min_slices, current_slices)
+                max_slices = max(max_slices, current_slices)
+                avg_slices = total_slices / processed_images
 
-                pbar.desc = f"{desc}: min {min_slices}, max {max_slices}, avg {avg_slices:.2f} per image"
+                pbar.desc = f"{desc}: min {min_slices}, max {max_slices}, avg {avg_slices:.4f} per image"
 
             pbar.close()
 

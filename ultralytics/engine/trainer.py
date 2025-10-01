@@ -22,7 +22,7 @@ from torch import distributed as dist
 from torch import nn, optim
 
 from ultralytics.cfg import get_cfg, get_save_dir
-from ultralytics.data.utils import check_cls_dataset, check_det_dataset, IMG_FORMATS
+from ultralytics.data.utils import check_cls_dataset, check_det_dataset
 from ultralytics.nn.tasks import attempt_load_one_weight, attempt_load_weights
 from ultralytics.utils import (
     DEFAULT_CFG,
@@ -52,6 +52,7 @@ from ultralytics.utils.torch_utils import (
     select_device,
     strip_optimizer,
     torch_distributed_zero_first,
+    attempt_compile,
 )
 from ultralytics.utils.loss import DistillationLoss
 
@@ -364,6 +365,9 @@ class BaseTrainer:
             criterion = self.model.init_criterion(weights=loss_weights)
             self.model.criterion = criterion
 
+        # Compile model
+        self.model = attempt_compile(self.model, device=self.device, mode=self.args.compile)
+
         if getattr(self, "ema", None):
             ema_model = getattr(self.ema, "ema", None)
             if ema_model is not None:
@@ -602,8 +606,6 @@ class BaseTrainer:
             self.best.write_bytes(serialized_ckpt)  # save best.pt
         if (self.save_period > 0) and (self.epoch % self.save_period == 0):
             (self.wdir / f"epoch{self.epoch}.pt").write_bytes(serialized_ckpt)  # save epoch, i.e. 'epoch3.pt'
-        # if self.args.close_mosaic and self.epoch == (self.epochs - self.args.close_mosaic - 1):
-        #    (self.wdir / "last_mosaic.pt").write_bytes(serialized_ckpt)  # save mosaic checkpoint
 
     def get_dataset(self):
         """
@@ -756,6 +758,7 @@ class BaseTrainer:
                     strip_optimizer(f, updates={k: ckpt[k]} if k in ckpt else None)
                     LOGGER.info(f"\nValidating {f}...")
                     self.validator.args.plots = self.args.plots
+                    self.validator.args.compile = False # disable final val compile as too slow
                     self.metrics = self.validator(model=f)
                     self.metrics.pop("fitness", None)
                     self.run_callbacks("on_fit_epoch_end")

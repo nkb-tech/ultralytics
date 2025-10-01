@@ -12,6 +12,7 @@ import torch.nn as nn
 from torch.nn.init import constant_, xavier_uniform_
 
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
+from ultralytics.utils.torch_utils import disable_dynamo
 
 from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto, EfficientTRTNMS, ONNXNMS
 from .conv import Conv, DWConv
@@ -130,6 +131,7 @@ class Detect(nn.Module):
             y = self.postprocess(y.permute(0, 2, 1), self.max_det, self.nc)
         return y if self.export else (y, {"one2many": x, "one2one": one2one})
 
+    @disable_dynamo
     def _inference(self, x):
         """Decode predicted bounding boxes and class probabilities based on multiple-level feature maps."""
         # Inference path

@@ -4,7 +4,9 @@ import math
 import random
 from copy import copy
 from pathlib import Path
+from typing import Any
 
+import torch
 import numpy as np
 import torch.nn as nn
 
@@ -12,9 +14,9 @@ from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel, yaml_model_load
-from ultralytics.utils import LOGGER, RANK
+from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
-from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
+from ultralytics.utils.torch_utils import unwrap_model, torch_distributed_zero_first
 
 
 class DetectionTrainer(BaseTrainer):
@@ -30,6 +32,16 @@ class DetectionTrainer(BaseTrainer):
         trainer.train()
         ```
     """
+    def __init__(self, cfg=DEFAULT_CFG, overrides: dict[str, Any] | None = None, _callbacks=None):
+        """
+        Initialize a DetectionTrainer object for training YOLO object detection model training.
+        Args:
+            cfg (dict, optional): Default configuration dictionary containing training parameters.
+            overrides (dict, optional): Dictionary of parameter overrides for the default configuration.
+            _callbacks (list, optional): List of callback functions to be executed during training.
+        """
+        super().__init__(cfg=cfg, overrides=overrides, _callbacks=_callbacks)
+        self.dynamic_tensors = ["batch_idx", "cls", "bboxes"]
 
     def build_dataset(self, img_path, mode="train", batch=None):
         """
@@ -40,7 +52,7 @@ class DetectionTrainer(BaseTrainer):
             mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
-        gs = max(int(de_parallel(self.model).stride.max() if self.model else 0), 32)
+        gs = max(int(unwrap_model(self.model).stride.max() if self.model else 0), 32)
         return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=gs)
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
@@ -52,8 +64,14 @@ class DetectionTrainer(BaseTrainer):
         if getattr(dataset, "rect", False) and shuffle:
             LOGGER.warning("WARNING ⚠️ 'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
             shuffle = False
-        workers = self.args.workers if mode == "train" else self.args.workers * 2
-        return build_dataloader(dataset, batch_size, workers, shuffle, rank)  # return dataloader
+        return build_dataloader(
+            dataset,
+            batch=batch_size,
+            workers=self.args.workers if mode == "train" else self.args.workers * 2,
+            shuffle=shuffle,
+            rank=rank,
+            drop_last=self.args.compile and mode == "train",
+        )  # return dataloader
 
     def preprocess_batch(self, batch):
         """Preprocesses a batch of images by scaling and converting to float."""
@@ -72,10 +90,14 @@ class DetectionTrainer(BaseTrainer):
                 ]  # new shape (stretched to gs-multiple)
                 imgs = nn.functional.interpolate(imgs, size=ns, mode="bilinear", align_corners=False)
             batch["img"] = imgs
+
+        if self.args.compile:
+            for k in self.dynamic_tensors:
+                torch._dynamo.maybe_mark_dynamic(batch[k], 0)
         return batch
 
     def set_model_attributes(self):
-        """Nl = de_parallel(self.model).model[-1].nl  # number of detection layers (to scale hyps)."""
+        """Nl = unwrap_model(self.model).model[-1].nl  # number of detection layers (to scale hyps)."""
         # self.args.box *= 3 / nl  # scale to layers
         # self.args.cls *= self.data["nc"] / 80 * 3 / nl  # scale to classes and layers
         # self.args.cls *= (self.args.imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers

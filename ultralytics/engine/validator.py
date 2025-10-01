@@ -33,7 +33,7 @@ from ultralytics.nn.autobackend import AutoBackend
 from ultralytics.utils import LOGGER, TQDM, callbacks, colorstr, emojis
 from ultralytics.utils.checks import check_imgsz
 from ultralytics.utils.ops import Profile
-from ultralytics.utils.torch_utils import de_parallel, select_device, smart_inference_mode
+from ultralytics.utils.torch_utils import unwrap_model, select_device, smart_inference_mode, attempt_compile
 
 
 class BaseValidator:
@@ -113,6 +113,8 @@ class BaseValidator:
             # force FP16 val during training
             self.args.half = self.device.type != "cpu" and trainer.amp
             model = trainer.ema.ema or trainer.model
+            if trainer.args.compile and hasattr(model, "_orig_mod"):
+                model = model._orig_mod  # validate non-compiled original model to avoid issues
             model = model.half() if self.args.half else model.float()
             # self.model = model
             if isinstance(trainer.loss_items, torch.Tensor):
@@ -165,6 +167,8 @@ class BaseValidator:
             if hasattr(self.dataloader, "dataset") and getattr(self.dataloader.dataset, "data", None):
                 self.data = self.dataloader.dataset.data
             model.eval()
+            if self.args.compile:
+                model = attempt_compile(model, device=self.device)
             model.warmup(imgsz=(1 if pt else self.args.batch, 3, imgsz, imgsz))  # warmup
 
         self.run_callbacks("on_val_start")
@@ -175,7 +179,7 @@ class BaseValidator:
             Profile(device=self.device),
         )
         bar = TQDM(self.dataloader, desc=self.get_desc(), total=len(self.dataloader))
-        self.init_metrics(de_parallel(model))
+        self.init_metrics(unwrap_model(model))
         self.jdict = []  # empty before each val
         for batch_i, batch in enumerate(bar):
             self.run_callbacks("on_val_batch_start")

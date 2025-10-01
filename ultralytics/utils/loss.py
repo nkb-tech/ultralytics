@@ -9,7 +9,7 @@ from ultralytics.utils import LOGGER, colorstr
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
-from ultralytics.utils.torch_utils import autocast
+from ultralytics.utils.torch_utils import autocast, disable_dynamo
 
 from .metrics import bbox_iou, probiou, WiseIoULoss, wasserstein_loss
 from .tal import bbox2dist
@@ -383,6 +383,7 @@ class v8DetectionLoss:
         ).to(device)
         LOGGER.info(f"{colorstr('Using losses')}: {clf_loss_fn} loss & {iou_loss_fn} loss.")
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+        disable_dynamo(self.__class__)  # disable dynamo for this class
 
     def preprocess(self, targets, batch_size, scale_tensor):
         """Preprocesses the target counts and matches with the input batch size to output a tensor."""

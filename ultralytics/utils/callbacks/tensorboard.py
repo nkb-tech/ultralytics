@@ -17,7 +17,7 @@ try:
     import warnings
     from copy import deepcopy
 
-    from ultralytics.utils.torch_utils import de_parallel, torch
+    from ultralytics.utils.torch_utils import unwrap_model, torch
 
 except (ImportError, AssertionError, TypeError, AttributeError):
     # TypeError for handling 'Descriptors cannot not be created directly.' protobuf errors in Windows
@@ -47,13 +47,13 @@ def _log_tensorboard_graph(trainer):
         # Try simple method first (YOLO)
         with contextlib.suppress(Exception):
             trainer.model.eval()  # place in .eval() mode to avoid BatchNorm statistics changes
-            WRITER.add_graph(torch.jit.trace(de_parallel(trainer.model), im, strict=False), [])
+            WRITER.add_graph(torch.jit.trace(unwrap_model(trainer.model), im, strict=False), [])
             LOGGER.info(f"{PREFIX}model graph visualization added ✅")
             return
 
         # Fallback to TorchScript export steps (RTDETR)
         try:
-            model = deepcopy(de_parallel(trainer.model))
+            model = deepcopy(unwrap_model(trainer.model))
             model.eval()
             model = model.fuse(verbose=False)
             for m in model.modules():

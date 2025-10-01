@@ -45,7 +45,7 @@ from ultralytics.nn.autobackend import AutoBackend
 from ultralytics.utils import DEFAULT_CFG, LOGGER, MACOS, WINDOWS, callbacks, colorstr, ops
 from ultralytics.utils.checks import check_imgsz, check_imshow
 from ultralytics.utils.files import increment_path
-from ultralytics.utils.torch_utils import select_device, smart_inference_mode
+from ultralytics.utils.torch_utils import select_device, smart_inference_mode, attempt_compile
 
 STREAM_WARNING = """
 WARNING ⚠️ inference results will accumulate in RAM unless `stream=True` is passed, causing potential out-of-memory
@@ -320,6 +320,7 @@ class BasePredictor:
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half
         self.model.eval()
+        self.model = attempt_compile(self.model, device=self.device, mode=self.args.compile)
 
     def write_results(self, i, p, im, s):
         """Write inference results to a file or directory."""

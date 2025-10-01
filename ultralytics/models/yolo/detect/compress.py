@@ -26,7 +26,7 @@ from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel, yaml_model_load
 from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK, TQDM, clean_url, colorstr, emojis, yaml_save, callbacks, __version__
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
-from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
+from ultralytics.utils.torch_utils import unwrap_model, torch_distributed_zero_first
 from ultralytics.utils.checks import check_imgsz, print_args, check_amp
 from ultralytics.utils.autobatch import check_train_batch_size
 from ultralytics.utils.torch_utils import ModelEMA, EarlyStopping, one_cycle, init_seeds, select_device
@@ -390,7 +390,7 @@ class DetectionCompressor(BaseTrainer):
             mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
-        gs = max(int(de_parallel(self.model).stride.max() if self.model else 0), 32)
+        gs = max(int(unwrap_model(self.model).stride.max() if self.model else 0), 32)
         return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == 'val', stride=gs)
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode='train'):
@@ -514,7 +514,7 @@ class DetectionCompressor(BaseTrainer):
         ckpt = {
             'epoch': self.epoch,
             'best_fitness': self.best_fitness,
-            'model': deepcopy(de_parallel(self.model)).half(),
+            'model': deepcopy(unwrap_model(self.model)).half(),
             'ema': deepcopy(self.ema.ema).half(),
             'updates': self.ema.updates,
             'optimizer': self.optimizer.state_dict(),
@@ -529,7 +529,7 @@ class DetectionCompressor(BaseTrainer):
         if self.best_fitness == self.fitness:
             torch.save(ckpt, self.best)
         if self.best_sl[f'{self.sparsity_ratio:.3f}'] == self.fitness:
-            torch.save({'model': deepcopy(de_parallel(self.model)).half(),
+            torch.save({'model': deepcopy(unwrap_model(self.model)).half(),
                         'ema': deepcopy(self.ema.ema).half(),}, self.wdir / 'best_sl_{:.3f}.pt'.format(self.sparsity_ratio))
         if (self.save_period > 0) and (self.epoch > 0) and (self.epoch % self.save_period == 0):
             torch.save(ckpt, self.wdir / f'epoch{self.epoch}.pt')
@@ -1002,7 +1002,7 @@ class DetectionCompressor(BaseTrainer):
         del fuse_model
 
         prune_path = self.wdir / 'prune.pt'
-        ckpt = {'model': deepcopy(de_parallel(self.model)).half(), 'ema': None}
+        ckpt = {'model': deepcopy(unwrap_model(self.model)).half(), 'ema': None}
         torch.save(ckpt, prune_path)
         LOGGER.info(colorstr(f'Pruning after Finetune before the model is saved in:{prune_path}'))
         return str(prune_path)

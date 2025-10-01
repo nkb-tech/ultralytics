@@ -4,7 +4,7 @@ from ultralytics.data import YOLOConcatDataset, build_grounding, build_yolo_data
 from ultralytics.data.utils import check_det_dataset
 from ultralytics.models.yolo.world import WorldTrainer
 from ultralytics.utils import DEFAULT_CFG
-from ultralytics.utils.torch_utils import de_parallel
+from ultralytics.utils.torch_utils import unwrap_model
 
 
 class WorldTrainerFromScratch(WorldTrainer):
@@ -53,7 +53,7 @@ class WorldTrainerFromScratch(WorldTrainer):
             mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
-        gs = max(int(de_parallel(self.model).stride.max() if self.model else 0), 32)
+        gs = max(int(unwrap_model(self.model).stride.max() if self.model else 0), 32)
         if mode != "train":
             return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=gs)
         dataset = [

@@ -39,13 +39,16 @@ freeze: None # (int | list, optional) freeze first n layers, or freeze list of l
 multi_scale: False # (bool) Whether to use multiscale during training
 weighted: False # (bool) Whether to use balanced classes during training
 sync_bn: False # (bool) Whether to use sync batchnorm for distributed training
+compile: False # (bool | str) Enable torch.compile() with backend='inductor'. True → "default", False → disable, or str mode (max-autotune, reduce-overhead, etc)
+
 # Segmentation
 overlap_mask: True # (bool) masks should overlap during training (segment train only)
 mask_ratio: 4 # (int) mask downsample ratio (segment train only)
+
 # Classification
 dropout: 0.0 # (float) use dropout regularization (classify train only)
 weighted_loss: False # Whether to use weighted loss with weight=1/sqrt(n_samples) - for classification train only
-clf_loss_fn: "qfl" # (str) classification loss function, choices=[bce, vfl, qfl]
+clf_loss_fn: "bce" # (str) classification loss function, choices=[bce, vfl, qfl]
 iou_loss_fn: "piouv2" # (str) IoU loss function, choices=[wiou, eiou, giou, diou, ciou, siou, shapeiou, piouv1, piouv2]
 nwd_loss: False # (bool) Whether to use Wasserstein Distance loss for BBox Regression
 use_wiseiou: False # (bool) Whether to use Wise IoU loss for BBox Regression
@@ -177,7 +180,6 @@ tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yam
 teacher: None #  None | (str) path to teacher model
 temperature: 3.0 # (float) temperature for softening logits
 alpha: 0.5 # (float) weight for distillation loss
-
 
 
 # Pruning settings -------------------------------------------------------------------------------------------------
