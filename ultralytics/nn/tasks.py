@@ -200,6 +200,8 @@ class BaseModel(nn.Module):
                 if isinstance(m, RepVGGDW):
                     m.fuse()
                     m.forward = m.forward_fuse
+                if hasattr(m, "switch_to_deploy"):
+                    m.switch_to_deploy()
             self.info(verbose=verbose)
 
         return self
@@ -1084,7 +1086,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C3_DLKA, C2f_DLKA, CSPStage, SPDConv, RepBlock, C3_EMBC, C2f_EMBC, SPPF_LSKA, C3_DAttention, C2f_DAttention,
             C3_Parc, C2f_Parc, C3_DWR, C2f_DWR, RFAConv, RFCAConv, RFCBAMConv, C3_RFAConv, C2f_RFAConv,
             C3_RFCBAMConv, C2f_RFCBAMConv, C3_RFCAConv, C2f_RFCAConv, C3_FocusedLinearAttention, C2f_FocusedLinearAttention,
-            C3_AKConv, C2f_AKConv, AKConv, C3_MLCA, C2f_MLCA, C3k2,
+            C3_AKConv, C2f_AKConv, AKConv, C3_MLCA, C2f_MLCA, C3k2, MobileOneBlock,
             C3_UniRepLKNetBlock, C2f_UniRepLKNetBlock, C3_DRB, C2f_DRB, C3_DWR_DRB, C2f_DWR_DRB, CSP_EDLAN,
             C3_AggregatedAtt, C2f_AggregatedAtt, DCNV4_YOLO, C3_DCNv4, C2f_DCNv4, HWD, SEAM,
             C3_SWC, C2f_SWC, C3_iRMB, C2f_iRMB, C3_iRMB_Cascaded, C2f_iRMB_Cascaded, C3_iRMB_DRB, C2f_iRMB_DRB, C3_iRMB_SWC, C2f_iRMB_SWC,

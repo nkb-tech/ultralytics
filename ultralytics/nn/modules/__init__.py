@@ -74,6 +74,7 @@ from .conv import (
     LightConv,
     RepConv,
     SpatialAttention,
+    MobileOneBlock,
 )
 from .head import (
     OBB,
@@ -182,4 +183,5 @@ __all__ = (
     "Attention",
     "PSA",
     "SCDown",
+    "MobileOneBlock",
 )
