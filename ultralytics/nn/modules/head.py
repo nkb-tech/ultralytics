@@ -79,6 +79,18 @@ class Detect(nn.Module):
             self.one2one_cv3 = copy.deepcopy(self.cv3)
 
     def pre_forward(self, x):
+        if self.export and self.format == 'rknn':
+            output = []
+            for i in range(self.nl):
+                output.append(self.cv2[i](x[i]))
+                for head in self.cv3:
+                    cls = head[i](x[i]).sigmoid_()
+                    cls_sum = cls.sum(dim=1, keepdim=True).clamp_(0, 1)
+                    output.append(cls)
+                    output.append(cls_sum)
+
+            return output
+
         for i in range(self.nl):
             y = [self.cv2[i](x[i])]
             for head in self.cv3:
@@ -93,7 +105,7 @@ class Detect(nn.Module):
             return self.forward_end2end(x)
 
         x = self.pre_forward(x)
-        if self.training:  # Training path
+        if self.training or (self.export and self.format == 'rknn'):  # Training path
             return x
         y = self._inference(x)
         return y if self.export else (y, x)

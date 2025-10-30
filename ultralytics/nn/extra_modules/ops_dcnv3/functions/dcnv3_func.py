@@ -12,13 +12,14 @@ import torch
 import torch.nn.functional as F
 from torch.autograd import Function
 from torch.autograd.function import once_differentiable
-from torch.amp import custom_bwd, custom_fwd
 try:
     import DCNv3
     import pkg_resources
     dcn_version = float(pkg_resources.get_distribution('DCNv3').version)
 except:
     pass
+
+from ultralytics.utils.torch_utils import custom_fwd, custom_bwd
 
 class DCNv3Function(Function):
     @staticmethod
