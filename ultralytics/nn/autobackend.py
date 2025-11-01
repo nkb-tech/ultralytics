@@ -106,22 +106,29 @@ class AutoBackend(nn.Module):
         super().__init__()
         w = str(weights[0] if isinstance(weights, list) else weights)
         nn_module = isinstance(weights, torch.nn.Module)
+        model_types = self._model_type(w)
+
         (
-            pt,
-            jit,
-            onnx,
-            xml,
-            engine,
-            coreml,
-            saved_model,
-            pb,
-            tflite,
-            edgetpu,
-            tfjs,
-            paddle,
-            ncnn,
-            triton,
-        ) = self._model_type(w)
+            pt,           # 0
+            jit,          # 1
+            onnx,         # 2
+            xml,          # 3
+            engine,       # 4
+            coreml,       # 5
+            saved_model,  # 6
+            pb,           # 7
+            tflite,       # 8
+            edgetpu,      # 9
+            tfjs,         # 10
+            paddle,       # 11
+            mnn,          # 12
+            ncnn,         # 13
+            imx,          # 14
+            rknn,         # 15
+            executorch,   # 16
+            triton,       # 17
+        ) = model_types if len(model_types) == 18 else model_types + [False] * (18 - len(model_types))
+
         fp16 &= pt or jit or onnx or xml or engine or nn_module or triton  # FP16
         nhwc = coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs torch BCWH)
         stride = 32  # default stride

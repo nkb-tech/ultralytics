@@ -682,11 +682,12 @@ def check_amp(model):
 
     im = ASSETS / "bus.jpg"  # image to check
     prefix = colorstr("AMP: ")
-    LOGGER.info(f"{prefix}running Automatic Mixed Precision (AMP) checks with YOLO11n...")
-    warning_msg = "Setting 'amp=True'. If you experience zero-mAP or NaN losses you can disable AMP with amp=False."
+    LOGGER.info(f"{prefix}running Automatic Mixed Precision (AMP) checks...")
+    warning_msg = "Setting 'amp=True'. If you experience zero-mAP or NaN losses you can disable AMP with amp=False."   
     try:
         from ultralytics import YOLO
 
+        # Попытка загрузить yolo11n.pt
         assert amp_allclose(YOLO("yolo11n.pt"), im)
         LOGGER.info(f"{prefix}checks passed ✅")
     except ConnectionError:
@@ -696,12 +697,17 @@ def check_amp(model):
             f"{prefix}checks skipped ⚠️. "
             f"Unable to load YOLO11n due to possible Ultralytics package modifications. {warning_msg}"
         )
-    except AssertionError:
+    except (AssertionError, ValueError, TypeError) as e:
         LOGGER.warning(
-            f"{prefix}checks failed ❌. Anomalies were detected with AMP on your system that may lead to "
-            f"NaN losses or zero-mAP results, so AMP will be disabled during training."
+            f"{prefix}checks failed ❌. Anomalies were detected with AMP on your system ({e.__class__.__name__}: {e}). "
+            f"AMP will be disabled during training."
         )
         return False
+    except Exception as e:
+        LOGGER.warning(
+            f"{prefix}checks skipped ⚠️. Unexpected error: {e.__class__.__name__}: {e}. {warning_msg}"
+        )
+    
     return True
 
 

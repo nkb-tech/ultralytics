@@ -113,7 +113,7 @@ def custom_bwd(device_type="cuda"):
     Get the appropriate custom backward function based on PyTorch version and device type.
     """
     if TORCH_2_4:
-        return torch.amp.custom_bwd(device_type)
+        return torch.amp.custom_bwd(device_type=device_type)
     elif device_type == "cuda":
         return torch.cuda.amp.custom_bwd
     else:
@@ -124,7 +124,7 @@ def custom_fwd(device_type="cuda"):
     Get the appropriate custom backward function based on PyTorch version and device type.
     """
     if TORCH_2_4:
-        return torch.amp.custom_fwd(device_type)
+        return torch.amp.custom_fwd(device_type=device_type)
     elif device_type == "cuda":
         return torch.cuda.amp.custom_fwd
     else:

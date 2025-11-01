@@ -171,3 +171,13 @@ pnnx*
 calibration_*.npy
 tests/*
 multihead_training_test.py
+
+# Training scripts
+train.py
+convert.ipynb
+
+# External dependencies
+timm/
+
+# IDE and notebooks
+*.ipynb

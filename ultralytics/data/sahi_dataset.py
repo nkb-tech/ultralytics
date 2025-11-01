@@ -4,7 +4,9 @@ import math
 from multiprocessing.pool import ThreadPool
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple, Union
-
+import heapq
+from collections import defaultdict
+from threading import Lock
 import numpy as np
 import numba as nb
 
@@ -52,42 +54,211 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         crop_size: int = 640,
         overlap_ratio: float = 0,  # now minimal overlap
         sampling_rate: float = 1.0,
+        buffer_size: int = 50,  # max buffer size
+        crop_usage_threshold: float = 0.8,  # amount of usage of crops on image from buffer
         *args,
         **kwargs,
     ):
-        """
-        Initializes the SAHIDataset instance.
-
-        Args:
-            img_path (str): Path/paths to the directory containing images.
-            cut_strategy (str): Strategy for slicing images ('grid' or 'random_crop'). Default is 'grid'.
-            crop_size (int): Size of each crop (square). Default is 640.
-            overlap_ratio (float): Minimal desired fraction of overlap between adjacent slices (used for 'grid', also calculate num of crops for 'random_crop'). Default is 0.
-            sampling_rate (float): When using 'random_crop', this defines the ratio of random crops per image compared to
-                                   how many slices that image would generate under the 'grid' strategy. Default is 1.0.
-            *args, **kwargs: Additional arguments passed to the parent YOLODataset class.
-        """
         self.cut_strategy = cut_strategy
         self.crop_size = crop_size
         self.overlap_ratio = overlap_ratio
         self.sampling_rate = sampling_rate
         self.use_slicing = cut_strategy == "grid"
+        self.buffer_size = buffer_size
+        self.crop_usage_threshold = crop_usage_threshold
+        
+        self.image_buffer = {}  # {img_idx: (decoded_image, (h0, w0))}
+        self.buffer_lock = Lock()
+        
+        self.crop_counts = defaultdict(int)  # {img_idx: num_crops}
+        self.max_crops_per_image = {}  # {img_idx: max_crops}
+        
+        # queue
+        self.buffer_priority_queue = []  # [(priority, img_idx), ...]
+        self.in_buffer = set()
+        
+        # Buffer statistics tracking
+        self.total_reads = 0
+        self.buffer_hits = 0
+        self.buffer_misses = 0
+        self.total_evictions = 0
+        self.log_interval = 5000
+        
         super().__init__(img_path=img_path, *args, **kwargs)
 
         # logging
         task = "train" if self.augment else "val"
         prefix = colorstr(f"SAHIDataset for {task}")
-        info = [f":\n  cut_strategy: {self.cut_strategy}", f"\n  crop_size: {self.crop_size}"]
-        # overlap_ratio only for grid
+        info = [
+            f":\n  cut_strategy: {self.cut_strategy}",
+            f"\n  crop_size: {self.crop_size}",
+            f"\n  buffer_size: {self.buffer_size}",
+            f"\n  crop_usage_threshold: {self.crop_usage_threshold}",
+        ]
+        
         if self.cut_strategy == "grid":
             info.append(f"\n  Minimal overlap_ratio: {self.overlap_ratio}")
 
         info.append(f"\n  total_images: {self.ni}")
         LOGGER.info(prefix + "".join(info))
 
-        # slice_indices store (img_idx, slice_idx) for 'random_crop' or
-        # (img_idx, slice_idx, (start_x, start_y, end_x, end_y)) for 'grid'
-        self.slice_indices = self._precompute_slices()  # Список (img_idx, slice_idx)
+        self.slice_indices = self._precompute_slices()
+        self.slice_indices.sort(key=lambda x: x[0])
+
+    def _get_priority(self, img_idx: int) -> float:
+        return -self.max_crops_per_image.get(img_idx, 1)
+
+    def _update_buffer(self, img_idx: int):
+        with self.buffer_lock:
+            self.crop_counts[img_idx] += 1
+            
+            usage_ratio = self.crop_counts[img_idx] / self.max_crops_per_image[img_idx]
+            if usage_ratio >= self.crop_usage_threshold and img_idx in self.in_buffer:
+                del self.image_buffer[img_idx]
+                self.in_buffer.discard(img_idx)
+                self.total_evictions += 1
+                return
+            
+            if img_idx not in self.in_buffer:
+                while len(self.image_buffer) >= self.buffer_size:
+                    self._evict_from_buffer()
+                
+                im, hw0, _ = self.load_image(img_idx, rect_mode=False)
+                
+                self.image_buffer[img_idx] = (im, hw0)
+                self.in_buffer.add(img_idx)
+                
+                priority = self._get_priority(img_idx)
+                heapq.heappush(self.buffer_priority_queue, (priority, img_idx))
+
+    def _evict_from_buffer(self):
+        while self.buffer_priority_queue:
+            _, img_idx = heapq.heappop(self.buffer_priority_queue)
+            
+            if img_idx in self.in_buffer:
+                del self.image_buffer[img_idx]
+                self.in_buffer.discard(img_idx)
+                self.total_evictions += 1
+                break
+
+    def _log_buffer_stats(self):
+
+        hit_rate = (self.buffer_hits / self.total_reads * 100) if self.total_reads > 0 else 0
+        miss_rate = (self.buffer_misses / self.total_reads * 100) if self.total_reads > 0 else 0
+        
+        usage_ratios = []
+        for img_idx in self.in_buffer:
+            if img_idx in self.max_crops_per_image:
+                usage_ratio = self.crop_counts[img_idx] / self.max_crops_per_image[img_idx]
+                usage_ratios.append(usage_ratio)
+        
+        avg_usage = np.mean(usage_ratios) if usage_ratios else 0
+        min_usage = np.min(usage_ratios) if usage_ratios else 0
+        max_usage = np.max(usage_ratios) if usage_ratios else 0
+        
+        LOGGER.info(
+            f"\n{colorstr('Buffer Stats')} [reads: {self.total_reads}]: "
+            f"size={len(self.image_buffer)}/{self.buffer_size}, "
+            f"hits={self.buffer_hits} ({hit_rate:.1f}%), "
+            f"misses={self.buffer_misses} ({miss_rate:.1f}%), "
+            f"evictions={self.total_evictions}, "
+            f"usage_ratio: avg={avg_usage:.2f}, min={min_usage:.2f}, max={max_usage:.2f}\n"
+        )
+
+    def _get_image_from_buffer(self, img_idx: int) -> Tuple[np.ndarray, Tuple[int, int]]:
+        self._update_buffer(img_idx)
+        
+        with self.buffer_lock:
+            self.total_reads += 1
+            
+            if img_idx in self.image_buffer:
+                self.buffer_hits += 1
+                im, hw0 = self.image_buffer[img_idx]
+                result = im.copy(), hw0
+            else:
+                self.buffer_misses += 1
+                im, hw0, _ = self.load_image(img_idx, rect_mode=False)
+                result = im, hw0
+            
+            if self.total_reads % self.log_interval == 0:
+                self._log_buffer_stats()
+            
+            return result
+
+    def get_image_and_label(self, index: int) -> Dict[str, Any]:
+        if self.use_slicing:
+            return self._get_grid_slice(index)
+        else:
+            return self._get_random_crop_slice(index)
+
+    def _get_random_crop_slice(self, index: int) -> Dict[str, Any]:
+        img_idx, _ = self.slice_indices[index]
+        
+        im, (h0, w0) = self._get_image_from_buffer(img_idx)
+        
+        label = deepcopy(self.labels[img_idx])
+        label.pop("shape", None)
+        label["img"] = im
+        label["ori_shape"] = (h0, w0)
+        label["resized_shape"] = im.shape[:2]
+        label["ratio_pad"] = (
+            label["resized_shape"][0] / label["ori_shape"][0],
+            label["resized_shape"][1] / label["ori_shape"][1],
+        )
+        return self.update_labels_info(label)
+
+    def _get_grid_slice(self, index: int) -> Dict[str, Any]:
+        img_idx, slice_idx, slice_bbox_coords = self.slice_indices[index]
+        start_x, start_y, end_x, end_y = slice_bbox_coords
+        
+        im, (h0, w0) = self._get_image_from_buffer(img_idx)
+        
+        labels = deepcopy(self.labels[img_idx])
+
+        slice_im = im[start_y:end_y, start_x:end_x]
+        if slice_im.shape[0] == 0 or slice_im.shape[1] == 0:
+            raise ValueError(
+                f"Slice image is empty. Image size: {im.shape}, "
+                f"slice coords: {slice_bbox_coords}, overlap_ratio: {self.overlap_ratio}"
+            )
+        slice_bbox = [start_x, start_y, end_x, end_y]
+
+        slice_labels = self._filter_and_transform_annotations(labels, slice_bbox, h0, w0)
+        n_attrs = labels["cls"].shape[1] if len(labels["cls"]) > 0 else 1
+
+        labels.update(
+            {
+                "img": slice_im,
+                "ori_shape": (h0, w0),
+                "resized_shape": slice_im.shape[:2],
+                "ratio_pad": (1.0, 1.0),
+                "cls": slice_labels["cls"],
+                "original_img_idx": img_idx,
+                "slice_idx": slice_idx,
+                "slice_coords": slice_bbox_coords,
+                "original_im_file": self.im_files[img_idx],
+            }
+        )
+
+        if slice_labels["bboxes"].size == 0:
+            labels["bboxes"] = np.empty((0, 4), dtype=np.float32)
+            if labels["cls"].size == 0:
+                labels["cls"] = np.empty((0, n_attrs), dtype=np.float32)
+        else:
+            bboxes = np.array(slice_labels["bboxes"], dtype=np.float32)
+            if bboxes.ndim != 2 or bboxes.shape[1] != 4:
+                raise ValueError(f"Expected shape (N, 4), got {bboxes.shape}")
+            labels["bboxes"] = bboxes
+
+        if "segments" in labels:
+            labels["segments"] = slice_labels.get("segments", [])
+        if "keypoints" in labels:
+            labels["keypoints"] = slice_labels.get("keypoints", None)
+
+        return self.update_labels_info(labels)
+
+    def __len__(self):
+        return len(self.slice_indices)
 
     def _precompute_slices(self) -> List[Tuple[int, Any]]:
         """
@@ -148,21 +319,11 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
             """
             Adjust the image size to be divisible by crop size and overlap.
-
-            Args:
-                imgsz (tuple[int, int]): Image size - (height, width).
-                crop_size (tuple[int, int]): Crop size - (height, width).
-                overlap_ratio (float): Overlap ratio.
-
-            Returns:
-                tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: List of slice coordinates.
             """
             img_h, img_w = imgsz
             crop_h, crop_w = crop_size
             overlap_h, overlap_w = int(overlap_ratio * crop_h), int(overlap_ratio * crop_w)
 
-            # If the image is smaller than the crop size, use the whole image as a
-            # single slice so downstream code still receives valid coordinates.
             if img_h <= crop_h and img_w <= crop_w:
                 y1_flat = np.array([0], dtype=np.int64)
                 x1_flat = np.array([0], dtype=np.int64)
@@ -173,25 +334,20 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
             step_h = crop_h - overlap_h
             step_w = crop_w - overlap_w
 
-            # Calculate number of steps using integer arithmetic
             n_steps_h = 1 if img_h <= crop_h else (img_h - crop_h + step_h - 1) // step_h + 1
             n_steps_w = 1 if img_w <= crop_w else (img_w - crop_w + step_w - 1) // step_w + 1
 
-            # Generate starting positions
             y1_base = np.arange(0, n_steps_h) * step_h
             x1_base = np.arange(0, n_steps_w) * step_w
 
-            # Adjust last row/column
             if img_h > crop_h and n_steps_h > 1:
                 y1_base[-1] = img_h - crop_h
             if img_w > crop_w and n_steps_w > 1:
                 x1_base[-1] = img_w - crop_w
 
-            # Create meshgrid and flatten
             y1_grid, x1_grid = meshgrid2d_ij(y1_base, x1_base)
             y1_flat, x1_flat = y1_grid.flatten(), x1_grid.flatten()
 
-            # Calculate end positions
             y2_flat = np.minimum(y1_flat + crop_h, img_h)
             x2_flat = np.minimum(x1_flat + crop_w, img_w)
 
@@ -223,14 +379,6 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
         ) -> int:
             """
             Calculate the number of slices for an image.
-
-            Args:
-                imgsz (tuple[int, int]): Image size - (height, width).
-                crop_size (tuple[int, int]): Crop size - (height, width).
-                overlap_ratio (float): Overlap ratio.
-
-            Returns:
-                int: Number of slices.
             """
             img_h, img_w = imgsz
             crop_h, crop_w = crop_size
@@ -240,11 +388,9 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
 
             overlap_h, overlap_w = int(overlap_ratio * crop_h), int(overlap_ratio * crop_w)
 
-            # stride is how far the sliding window moves each step
             stride_h = crop_h - overlap_h
             stride_w = crop_w - overlap_w
 
-            # number of window positions in each direction
             n_h = max(math.ceil((img_h - crop_h) / stride_h) + 1, 1)
             n_w = max(math.ceil((img_w - crop_w) / stride_w) + 1, 1)
 
@@ -260,16 +406,20 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
                 self.overlap_ratio,
             )
             if ns <= 0:
-                raise ValueError(f"Check your crop size and overlap ratio. Image size: {self.labels[idx]['shape']}, crop size: {self.crop_size}, overlap ratio: {self.overlap_ratio}")
+                raise ValueError(
+                    f"Check your crop size and overlap ratio. Image size: {self.labels[idx]['shape']}, "
+                    f"crop size: {self.crop_size}, overlap ratio: {self.overlap_ratio}"
+                )
 
             return idx, ns
 
         desc = f"{colorstr('SAHI Calculating slices')}"
         slice_indices: List[Tuple[int, Any]] = []
         total_slices, min_slices, max_slices, processed_images = 0, math.inf, 0, 0
+        
+        crops_per_image = defaultdict(int)
 
         with ThreadPool(NUM_THREADS) as pool:
-            # Thread-pool map over all images
             results = pool.imap(
                 func=wrapped_calculate_slices_coordinates if self.cut_strategy == "grid" else wrapped_calculate_number_of_slices,
                 iterable=range(self.ni)
@@ -285,6 +435,8 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
                     slice_indices.extend((idx, s_idx, coords) for s_idx, coords in enumerate(calculated_data))
                     current_slices = len(calculated_data)
 
+                crops_per_image[idx] = current_slices
+
                 processed_images += 1
                 total_slices += current_slices
                 min_slices = min(min_slices, current_slices)
@@ -295,93 +447,22 @@ class SAHIDataset(YOLODataset):  # only for bboxes, TODO: keypoints and masks
 
             pbar.close()
 
-        return slice_indices
-
-    def __len__(self):
-        return len(self.slice_indices)
-
-    def get_image_and_label(self, index: int) -> Dict[str, Any]:
-        if self.use_slicing:
-            return self._get_grid_slice(index)
-        else:
-            img_idx, _ = self.slice_indices[index]
-            label = deepcopy(self.labels[img_idx])
-            label.pop("shape", None)
-            label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(img_idx)
-            label["ratio_pad"] = (
-                label["resized_shape"][0] / label["ori_shape"][0],
-                label["resized_shape"][1] / label["ori_shape"][1],
-            )
-            return self.update_labels_info(label)
-
-    def _get_grid_slice(self, index: int) -> Dict[str, Any]:
-        """
-        Generate a single slice based on precomputed coordinates.
-
-        Args:
-            index (int): Index of the slice in `self.slice_indices`.
-
-        Returns:
-            Dict[str, Any]: Dictionary containing sliced image and filtered labels.
-        """
-        img_idx, slice_idx, slice_bbox_coords = self.slice_indices[index]
-        start_x, start_y, end_x, end_y = slice_bbox_coords
-        im, (h0, w0), _ = self.load_image(img_idx)
-        labels = deepcopy(self.labels[img_idx])
-
-        slice_im = im[start_y:end_y, start_x:end_x]
-        if slice_im.shape[0] == 0 or slice_im.shape[1] == 0:
-            raise ValueError(f"Slice image is empty. Image size: {im.shape}, slice coords: {slice_bbox_coords}, overlap_ratio: {self.overlap_ratio}")
-        slice_bbox = [start_x, start_y, end_x, end_y]
-
-        slice_labels = self._filter_and_transform_annotations(labels, slice_bbox, h0, w0)
-        n_attrs = labels["cls"].shape[1] if len(labels["cls"]) > 0 else 1
-
-        labels.update(
-            {
-                "img": slice_im,
-                "ori_shape": (h0, w0),
-                "resized_shape": slice_im.shape[:2],
-                "ratio_pad": (1.0, 1.0),
-                "cls": slice_labels["cls"],
-                "original_img_idx": img_idx,  # Index of original image
-                "slice_idx": slice_idx,        # Index of slice within image
-                "slice_coords": slice_bbox_coords,  # Coordinates of this crop in original image
-                "original_im_file": self.im_files[img_idx],  # Original image path
-            }
+        self.max_crops_per_image = dict(crops_per_image)
+        
+        LOGGER.info(
+            f"{colorstr('SAHI Buffer stats')}: "
+            f"Max crops per image: min={min(self.max_crops_per_image.values())}, "
+            f"max={max(self.max_crops_per_image.values())}, "
+            f"avg={sum(self.max_crops_per_image.values()) / len(self.max_crops_per_image):.2f}"
         )
 
-        if slice_labels["bboxes"].size == 0:
-            labels["bboxes"] = np.empty((0, 4), dtype=np.float32)
-            if labels["cls"].size == 0:
-                labels["cls"] = np.empty((0, n_attrs), dtype=np.float32)
-        else:
-            bboxes = np.array(slice_labels["bboxes"], dtype=np.float32)
-            if bboxes.ndim != 2 or bboxes.shape[1] != 4:
-                raise ValueError(f"Expected shape (N, 4), got {bboxes.shape}")
-            labels["bboxes"] = bboxes
-
-        if "segments" in labels:
-            labels["segments"] = slice_labels.get("segments", [])
-        if "keypoints" in labels:
-            labels["keypoints"] = slice_labels.get("keypoints", None)
-
-        return self.update_labels_info(labels)
+        return slice_indices
 
     def _filter_and_transform_annotations(
         self, labels: Dict[str, Any], slice_bbox: List[int], h0: int, w0: int
     ) -> Dict[str, Union[np.ndarray, List]]:
         """
         Filter and transform annotations to match current slice coordinates.
-
-        Args:
-            labels (Dict[str, Any]): Original labels dictionary.
-            slice_bbox (List[int]): Bounding box of the slice in pixel coordinates [x_min, y_min, x_max, y_max].
-            h0 (int): Original image height.
-            w0 (int): Original image width.
-
-        Returns:
-            Dict[str, Union[np.ndarray, List]]: Transformed labels within the slice.
         """
         x_min, y_min, x_max, y_max = slice_bbox
         x_crop_size, y_crop_size = x_max - x_min, y_max - y_min

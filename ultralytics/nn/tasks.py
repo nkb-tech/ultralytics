@@ -1093,7 +1093,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C3_VSS, C2f_VSS, C3_LVMB, C2f_LVMB, RepNCSPELAN4, DBBNCSPELAN4, OREPANCSPELAN4, DRBNCSPELAN4, ADown, AConv, V7DownSampling,
             C3_DynamicConv, C2f_DynamicConv, C3_GhostDynamicConv, C2f_GhostDynamicConv, C3_RVB, C2f_RVB, C3_RVB_SE, C2f_RVB_SE, C3_RVB_EMA, C2f_RVB_EMA, DGCST,
             C3_RetBlock, C2f_RetBlock, C3_PKIModule, C2f_PKIModule, RepNCSPELAN4_CAA, C3_FADC, C2f_FADC, C3_PPA, C2f_PPA, SRFD, DRFD, RGCSPELAN,
-            C3_Faster_CGLU, C2f_Faster_CGLU, C3_Star, C2f_Star, C3_Star_CAA, C2f_Star_CAA, ELAN1,  SPPELAN,C2fAttn, RepC3,  PSA, SCDown, C2fCIB):
+            C3_Faster_CGLU, C2f_Faster_CGLU, C3_Star, C2f_Star, C3_Star_CAA, C2f_Star_CAA, ELAN1,  SPPELAN,C2fAttn, RepC3,  PSA, SCDown, C2fCIB,
+            C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2, Silence):
             if args[0] == 'head_channel':
                 args[0] = d[args[0]]
             
@@ -1130,7 +1131,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                      C3_VSS, C2f_VSS, C3_LVMB, C2f_LVMB, C3_DynamicConv, C2f_DynamicConv, C3_GhostDynamicConv, C2f_GhostDynamicConv,
                      C3_RVB, C2f_RVB, C3_RVB_SE, C2f_RVB_SE, C3_RVB_EMA, C2f_RVB_EMA, C3_RetBlock, C2f_RetBlock, C3_PKIModule, C2f_PKIModule,
                      C3_FADC, C2f_FADC, C3_PPA, C2f_PPA, RGCSPELAN, C3_Faster_CGLU, C2f_Faster_CGLU, C3_Star, C2f_Star, C3_Star_CAA, C2f_Star_CAA, 
-                     C2fPSA, C2PSA, C3k2, C2fCIB):
+                     C2fPSA, C2PSA, C3k2, C2fCIB, C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2):
                 args.insert(2, n)  # number of repeats
                 n = 1
             if m is C3k2:  # for M/L/X sizes

@@ -58,6 +58,12 @@ from .block import (
     RepVGGDW,
     ResNetLayer,
     SCDown,
+    Silence,
+    CBAMBottleneck,
+    C2fCBAM,
+    C2fCBAMv2,
+    C3CBAM,
+    C3CBAMv2,
 )
 from .conv import (
     CBAM,
@@ -184,4 +190,10 @@ __all__ = (
     "PSA",
     "SCDown",
     "MobileOneBlock",
+    "Silence",
+    "CBAMBottleneck",
+    "C2fCBAM",
+    "C2fCBAMv2",
+    "C3CBAM",
+    "C3CBAMv2",
 )
