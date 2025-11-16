@@ -380,10 +380,11 @@ class DetectionModel(BaseModel):
         y[-1] = y[-1][..., i:]  # small
         return y
 
-    def init_criterion(self, weights=None):
+    def init_criterion(self, weights=None, clf_loss_weights=None):
         """Initialize the loss criterion for the DetectionModel."""
         return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(
             self,
+            clf_loss_weights=clf_loss_weights,
             clf_loss_fn=self.args.clf_loss_fn,
             iou_loss_fn=self.args.iou_loss_fn,
             nwd_loss=self.args.nwd_loss,

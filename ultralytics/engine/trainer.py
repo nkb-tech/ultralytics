@@ -357,12 +357,73 @@ class BaseTrainer:
             loss_weights = torch.tensor([loss_weights[k] for k in sorted(loss_weights)], device=self.device, dtype=torch.float)
             LOGGER.info(f'Loss weights for {self.args.task} task = {loss_weights}')
 
+        # Calculate class weights 
+        clf_loss_weights = None
+        if self.args.task in {"detect", "segment", "pose", "obb"}:
+            # Get number of classes for validation
+            if hasattr(self.model, 'model') and hasattr(self.model.model[-1], 'nc'):
+                nc_list = self.model.model[-1].nc
+                if not isinstance(nc_list, list):
+                    nc_list = [nc_list]
+            else:
+                nc_list = [self.data["nc"]] if isinstance(self.data["nc"], int) else self.data["nc"]
+            
+            # Get clf_loss_weights from args if provided
+            if hasattr(self.args, 'clf_loss_weights') and self.args.clf_loss_weights is not None:
+                clf_loss_weights = self.args.clf_loss_weights
+                # Validate and convert to list of lists if needed
+                if isinstance(clf_loss_weights, list):
+                    if len(clf_loss_weights) > 0 and isinstance(clf_loss_weights[0], (int, float)):
+                        # Single list of weights - convert to list of lists for multi-task support
+                        clf_loss_weights = [clf_loss_weights]
+                    
+                    # Validate number of weights matches number of classes
+                    if len(clf_loss_weights) != len(nc_list):
+                        LOGGER.warning(
+                            f"WARNING Number of weight lists ({len(clf_loss_weights)}) doesn't match "
+                            f"number of tasks ({len(nc_list)}), using automatic calculation"
+                        )
+                        clf_loss_weights = None
+                    else:
+                        # Validate all weights are positive and count matches classes
+                        valid = True
+                        for task_idx, task_weights in enumerate(clf_loss_weights):
+                            if not isinstance(task_weights, list):
+                                valid = False
+                                break
+                            if len(task_weights) != nc_list[task_idx]:
+                                LOGGER.warning(
+                                    f"WARNING Number of weights ({len(task_weights)}) for task {task_idx} "
+                                    f"doesn't match number of classes ({nc_list[task_idx]}), using automatic calculation"
+                                )
+                                valid = False
+                                break
+                            if not all(isinstance(w, (int, float)) and w > 0 for w in task_weights):
+                                LOGGER.warning(
+                                    f"WARNING Some class weights are not positive for task {task_idx}, "
+                                    "using automatic calculation"
+                                )
+                                valid = False
+                                break
+                        if not valid:
+                            clf_loss_weights = None
+                else:
+                    LOGGER.warning("WARNING clf_loss_weights must be a list, using automatic calculation")
+                    clf_loss_weights = None
+            
+            # Auto-calculate weights if not provided or invalid
+            if clf_loss_weights is None:
+                calculated_weights = self._calculate_class_weights()
+                if calculated_weights is not None:
+                    clf_loss_weights = calculated_weights
+                    LOGGER.info(f'{colorstr("Auto-calculated class weights")}: {clf_loss_weights}')
+
         # Initialize criterion
         if world_size > 1:
-            criterion = self.model.module.init_criterion(weights=loss_weights)
+            criterion = self.model.module.init_criterion(weights=loss_weights, clf_loss_weights=clf_loss_weights)
             self.model.module.criterion = criterion
         else:
-            criterion = self.model.init_criterion(weights=loss_weights)
+            criterion = self.model.init_criterion(weights=loss_weights, clf_loss_weights=clf_loss_weights)
             self.model.criterion = criterion
 
         # Compile model
@@ -547,6 +608,55 @@ class BaseTrainer:
             self.run_callbacks("on_train_end")
         self._clear_memory()
         self.run_callbacks("teardown")
+
+    def _calculate_class_weights(self):
+        """
+        Calculate class weights from dataset class distribution.
+        Supports both single-task and multi-task models.
+        
+        Returns:
+            list[list[float]]: List of weight lists for each task (for multi-task models).
+                             For single-task models, returns a list with one weight list.
+        """
+        if hasattr(self.model, 'model') and hasattr(self.model.model[-1], 'nc'):
+            nc_list = self.model.model[-1].nc
+            if not isinstance(nc_list, list):
+                nc_list = [nc_list]
+        else:
+            nc_list = [self.data["nc"]] if isinstance(self.data["nc"], int) else self.data["nc"]
+
+        n_tasks = len(nc_list)
+        all_weights = []
+        for task_idx, nc in enumerate(nc_list):
+            # Count instances per class for this task
+            counts = np.zeros(nc, dtype=np.float32)
+            # Count instances per class in training dataset
+            for label in self.train_loader.dataset.labels:
+                if 'cls' in label:
+                    cls_data = label['cls']
+                    if isinstance(cls_data, np.ndarray):
+                        # Handle multi-task: cls_data shape is (n_objects, n_tasks) or (n_objects,)
+                        if cls_data.ndim == 2 and cls_data.shape[1] > task_idx:
+                            # Multi-task: get classes for this task
+                            cls_for_task = cls_data[:, task_idx].astype(int)
+                        elif cls_data.ndim == 1 and task_idx == 0:
+                            # Single task or first task
+                            cls_for_task = cls_data.astype(int)
+                        else:
+                            continue
+                        # Count instances
+                        for cls_id in cls_for_task:
+                            if 0 <= cls_id < nc:
+                                counts[cls_id] += 1
+            # Avoid division by zero
+            counts = np.where(counts == 0, 1, counts)
+            # Calculate weights
+            total_samples = counts.sum()
+            weights = total_samples / (nc * counts)
+            # Normalize weights
+            weights = weights / weights.mean()
+            all_weights.append(weights.tolist())
+        return all_weights
 
     def _get_memory(self):
         """Get accelerator memory utilization in GB."""
