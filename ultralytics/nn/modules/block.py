@@ -1,8 +1,10 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
 
+import math
 from typing import Tuple
 import random
+import numpy as np
 
 import torch
 import torch.nn as nn
@@ -11,9 +13,19 @@ from torch import Graph, Tensor, Value
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
-from .conv import Conv, DWConv, GhostConv, LightConv, RepConv, autopad
+from .conv import (
+    Conv,
+    DWConv,
+    DSConv,
+    PWConv,
+    GhostConv,
+    LightConv,
+    RepConv,
+    autopad,
+)
 from .transformer import TransformerBlock
 from .activation import EMA
+from ultralytics.utils import LOGGER
 
 __all__ = (
     "DFL",
@@ -67,6 +79,22 @@ __all__ = (
     "C2fCBAMv2",
     "C3CBAM",
     "C3CBAMv2",
+    "FullPADTunnel",
+    "HyperACE",
+    "FuseModule",
+    "C3AH",
+    "AdaHGComputation",
+    "AdaHGConv",
+    "AdaHyperedgeGen",
+    "DSC3k2",
+    "DSC3k",
+    "DSBottleneck",
+    "A2C2f",
+    "ABlock",
+    "AAttn",
+    "TorchVision",
+    "DownsampleConv",
+    "MobileOneBlock",
 )
 
 
@@ -1152,6 +1180,790 @@ class SCDown(nn.Module):
         return self.cv2(self.cv1(x))
 
 
+class TorchVision(nn.Module):
+    """
+    TorchVision module to allow loading any torchvision model.
+
+    This class provides a way to load a model from the torchvision library, optionally load pre-trained weights, and customize the model by truncating or unwrapping layers.
+
+    Attributes:
+        m (nn.Module): The loaded torchvision model, possibly truncated and unwrapped.
+
+    Args:
+        c1 (int): Input channels.
+        c2 (): Output channels.
+        model (str): Name of the torchvision model to load.
+        weights (str, optional): Pre-trained weights to load. Default is "DEFAULT".
+        unwrap (bool, optional): If True, unwraps the model to a sequential containing all but the last `truncate` layers. Default is True.
+        truncate (int, optional): Number of layers to truncate from the end if `unwrap` is True. Default is 2.
+        split (bool, optional): Returns output from intermediate child modules as list. Default is False.
+    """
+
+    def __init__(self, c1, c2, model, weights="DEFAULT", unwrap=True, truncate=2, split=False):
+        """Load the model and weights from torchvision."""
+        import torchvision  # scope for faster 'import ultralytics'
+
+        super().__init__()
+        if hasattr(torchvision.models, "get_model"):
+            self.m = torchvision.models.get_model(model, weights=weights)
+        else:
+            self.m = torchvision.models.__dict__[model](pretrained=bool(weights))
+        if unwrap:
+            layers = list(self.m.children())[:-truncate]
+            if isinstance(layers[0], nn.Sequential):  # Second-level for some models like EfficientNet, Swin
+                layers = [*list(layers[0].children()), *layers[1:]]
+            self.m = nn.Sequential(*layers)
+            self.split = split
+        else:
+            self.split = False
+            self.m.head = self.m.heads = nn.Identity()
+
+    def forward(self, x):
+        """Forward pass through the model."""
+        if self.split:
+            y = [x]
+            y.extend(m(y[-1]) for m in self.m)
+        else:
+            y = self.m(x)
+        return y
+
+
+class AAttn(nn.Module):
+    """Area-attention module for YOLO models, providing efficient attention mechanisms.
+
+    This module implements an area-based attention mechanism that processes input features in a spatially-aware manner,
+    making it particularly effective for object detection tasks.
+
+    Attributes:
+        area (int): Number of areas the feature map is divided.
+        num_heads (int): Number of heads into which the attention mechanism is divided.
+        head_dim (int): Dimension of each attention head.
+        qkv (Conv): Convolution layer for computing query, key and value tensors.
+        proj (Conv): Projection convolution layer.
+        pe (Conv): Position encoding convolution layer.
+
+    Methods:
+        forward: Applies area-attention to input tensor.
+
+    Examples:
+        >>> attn = AAttn(dim=256, num_heads=8, area=4)
+        >>> x = torch.randn(1, 256, 32, 32)
+        >>> output = attn(x)
+        >>> print(output.shape)
+        torch.Size([1, 256, 32, 32])
+    """
+
+    def __init__(self, dim: int, num_heads: int, area: int = 1):
+        """Initialize an Area-attention module for YOLO models.
+
+        Args:
+            dim (int): Number of hidden channels.
+            num_heads (int): Number of heads into which the attention mechanism is divided.
+            area (int): Number of areas the feature map is divided.
+        """
+        super().__init__()
+        self.area = area
+
+        self.num_heads = num_heads
+        self.head_dim = head_dim = dim // num_heads
+        all_head_dim = head_dim * self.num_heads
+
+        self.qkv = Conv(dim, all_head_dim * 3, 1, act=False)
+        self.proj = Conv(all_head_dim, dim, 1, act=False)
+        self.pe = Conv(all_head_dim, dim, 7, 1, 3, g=dim, act=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Process the input tensor through the area-attention.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            (torch.Tensor): Output tensor after area-attention.
+        """
+        B, C, H, W = x.shape
+        N = H * W
+
+        qkv = self.qkv(x).flatten(2).transpose(1, 2)
+        if self.area > 1:
+            qkv = qkv.reshape(B * self.area, N // self.area, C * 3)
+            B, N, _ = qkv.shape
+        q, k, v = (
+            qkv.view(B, N, self.num_heads, self.head_dim * 3)
+            .permute(0, 2, 3, 1)
+            .split([self.head_dim, self.head_dim, self.head_dim], dim=2)
+        )
+        attn = (q.transpose(-2, -1) @ k) * (self.head_dim**-0.5)
+        attn = attn.softmax(dim=-1)
+        x = v @ attn.transpose(-2, -1)
+        x = x.permute(0, 3, 1, 2)
+        v = v.permute(0, 3, 1, 2)
+
+        if self.area > 1:
+            x = x.reshape(B // self.area, N * self.area, C)
+            v = v.reshape(B // self.area, N * self.area, C)
+            B, N, _ = x.shape
+
+        x = x.reshape(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+        v = v.reshape(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+
+        x = x + self.pe(v)
+        return self.proj(x)
+
+
+class ABlock(nn.Module):
+    """
+    ABlock class implementing a Area-Attention block with effective feature extraction.
+
+    This class encapsulates the functionality for applying multi-head attention with feature map are dividing into areas
+    and feed-forward neural network layers.
+
+    Attributes:
+        dim (int): Number of hidden channels;
+        num_heads (int): Number of heads into which the attention mechanism is divided;
+        mlp_ratio (float, optional): MLP expansion ratio (or MLP hidden dimension ratio). Defaults to 1.2;
+        area (int, optional): Number of areas the feature map is divided.  Defaults to 1.
+
+    Methods:
+        forward: Performs a forward pass through the ABlock, applying area-attention and feed-forward layers.
+
+    Examples:
+        Create a ABlock and perform a forward pass
+        >>> model = ABlock(dim=64, num_heads=2, mlp_ratio=1.2, area=4)
+        >>> x = torch.randn(2, 64, 128, 128)
+        >>> output = model(x)
+        >>> print(output.shape)
+    
+    Notes: 
+        recommend that dim//num_heads be a multiple of 32 or 64.
+    """
+
+    def __init__(self, dim, num_heads, mlp_ratio=1.2, area=1):
+        """Initializes the ABlock with area-attention and feed-forward layers for faster feature extraction."""
+        super().__init__()
+
+        self.attn = AAttn(dim, num_heads=num_heads, area=area)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(Conv(dim, mlp_hidden_dim, 1), Conv(mlp_hidden_dim, dim, 1, act=False))
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        """Initialize weights using a truncated normal distribution."""
+        if isinstance(m, nn.Conv2d):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        """Executes a forward pass through ABlock, applying area-attention and feed-forward layers to the input tensor."""
+        x = x + self.attn(x)
+        x = x + self.mlp(x)
+        return x
+
+
+class A2C2f(nn.Module):  
+    """
+    A2C2f module with residual enhanced feature extraction using ABlock blocks with area-attention. Also known as R-ELAN
+
+    This class extends the C2f module by incorporating ABlock blocks for fast attention mechanisms and feature extraction.
+
+    Attributes:
+        c1 (int): Number of input channels;
+        c2 (int): Number of output channels;
+        n (int, optional): Number of 2xABlock modules to stack. Defaults to 1;
+        a2 (bool, optional): Whether use area-attention. Defaults to True;
+        area (int, optional): Number of areas the feature map is divided. Defaults to 1;
+        residual (bool, optional): Whether use the residual (with layer scale). Defaults to False;
+        mlp_ratio (float, optional): MLP expansion ratio (or MLP hidden dimension ratio). Defaults to 1.2;
+        e (float, optional): Expansion ratio for R-ELAN modules. Defaults to 0.5;
+        g (int, optional): Number of groups for grouped convolution. Defaults to 1;
+        shortcut (bool, optional): Whether to use shortcut connection. Defaults to True;
+
+    Methods:
+        forward: Performs a forward pass through the A2C2f module.
+
+    Examples:
+        >>> import torch
+        >>> from ultralytics.nn.modules import A2C2f
+        >>> model = A2C2f(c1=64, c2=64, n=2, a2=True, area=4, residual=True, e=0.5)
+        >>> x = torch.randn(2, 64, 128, 128)
+        >>> output = model(x)
+        >>> print(output.shape)
+    """
+
+    def __init__(self, c1, c2, n=1, a2=True, area=1, residual=False, mlp_ratio=2.0, e=0.5, g=1, shortcut=True):
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        assert c_ % 32 == 0, "Dimension of ABlock be a multiple of 32."
+
+        # num_heads = c_ // 64 if c_ // 64 >= 2 else c_ // 32
+        num_heads = c_ // 32
+
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv((1 + n) * c_, c2, 1)  # optional act=FReLU(c2)
+
+        init_values = 0.01  # or smaller
+        self.gamma = nn.Parameter(init_values * torch.ones((c2)), requires_grad=True) if a2 and residual else None
+
+        self.m = nn.ModuleList(
+            nn.Sequential(*(ABlock(c_, num_heads, mlp_ratio, area) for _ in range(2))) if a2 else C3k(c_, c_, 2, shortcut, g) for _ in range(n)
+        )
+
+    def forward(self, x):
+        """Forward pass through R-ELAN layer."""
+        y = [self.cv1(x)]
+        y.extend(m(y[-1]) for m in self.m)
+        if self.gamma is not None:
+            return x + self.gamma.view(1, -1, 1, 1) * self.cv2(torch.cat(y, 1))
+        return self.cv2(torch.cat(y, 1))
+
+class DSBottleneck(nn.Module):
+    """
+    An improved bottleneck block using depthwise separable convolutions (DSConv).
+
+    This class implements a lightweight bottleneck module that replaces standard convolutions with depthwise
+    separable convolutions to reduce parameters and computational cost. 
+
+    Attributes:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        shortcut (bool, optional): Whether to use a residual shortcut connection. The connection is only added if c1 == c2. Defaults to True.
+        e (float, optional): Expansion ratio for the intermediate channels. Defaults to 0.5.
+        k1 (int, optional): Kernel size for the first DSConv layer. Defaults to 3.
+        k2 (int, optional): Kernel size for the second DSConv layer. Defaults to 5.
+        d2 (int, optional): Dilation for the second DSConv layer. Defaults to 1.
+
+    Methods:
+        forward: Performs a forward pass through the DSBottleneck module.
+
+    Examples:
+        >>> import torch
+        >>> model = DSBottleneck(c1=64, c2=64, shortcut=True)
+        >>> x = torch.randn(2, 64, 32, 32)
+        >>> output = model(x)
+        >>> print(output.shape)
+        torch.Size([2, 64, 32, 32])
+    """
+    def __init__(self, c1, c2, shortcut=True, e=0.5, k1=3, k2=5, d2=1):
+        super().__init__()
+        c_ = int(c2 * e)
+        self.cv1 = DSConv(c1, c_, k1, s=1, p=None, d=1)   
+        self.cv2 = DSConv(c_, c2, k2, s=1, p=None, d=d2)  
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        y = self.cv2(self.cv1(x))
+        return x + y if self.add else y
+
+
+class DSC3k(C3):
+    """
+    An improved C3k module using DSBottleneck blocks for lightweight feature extraction.
+
+    This class extends the C3 module by replacing its standard bottleneck blocks with DSBottleneck blocks,
+    which use depthwise separable convolutions.
+
+    Attributes:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        n (int, optional): Number of DSBottleneck blocks to stack. Defaults to 1.
+        shortcut (bool, optional): Whether to use shortcut connections within the DSBottlenecks. Defaults to True.
+        g (int, optional): Number of groups for grouped convolution (passed to parent C3). Defaults to 1.
+        e (float, optional): Expansion ratio for the C3 module's hidden channels. Defaults to 0.5.
+        k1 (int, optional): Kernel size for the first DSConv in each DSBottleneck. Defaults to 3.
+        k2 (int, optional): Kernel size for the second DSConv in each DSBottleneck. Defaults to 5.
+        d2 (int, optional): Dilation for the second DSConv in each DSBottleneck. Defaults to 1.
+
+    Methods:
+        forward: Performs a forward pass through the DSC3k module (inherited from C3).
+
+    Examples:
+        >>> import torch
+        >>> model = DSC3k(c1=128, c2=128, n=2, k1=3, k2=7)
+        >>> x = torch.randn(2, 128, 64, 64)
+        >>> output = model(x)
+        >>> print(output.shape)
+        torch.Size([2, 128, 64, 64])
+    """
+    def __init__(
+        self,
+        c1,                
+        c2,                 
+        n=1,                
+        shortcut=True,      
+        g=1,                 
+        e=0.5,              
+        k1=3,               
+        k2=5,               
+        d2=1                 
+    ):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        c_ = int(c2 * e)  
+
+        self.m = nn.Sequential(
+            *(
+                DSBottleneck(
+                    c_, c_,
+                    shortcut=shortcut,
+                    e=1.0,
+                    k1=k1,
+                    k2=k2,
+                    d2=d2
+                )
+                for _ in range(n)
+            )
+        )
+
+class DSC3k2(C2f):
+    """
+    An improved C3k2 module that uses lightweight depthwise separable convolution blocks.
+
+    This class redesigns C3k2 module, replacing its internal processing blocks with either DSBottleneck
+    or DSC3k modules.
+
+    Attributes:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        n (int, optional): Number of internal processing blocks to stack. Defaults to 1.
+        dsc3k (bool, optional): If True, use DSC3k as the internal block. If False, use DSBottleneck. Defaults to False.
+        e (float, optional): Expansion ratio for the C2f module's hidden channels. Defaults to 0.5.
+        g (int, optional): Number of groups for grouped convolution (passed to parent C2f). Defaults to 1.
+        shortcut (bool, optional): Whether to use shortcut connections in the internal blocks. Defaults to True.
+        k1 (int, optional): Kernel size for the first DSConv in internal blocks. Defaults to 3.
+        k2 (int, optional): Kernel size for the second DSConv in internal blocks. Defaults to 7.
+        d2 (int, optional): Dilation for the second DSConv in internal blocks. Defaults to 1.
+
+    Methods:
+        forward: Performs a forward pass through the DSC3k2 module (inherited from C2f).
+
+    Examples:
+        >>> import torch
+        >>> # Using DSBottleneck as internal block
+        >>> model1 = DSC3k2(c1=64, c2=64, n=2, dsc3k=False)
+        >>> x = torch.randn(2, 64, 128, 128)
+        >>> output1 = model1(x)
+        >>> print(f"With DSBottleneck: {output1.shape}")
+        With DSBottleneck: torch.Size([2, 64, 128, 128])
+        >>> # Using DSC3k as internal block
+        >>> model2 = DSC3k2(c1=64, c2=64, n=1, dsc3k=True)
+        >>> output2 = model2(x)
+        >>> print(f"With DSC3k: {output2.shape}")
+        With DSC3k: torch.Size([2, 64, 128, 128])
+    """
+    def __init__(
+        self,
+        c1,          
+        c2,         
+        n=1,          
+        dsc3k=False,  
+        e=0.5,       
+        g=1,        
+        shortcut=True,
+        k1=3,       
+        k2=7,       
+        d2=1         
+    ):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        if dsc3k:
+            self.m = nn.ModuleList(
+                DSC3k(
+                    self.c, self.c,
+                    n=2,           
+                    shortcut=shortcut,
+                    g=g,
+                    e=1.0,  
+                    k1=k1,
+                    k2=k2,
+                    d2=d2
+                )
+                for _ in range(n)
+            )
+        else:
+            self.m = nn.ModuleList(
+                DSBottleneck(
+                    self.c, self.c,
+                    shortcut=shortcut,
+                    e=1.0,
+                    k1=k1,
+                    k2=k2,
+                    d2=d2
+                )
+                for _ in range(n)
+            )
+
+class AdaHyperedgeGen(nn.Module):
+    """
+    Generates an adaptive hyperedge participation matrix from a set of vertex features.
+
+    This module implements the Adaptive Hyperedge Generation mechanism. It generates dynamic hyperedge prototypes
+    based on the global context of the input nodes and calculates a continuous participation matrix (A)
+    that defines the relationship between each vertex and each hyperedge.
+
+    Attributes:
+        node_dim (int): The feature dimension of each input node.
+        num_hyperedges (int): The number of hyperedges to generate.
+        num_heads (int, optional): The number of attention heads for multi-head similarity calculation. Defaults to 4.
+        dropout (float, optional): The dropout rate applied to the logits. Defaults to 0.1.
+        context (str, optional): The type of global context to use ('mean', 'max', or 'both'). Defaults to "both".
+
+    Methods:
+        forward: Takes a batch of vertex features and returns the participation matrix A.
+
+    Examples:
+        >>> import torch
+        >>> model = AdaHyperedgeGen(node_dim=64, num_hyperedges=16, num_heads=4)
+        >>> x = torch.randn(2, 100, 64)  # (Batch, Num_Nodes, Node_Dim)
+        >>> A = model(x)
+        >>> print(A.shape)
+        torch.Size([2, 100, 16])
+    """
+    def __init__(self, node_dim, num_hyperedges, num_heads=4, dropout=0.1, context="both"):
+        super().__init__()
+        self.num_heads = num_heads
+        self.num_hyperedges = num_hyperedges
+        self.head_dim = node_dim // num_heads
+        self.context = context
+
+        self.prototype_base = nn.Parameter(torch.Tensor(num_hyperedges, node_dim))
+        nn.init.xavier_uniform_(self.prototype_base)
+        if context in ("mean", "max"):
+            self.context_net = nn.Linear(node_dim, num_hyperedges * node_dim)  
+        elif context == "both":
+            self.context_net = nn.Linear(2*node_dim, num_hyperedges * node_dim)
+        else:
+            raise ValueError(
+                f"Unsupported context '{context}'. "
+                "Expected one of: 'mean', 'max', 'both'."
+            )
+
+        self.pre_head_proj = nn.Linear(node_dim, node_dim)
+    
+        self.dropout = nn.Dropout(dropout)
+        self.scaling = math.sqrt(self.head_dim)
+
+    def forward(self, X):
+        B, N, D = X.shape
+        if self.context == "mean":
+            context_cat = X.mean(dim=1)          
+        elif self.context == "max":
+            context_cat, _ = X.max(dim=1)          
+        else:
+            avg_context = X.mean(dim=1)           
+            max_context, _ = X.max(dim=1)           
+            context_cat = torch.cat([avg_context, max_context], dim=-1) 
+        prototype_offsets = self.context_net(context_cat).view(B, self.num_hyperedges, D)  
+        prototypes = self.prototype_base.unsqueeze(0) + prototype_offsets           
+        
+        X_proj = self.pre_head_proj(X) 
+        X_heads = X_proj.view(B, N, self.num_heads, self.head_dim).transpose(1, 2)
+        proto_heads = prototypes.view(B, self.num_hyperedges, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
+        
+        X_heads_flat = X_heads.reshape(B * self.num_heads, N, self.head_dim)
+        proto_heads_flat = proto_heads.reshape(B * self.num_heads, self.num_hyperedges, self.head_dim).transpose(1, 2)
+        
+        logits = torch.bmm(X_heads_flat, proto_heads_flat) / self.scaling 
+        logits = logits.view(B, self.num_heads, N, self.num_hyperedges).mean(dim=1) 
+        
+        logits = self.dropout(logits)  
+
+        return F.softmax(logits, dim=1)
+
+class AdaHGConv(nn.Module):
+    """
+    Performs the adaptive hypergraph convolution.
+
+    This module contains the two-stage message passing process of hypergraph convolution:
+    1. Generates an adaptive participation matrix using AdaHyperedgeGen.
+    2. Aggregates vertex features into hyperedge features (vertex-to-edge).
+    3. Disseminates hyperedge features back to update vertex features (edge-to-vertex).
+    A residual connection is added to the final output.
+
+    Attributes:
+        embed_dim (int): The feature dimension of the vertices.
+        num_hyperedges (int, optional): The number of hyperedges for the internal generator. Defaults to 16.
+        num_heads (int, optional): The number of attention heads for the internal generator. Defaults to 4.
+        dropout (float, optional): The dropout rate for the internal generator. Defaults to 0.1.
+        context (str, optional): The context type for the internal generator. Defaults to "both".
+
+    Methods:
+        forward: Performs the adaptive hypergraph convolution on a batch of vertex features.
+
+    Examples:
+        >>> import torch
+        >>> model = AdaHGConv(embed_dim=128, num_hyperedges=16, num_heads=8)
+        >>> x = torch.randn(2, 256, 128) # (Batch, Num_Nodes, Dim)
+        >>> output = model(x)
+        >>> print(output.shape)
+        torch.Size([2, 256, 128])
+    """
+    def __init__(self, embed_dim, num_hyperedges=16, num_heads=4, dropout=0.1, context="both"):
+        super().__init__()
+        self.edge_generator = AdaHyperedgeGen(embed_dim, num_hyperedges, num_heads, dropout, context)
+        self.edge_proj = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim ),
+            nn.GELU()
+        )
+        self.node_proj = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim ),
+            nn.GELU()
+        )
+        
+    def forward(self, X):
+        A = self.edge_generator(X)  
+        
+        He = torch.bmm(A.transpose(1, 2), X) 
+        He = self.edge_proj(He)
+        
+        X_new = torch.bmm(A, He)  
+        X_new = self.node_proj(X_new)
+        
+        return X_new + X
+        
+class AdaHGComputation(nn.Module):
+    """
+    A wrapper module for applying adaptive hypergraph convolution to 4D feature maps.
+
+    This class makes the hypergraph convolution compatible with standard CNN architectures. It flattens a
+    4D input tensor (B, C, H, W) into a sequence of vertices (tokens), applies the AdaHGConv layer to
+    model high-order correlations, and then reshapes the output back into a 4D tensor.
+
+    Attributes:
+        embed_dim (int): The feature dimension of the vertices (equivalent to input channels C).
+        num_hyperedges (int, optional): The number of hyperedges for the underlying AdaHGConv. Defaults to 16.
+        num_heads (int, optional): The number of attention heads for the underlying AdaHGConv. Defaults to 8.
+        dropout (float, optional): The dropout rate for the underlying AdaHGConv. Defaults to 0.1.
+        context (str, optional): The context type for the underlying AdaHGConv. Defaults to "both".
+
+    Methods:
+        forward: Processes a 4D feature map through the adaptive hypergraph computation layer.
+
+    Examples:
+        >>> import torch
+        >>> model = AdaHGComputation(embed_dim=64, num_hyperedges=8, num_heads=4)
+        >>> x = torch.randn(2, 64, 32, 32) # (B, C, H, W)
+        >>> output = model(x)
+        >>> print(output.shape)
+        torch.Size([2, 64, 32, 32])
+    """
+    def __init__(self, embed_dim, num_hyperedges=16, num_heads=8, dropout=0.1, context="both"):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.hgnn = AdaHGConv(
+            embed_dim=embed_dim,
+            num_hyperedges=num_hyperedges,
+            num_heads=num_heads,
+            dropout=dropout,
+            context=context
+        )
+        
+    def forward(self, x):
+        B, C, H, W = x.shape
+        tokens = x.flatten(2).transpose(1, 2) 
+        tokens = self.hgnn(tokens) 
+        x_out = tokens.transpose(1, 2).view(B, C, H, W)
+        return x_out 
+
+class C3AH(nn.Module):
+    """
+    A CSP-style block integrating Adaptive Hypergraph Computation (C3AH).
+
+    The input feature map is split into two paths.
+    One path is processed by the AdaHGComputation module to model high-order correlations, while the other
+    serves as a shortcut. The outputs are then concatenated to fuse features.
+
+    Attributes:
+        c1 (int): Number of input channels.
+        c2 (int): Number of output channels.
+        e (float, optional): Expansion ratio for the hidden channels. Defaults to 1.0.
+        num_hyperedges (int, optional): The number of hyperedges for the internal AdaHGComputation. Defaults to 8.
+        context (str, optional): The context type for the internal AdaHGComputation. Defaults to "both".
+
+    Methods:
+        forward: Performs a forward pass through the C3AH module.
+
+    Examples:
+        >>> import torch
+        >>> model = C3AH(c1=64, c2=128, num_hyperedges=8)
+        >>> x = torch.randn(2, 64, 32, 32)
+        >>> output = model(x)
+        >>> print(output.shape)
+        torch.Size([2, 128, 32, 32])
+    """
+    def __init__(self, c1, c2, e=1.0, num_hyperedges=8, context="both"):
+        super().__init__()
+        c_ = int(c2 * e)  
+        assert c_ % 16 == 0, "Dimension of AdaHGComputation should be a multiple of 16."
+        num_heads = c_ // 16
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.m = AdaHGComputation(embed_dim=c_, 
+                          num_hyperedges=num_hyperedges, 
+                          num_heads=num_heads,
+                          dropout=0.1,
+                          context=context)
+        self.cv3 = Conv(2 * c_, c2, 1)  
+        
+    def forward(self, x):
+        return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+
+class FuseModule(nn.Module):
+    """
+    A module to fuse multi-scale features for the HyperACE block.
+
+    This module takes a list of three feature maps from different scales, aligns them to a common
+    spatial resolution by downsampling the first and upsampling the third, and then concatenates
+    and fuses them with a convolution layer.
+
+    Attributes:
+        c_in (int): The number of channels of the input feature maps.
+        channel_adjust (bool): Whether to adjust the channel count of the concatenated features.
+
+    Methods:
+        forward: Fuses a list of three multi-scale feature maps.
+
+    Examples:
+        >>> import torch
+        >>> model = FuseModule(c_in=64, channel_adjust=False)
+        >>> # Input is a list of features from different backbone stages
+        >>> x_list = [torch.randn(2, 64, 64, 64), torch.randn(2, 64, 32, 32), torch.randn(2, 64, 16, 16)]
+        >>> output = model(x_list)
+        >>> print(output.shape)
+        torch.Size([2, 64, 32, 32])
+    """
+    def __init__(self, c_in, channel_adjust):
+        super(FuseModule, self).__init__()
+        self.downsample = nn.AvgPool2d(kernel_size=2)
+        self.upsample = nn.Upsample(scale_factor=2, mode='nearest')
+        if channel_adjust:
+            self.conv_out = Conv(4 * c_in, c_in, 1)
+        else:
+            self.conv_out = Conv(3 * c_in, c_in, 1)
+
+    def forward(self, x):
+        x1_ds = self.downsample(x[0])
+        x3_up = self.upsample(x[2])
+        x_cat = torch.cat([x1_ds, x[1], x3_up], dim=1)
+        out = self.conv_out(x_cat)
+        return out
+
+class HyperACE(nn.Module):
+    """
+    Hypergraph-based Adaptive Correlation Enhancement (HyperACE).
+
+    This is the core module of YOLOv13, designed to model both global high-order correlations and
+    local low-order correlations. It first fuses multi-scale features, then processes them through parallel
+    branches: two C3AH branches for high-order modeling and a lightweight DSConv-based branch for
+    low-order feature extraction.
+
+    Attributes:
+        c1 (int): Number of input channels for the fuse module.
+        c2 (int): Number of output channels for the entire block.
+        n (int, optional): Number of blocks in the low-order branch. Defaults to 1.
+        num_hyperedges (int, optional): Number of hyperedges for the C3AH branches. Defaults to 8.
+        dsc3k (bool, optional): If True, use DSC3k in the low-order branch; otherwise, use DSBottleneck. Defaults to True.
+        shortcut (bool, optional): Whether to use shortcuts in the low-order branch. Defaults to False.
+        e1 (float, optional): Expansion ratio for the main hidden channels. Defaults to 0.5.
+        e2 (float, optional): Expansion ratio within the C3AH branches. Defaults to 1.
+        context (str, optional): Context type for C3AH branches. Defaults to "both".
+        channel_adjust (bool, optional): Passed to FuseModule for channel configuration. Defaults to True.
+
+    Methods:
+        forward: Performs a forward pass through the HyperACE module.
+
+    Examples:
+        >>> import torch
+        >>> model = HyperACE(c1=64, c2=256, n=1, num_hyperedges=8)
+        >>> x_list = [torch.randn(2, 64, 64, 64), torch.randn(2, 64, 32, 32), torch.randn(2, 64, 16, 16)]
+        >>> output = model(x_list)
+        >>> print(output.shape)
+        torch.Size([2, 256, 32, 32])
+    """
+    def __init__(self, c1, c2, n=1, num_hyperedges=8, dsc3k=True, shortcut=False, e1=0.5, e2=1, context="both", channel_adjust=True):
+        super().__init__()
+        self.c = int(c2 * e1) 
+        self.cv1 = Conv(c1, 3 * self.c, 1, 1)
+        self.cv2 = Conv((4 + n) * self.c, c2, 1) 
+        self.m = nn.ModuleList(
+            DSC3k(self.c, self.c, 2, shortcut, k1=3, k2=7) if dsc3k else DSBottleneck(self.c, self.c, shortcut=shortcut) for _ in range(n)
+        )
+        self.fuse = FuseModule(c1, channel_adjust)
+        self.branch1 = C3AH(self.c, self.c, e2, num_hyperedges, context)
+        self.branch2 = C3AH(self.c, self.c, e2, num_hyperedges, context)
+                    
+    def forward(self, X):
+        x = self.fuse(X)
+        y = list(self.cv1(x).chunk(3, 1))
+        out1 = self.branch1(y[1])
+        out2 = self.branch2(y[1])
+        y.extend(m(y[-1]) for m in self.m)
+        y[1] = out1
+        y.append(out2)
+        return self.cv2(torch.cat(y, 1))
+
+
+class FullPADTunnel(nn.Module):
+    """
+    A gated fusion module for the Full-Pipeline Aggregation-and-Distribution (FullPAD) paradigm.
+
+    This module implements a gated residual connection used to fuse features. It takes two inputs: the original
+    feature map and a correlation-enhanced feature map. It then computes `output = original + gate * enhanced`,
+    where `gate` is a learnable scalar parameter that adaptively balances the contribution of the enhanced features.
+
+    Methods:
+        forward: Performs the gated fusion of two input feature maps.
+
+    Examples:
+        >>> import torch
+        >>> model = FullPADTunnel()
+        >>> original_feature = torch.randn(2, 64, 32, 32)
+        >>> enhanced_feature = torch.randn(2, 64, 32, 32)
+        >>> output = model([original_feature, enhanced_feature])
+        >>> print(output.shape)
+        torch.Size([2, 64, 32, 32])
+    """
+    def __init__(self):
+        super().__init__()
+        self.gate = nn.Parameter(torch.tensor(0.0))
+    def forward(self, x):
+        out = x[0] + self.gate * x[1]
+        return out
+
+
+class DownsampleConv(nn.Module):
+    """
+    A simple downsampling block with optional channel adjustment.
+
+    This module uses average pooling to reduce the spatial dimensions (H, W) by a factor of 2. It can
+    optionally include a 1x1 convolution to adjust the number of channels, typically doubling them.
+
+    Attributes:
+        in_channels (int): The number of input channels.
+        channel_adjust (bool, optional): If True, a 1x1 convolution doubles the channel dimension. Defaults to True.
+
+    Methods:
+        forward: Performs the downsampling and optional channel adjustment.
+
+    Examples:
+        >>> import torch
+        >>> model = DownsampleConv(in_channels=64, channel_adjust=True)
+        >>> x = torch.randn(2, 64, 32, 32)
+        >>> output = model(x)
+        >>> print(output.shape)
+        torch.Size([2, 128, 16, 16])
+    """
+    def __init__(self, in_channels, channel_adjust=True):
+        super().__init__()
+        self.downsample = nn.AvgPool2d(kernel_size=2)
+        if channel_adjust:
+            self.channel_adjust = Conv(in_channels, in_channels * 2, 1)
+        else:
+            self.channel_adjust = nn.Identity() 
+
+    def forward(self, x):
+        return self.channel_adjust(self.downsample(x))
+
+
 class EfficientTRTNMS(torch.autograd.Function):
     """NMS block for YOLO-fused model for TensorRT."""
 
@@ -1409,3 +2221,269 @@ class C3CBAMv2(nn.Module):
     def forward(self, x):
         """Forward pass through the CSP bottleneck with 2 convolutions."""
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), 1))
+
+
+class MobileOneBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        k,
+        stride=1,
+        dilation=1,
+        padding_mode="zeros",
+        deploy=False,
+        use_se=False,
+    ):
+        super(MobileOneBlock, self).__init__()
+        self.deploy = deploy
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.deploy = deploy
+        kernel_size = 3
+        padding = 1
+        assert kernel_size == 3
+        assert padding == 1
+        self.k = k
+        padding_11 = padding - kernel_size // 2
+
+        self.nonlinearity = nn.ReLU()
+
+        if use_se:
+            # self.se = SEBlock(out_channels, internal_neurons=out_channels // 16)
+            ...
+        else:
+            self.se = nn.Identity()
+
+        if deploy:
+            self.dw_reparam = nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=in_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                dilation=dilation,
+                groups=in_channels,
+                bias=True,
+                padding_mode=padding_mode,
+            )
+            self.pw_reparam = nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=out_channels,
+                kernel_size=1,
+                stride=1,
+                bias=True,
+            )
+
+        else:
+            # self.rbr_identity = nn.BatchNorm2d(num_features=in_channels) if out_channels == in_channels and stride == 1 else None
+            # self.rbr_dense = conv_bn(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, stride=stride, padding=padding, groups=groups)
+            # self.rbr_1x1 = conv_bn(in_channels=in_channels, out_channels=out_channels, kernel_size=1, stride=stride, padding=padding_11, groups=groups)
+            # print('RepVGG Block, identity = ', self.rbr_identity)
+            self.dw_bn_layer = (
+                nn.BatchNorm2d(in_channels)
+                if out_channels == in_channels and stride == 1
+                else None
+            )
+            for k_idx in range(k):
+                setattr(
+                    self,
+                    f"dw_3x3_{k_idx}",
+                    DWConv(in_channels, in_channels, k=3, s=stride, act=False),
+                )
+            self.dw_1x1 = DWConv(in_channels, in_channels, k=1, s=stride, act=False)
+
+            self.pw_bn_layer = (
+                nn.BatchNorm2d(in_channels)
+                if out_channels == in_channels and stride == 1
+                else None
+            )
+            for k_idx in range(k):
+                setattr(
+                    self,
+                    f"pw_1x1_{k_idx}",
+                    PWConv(in_channels, out_channels, act=False),
+                )
+
+    def forward(self, inputs):
+        if self.deploy:
+            x = self.dw_reparam(inputs)
+            x = self.nonlinearity(x)
+            x = self.pw_reparam(x)
+            x = self.nonlinearity(x)
+            return x
+
+        if self.dw_bn_layer is None:
+            id_out = 0
+        else:
+            id_out = self.dw_bn_layer(inputs)
+
+        x_conv_3x3 = []
+        for k_idx in range(self.k):
+            x = getattr(self, f"dw_3x3_{k_idx}")(inputs)
+            # print(x.shape)
+            x_conv_3x3.append(x)
+        x_conv_1x1 = self.dw_1x1(inputs)
+        # print(x_conv_1x1.shape, x_conv_3x3[0].shape)
+        # print(x_conv_1x1.shape)
+        # print(id_out)
+        x = id_out + x_conv_1x1 + sum(x_conv_3x3)
+        x = self.nonlinearity(self.se(x))
+
+        # 1x1 conv
+        if self.pw_bn_layer is None:
+            id_out = 0
+        else:
+            id_out = self.pw_bn_layer(x)
+        x_conv_1x1 = []
+        for k_idx in range(self.k):
+            x_conv_1x1.append(getattr(self, f"pw_1x1_{k_idx}")(x))
+        x = id_out + sum(x_conv_1x1)
+        x = self.nonlinearity(x)
+        return x
+
+    #   Optional. This improves the accuracy and facilitates quantization.
+    #   1.  Cancel the original weight decay on rbr_dense.conv.weight and rbr_1x1.conv.weight.
+    #   2.  Use like this.
+    #       loss = criterion(....)
+    #       for every RepVGGBlock blk:
+    #           loss += weight_decay_coefficient * 0.5 * blk.get_cust_L2()
+    #       optimizer.zero_grad()
+    #       loss.backward()
+    def get_custom_L2(self):
+        # K3 = self.rbr_dense.conv.weight
+        # K1 = self.rbr_1x1.conv.weight
+        # t3 = (self.rbr_dense.bn.weight / ((self.rbr_dense.bn.running_var + self.rbr_dense.bn.eps).sqrt())).reshape(-1, 1, 1, 1).detach()
+        # t1 = (self.rbr_1x1.bn.weight / ((self.rbr_1x1.bn.running_var + self.rbr_1x1.bn.eps).sqrt())).reshape(-1, 1, 1, 1).detach()
+
+        # l2_loss_circle = (K3 ** 2).sum() - (K3[:, :, 1:2, 1:2] ** 2).sum()      # The L2 loss of the "circle" of weights in 3x3 kernel. Use regular L2 on them.
+        # eq_kernel = K3[:, :, 1:2, 1:2] * t3 + K1 * t1                           # The equivalent resultant central point of 3x3 kernel.
+        # l2_loss_eq_kernel = (eq_kernel ** 2 / (t3 ** 2 + t1 ** 2)).sum()        # Normalize for an L2 coefficient comparable to regular L2.
+        # return l2_loss_eq_kernel + l2_loss_circle
+        ...
+
+    #   This func derives the equivalent kernel and bias in a DIFFERENTIABLE way.
+    #   You can get the equivalent kernel and bias at any time and do whatever you want,
+    #   for example, apply some penalties or constraints during training, just like you do to the other models.
+    #   May be useful for quantization or pruning.
+    def get_equivalent_kernel_bias(self):
+        # kernel3x3, bias3x3 = self._fuse_bn_tensor(self.rbr_dense)
+        # kernel1x1, bias1x1 = self._fuse_bn_tensor(self.rbr_1x1)
+        # kernelid, biasid = self._fuse_bn_tensor(self.rbr_identity)
+        # return kernel3x3 + self._pad_1x1_to_3x3_tensor(kernel1x1) + kernelid, bias3x3 + bias1x1 + biasid
+
+        dw_kernel_3x3 = []
+        dw_bias_3x3 = []
+        for k_idx in range(self.k):
+            k3, b3 = self._fuse_bn_tensor(getattr(self, f"dw_3x3_{k_idx}"))
+            # print(k3.shape, b3.shape)
+            dw_kernel_3x3.append(k3)
+            dw_bias_3x3.append(b3)
+        dw_kernel_1x1, dw_bias_1x1 = self._fuse_bn_tensor(self.dw_1x1)
+        dw_kernel_id, dw_bias_id = self._fuse_bn_tensor(
+            self.dw_bn_layer, self.in_channels
+        )
+        dw_kernel = (
+            sum(dw_kernel_3x3)
+            + self._pad_1x1_to_3x3_tensor(dw_kernel_1x1)
+            + dw_kernel_id
+        )
+        dw_bias = sum(dw_bias_3x3) + dw_bias_1x1 + dw_bias_id
+        # pw
+        pw_kernel = []
+        pw_bias = []
+        for k_idx in range(self.k):
+            k1, b1 = self._fuse_bn_tensor(getattr(self, f"pw_1x1_{k_idx}"))
+            # print(k1.shape)
+            pw_kernel.append(k1)
+            pw_bias.append(b1)
+        pw_kernel_id, pw_bias_id = self._fuse_bn_tensor(self.pw_bn_layer, 1)
+
+        pw_kernel_1x1 = sum(pw_kernel) + pw_kernel_id
+        pw_bias_1x1 = sum(pw_bias) + pw_bias_id
+        return dw_kernel, dw_bias, pw_kernel_1x1, pw_bias_1x1
+
+    def _pad_1x1_to_3x3_tensor(self, kernel1x1):
+        if kernel1x1 is None:
+            return 0
+        else:
+            return torch.nn.functional.pad(kernel1x1, [1, 1, 1, 1])
+
+    def _fuse_bn_tensor(self, branch, groups=None):
+        if branch is None:
+            return 0, 0
+        if isinstance(branch, (nn.Sequential, Conv)):
+            conv_module = branch.conv
+            bn_module = branch.bn
+            kernel = conv_module.weight
+            running_mean = bn_module.running_mean
+            running_var = bn_module.running_var
+            gamma = bn_module.weight
+            beta = bn_module.bias
+            eps = bn_module.eps
+        else:
+            assert isinstance(branch, nn.BatchNorm2d)
+            # if not hasattr(self, 'id_tensor'):
+            input_dim = self.in_channels // groups  # self.groups
+            if groups == 1:
+                ks = 1
+            else:
+                ks = 3
+            kernel_value = np.zeros(
+                (self.in_channels, input_dim, ks, ks), dtype=np.float32
+            )
+            for i in range(self.in_channels):
+                if ks == 1:
+                    kernel_value[i, i % input_dim, 0, 0] = 1
+                else:
+                    kernel_value[i, i % input_dim, 1, 1] = 1
+            self.id_tensor = torch.from_numpy(kernel_value).to(branch.weight.device)
+
+            kernel = self.id_tensor
+            running_mean = branch.running_mean
+            running_var = branch.running_var
+            gamma = branch.weight
+            beta = branch.bias
+            eps = branch.eps
+        std = (running_var + eps).sqrt()
+        t = (gamma / std).reshape(-1, 1, 1, 1)
+        return kernel * t, beta - running_mean * gamma / std
+
+    def switch_to_deploy(self):
+        dw_kernel, dw_bias, pw_kernel, pw_bias = self.get_equivalent_kernel_bias()
+
+        self.dw_reparam = nn.Conv2d(
+            in_channels=self.pw_1x1_0.conv.in_channels,
+            out_channels=self.pw_1x1_0.conv.in_channels,
+            kernel_size=self.dw_3x3_0.conv.kernel_size,
+            stride=self.dw_3x3_0.conv.stride,
+            padding=self.dw_3x3_0.conv.padding,
+            groups=self.dw_3x3_0.conv.groups,
+            bias=True,
+        )
+        self.pw_reparam = nn.Conv2d(
+            in_channels=self.pw_1x1_0.conv.in_channels,
+            out_channels=self.pw_1x1_0.conv.out_channels,
+            kernel_size=1,
+            stride=1,
+            bias=True,
+        )
+
+        self.dw_reparam.weight.data = dw_kernel
+        self.dw_reparam.bias.data = dw_bias
+        self.pw_reparam.weight.data = pw_kernel
+        self.pw_reparam.bias.data = pw_bias
+
+        for para in self.parameters():
+            para.detach_()
+        self.__delattr__("dw_1x1")
+        for k_idx in range(self.k):
+            self.__delattr__(f"dw_3x3_{k_idx}")
+            self.__delattr__(f"pw_1x1_{k_idx}")
+        if hasattr(self, "dw_bn_layer"):
+            self.__delattr__("dw_bn_layer")
+        if hasattr(self, "pw_bn_layer"):
+            self.__delattr__("pw_bn_layer")
+        if hasattr(self, "id_tensor"):
+            self.__delattr__("id_tensor")
+        self.deploy = True

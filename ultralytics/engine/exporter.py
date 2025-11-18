@@ -437,11 +437,12 @@ class Exporter:
                     post_detect_class.pre_forward = m.pre_forward
                     post_detect_class.dynamic = self.args.dynamic
                     setattr(m, "__class__", post_detect_class)
-                elif isinstance(m, RTDETRDecoder) and self.args.nms:
-                    LOGGER.warning(
-                        "WARNING ⚠️ RT-DETR model with `nms=True` is not supported now."
-                    )
-                    self.args.nms = False
+                continue
+            elif isinstance(m, RTDETRDecoder) and self.args.nms:
+                LOGGER.warning(
+                    "WARNING ⚠️ RT-DETR model with `nms=True` is not supported now."
+                )
+                self.args.nms = False
 
             elif isinstance(m, C2f) and not is_tf_format:
                 # EdgeTPU does not support FlexSplitV while split provides cleaner ONNX graph
@@ -696,7 +697,6 @@ class Exporter:
                 slimmed_info = summarize_model(model_onnx_slimmed)
 
                 print_model_info_as_table(
-                    model_name=self.pretty_name,
                     model_info_list=[original_info, slimmed_info],
                     elapsed_time=end_time - start_time,
                 )
@@ -1410,18 +1410,76 @@ class Exporter:
             builtins.exit = lambda: None
 
         from rknn.api import RKNN
-
+        int8 = self.args.int8
+        half = self.args.half
+        self.args.int8 = False # disable int8 for onnx export
         f, _ = self.export_onnx()
-        # export_path = Path(f"{Path(f).stem}_rknn_model")
-        # export_path.mkdir(exist_ok=True)
+        self.args.int8 = int8 # enable int8 for rknn export
+        export_path = Path(f"{Path(f).stem}_rknn_model")
+        export_path.mkdir(exist_ok=True)
 
-        # rknn = RKNN(verbose=False)
-        # rknn.config(mean_values=[[0, 0, 0]], std_values=[[255, 255, 255]], target_platform=self.args.name)
-        # rknn.load_onnx(model=f)
-        # rknn.build(do_quantization=False)  # TODO: Add quantization support
-        # f = f.replace(".onnx", f"-{self.args.name}.rknn")
-        # rknn.export_rknn(f"{export_path / f}")
-        # YAML.save(export_path / "metadata.yaml", self.metadata)
+        new_f = export_path / Path(f).name
+        Path(f).rename(new_f)
+        f = str(new_f)
+
+        LOGGER.info(f"{prefix} building {'INT8' if int8 else 'FP' + ('16' if half else '32')} engine as {f}")
+        kwargs = dict()
+        if int8:
+            kwargs = dict(quantized_algorithm='mmse', quantized_method='channel')
+
+        rknn = RKNN(verbose=True)
+        rknn.config(
+            mean_values=[[0, 0, 0]],
+            std_values=[[255, 255, 255]],
+            target_platform=self.args.name,
+            **kwargs,
+        )
+        ret = rknn.load_onnx(model=f)
+        if ret != 0:
+            LOGGER.error(f'{prefix} Load model failed! Error code: {ret}')
+            return f, None
+
+        if int8:
+            ret = rknn.hybrid_quantization_step1(
+                dataset=self.args.data,
+                rknn_batch_size=self.args.batch,
+                proposal=True,
+            )
+            if ret != 0:
+                LOGGER.error(f'{prefix} Hybrid quantization step1 failed! Error code: {ret}')
+                return f, None
+            ret = rknn.hybrid_quantization_step2(
+                model_input=f.replace(".onnx", ".model"),
+                data_input=f.replace(".onnx", ".data"),
+                model_quantization_cfg=f.replace(".onnx", ".quantization.cfg"),
+            )
+            if ret != 0:
+                LOGGER.error(f'{prefix} Hybrid quantization step2 failed! Error code: {ret}')
+                return f, None
+        else:
+            ret = rknn.build(do_quantization=True, dataset=self.args.data)
+            if ret != 0:
+                LOGGER.error(f'{prefix} Build model failed! Error code: {ret}')
+                return f, None
+        f = f.replace(".onnx", f"-{self.args.name}.rknn")
+        ret = rknn.export_rknn(f)
+        if ret != 0:
+            LOGGER.error(f'{prefix} Export model failed! Error code: {ret}')
+            return f, None
+        with open(self.args.data, 'r') as fp:
+            path_files = fp.read().splitlines()
+        ret = rknn.accuracy_analysis(
+            inputs=[str(Path(self.args.data).parent / Path(path)) for path in path_files],
+            output_dir=None,
+        )
+        if ret != 0:
+            LOGGER.error(f'{prefix} Accuracy analysis failed! Error code: {ret}')
+            return f, None
+        rknn.release()
+        snapshot_path = export_path.parent / 'snapshot'
+        if snapshot_path.exists():
+            snapshot_path.rename(export_path / 'snapshot')
+        yaml_save(export_path / "metadata.yaml", self.metadata)
         return f, None
 
     @try_export
