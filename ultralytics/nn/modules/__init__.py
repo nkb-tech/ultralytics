@@ -64,6 +64,13 @@ from .block import (
     C2fCBAMv2,
     C3CBAM,
     C3CBAMv2,
+    TorchVision,
+    A2C2f,
+    HyperACE,
+    DownsampleConv,
+    FullPADTunnel,
+    DSC3k2,
+    MobileOneBlock,
 )
 from .conv import (
     CBAM,
@@ -80,7 +87,7 @@ from .conv import (
     LightConv,
     RepConv,
     SpatialAttention,
-    MobileOneBlock,
+    Index,
 )
 from .head import (
     OBB,
@@ -123,6 +130,7 @@ __all__ = (
     "GhostConv",
     "ChannelAttention",
     "SpatialAttention",
+    "Index",
     "CBAM",
     "Concat",
     "TransformerLayer",
@@ -196,4 +204,10 @@ __all__ = (
     "C2fCBAMv2",
     "C3CBAM",
     "C3CBAMv2",
+    "A2C2f",
+    "HyperACE",
+    "DownsampleConv",
+    "FullPADTunnel",
+    "DSC3k2",
+    "TorchVision",
 )

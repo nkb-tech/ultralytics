@@ -3,7 +3,6 @@ from torch import nn, Tensor, LongTensor
 from torch.nn import init
 import torch.nn.functional as F
 import torchvision
-from efficientnet_pytorch.model import MemoryEfficientSwish
 
 import itertools
 import einops
@@ -20,6 +19,26 @@ __all__ = ['EMA', 'SimAM', 'SpatialGroupEnhance', 'BiLevelRoutingAttention', 'Bi
            'CoordAtt', 'BAMBlock', 'EfficientAttention', 'LSKBlock', 'SEAttention', 'CPCA', 'MPCA', 'deformable_LKA',
            'EffectiveSEModule', 'LSKA', 'SegNext_Attention', 'DAttention', 'FocusedLinearAttention', 'MLCA', 'TransNeXt_AggregatedAttention',
            'LocalWindowAttention', 'ELA', 'CAA']
+
+
+class SwishImplementation(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
+        return x * torch.sigmoid(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x = ctx.saved_tensors[0]
+        sx = torch.sigmoid(x)
+        return grad_output * (sx * (1 + x * (1 - sx)))
+
+
+class MemoryEfficientSwish(nn.Module):
+    @staticmethod
+    def forward(x):
+        return SwishImplementation.apply(x)
+
 
 class EMA(nn.Module):
     def __init__(self, channels, factor=8):

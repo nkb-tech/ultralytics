@@ -1095,7 +1095,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C3_DynamicConv, C2f_DynamicConv, C3_GhostDynamicConv, C2f_GhostDynamicConv, C3_RVB, C2f_RVB, C3_RVB_SE, C2f_RVB_SE, C3_RVB_EMA, C2f_RVB_EMA, DGCST,
             C3_RetBlock, C2f_RetBlock, C3_PKIModule, C2f_PKIModule, RepNCSPELAN4_CAA, C3_FADC, C2f_FADC, C3_PPA, C2f_PPA, SRFD, DRFD, RGCSPELAN,
             C3_Faster_CGLU, C2f_Faster_CGLU, C3_Star, C2f_Star, C3_Star_CAA, C2f_Star_CAA, ELAN1,  SPPELAN,C2fAttn, RepC3,  PSA, SCDown, C2fCIB,
-            C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2, Silence):
+            C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2, Silence, A2C2f, DSC3k2):
             if args[0] == 'head_channel':
                 args[0] = d[args[0]]
             
@@ -1132,13 +1132,18 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                      C3_VSS, C2f_VSS, C3_LVMB, C2f_LVMB, C3_DynamicConv, C2f_DynamicConv, C3_GhostDynamicConv, C2f_GhostDynamicConv,
                      C3_RVB, C2f_RVB, C3_RVB_SE, C2f_RVB_SE, C3_RVB_EMA, C2f_RVB_EMA, C3_RetBlock, C2f_RetBlock, C3_PKIModule, C2f_PKIModule,
                      C3_FADC, C2f_FADC, C3_PPA, C2f_PPA, RGCSPELAN, C3_Faster_CGLU, C2f_Faster_CGLU, C3_Star, C2f_Star, C3_Star_CAA, C2f_Star_CAA, 
-                     C2fPSA, C2PSA, C3k2, C2fCIB, C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2):
+                     C2fPSA, C2PSA, C3k2, C2fCIB, C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2, A2C2f, DSC3k2):
                 args.insert(2, n)  # number of repeats
                 n = 1
-            if m is C3k2:  # for M/L/X sizes
+            if m is {C3k2, DSC3k2}:  # for M/L/X sizes
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
+            if m is A2C2f: 
+                legacy = False
+                if scale in "lx":  # for L/X sizes
+                    args.append(True)
+                    args.append(1.5)
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in {HGStem, HGBlock, Ghost_HGBlock, Rep_HGBlock, Dynamic_HGBlock}:
@@ -1174,12 +1179,35 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args[0] = d[args[0]]
             c1, c2 = [ch[x] for x in f], (sum([ch[x] for x in f]) if args[0] == 'concat' else ch[f[0]])
             args = [c1, args[0]]
-        elif m is CBLinear:
+        elif m is {CBLinear, TorchVision, Index}:
             c2 = args[0]
             c1 = ch[f]
             args = [c1, c2, *args[1:]]
         elif m is CBFuse:
             c2 = ch[f[-1]]
+        elif m is HyperACE:
+            legacy = False
+            c1 = ch[f[1]]
+            c2 = args[0]
+            c2 = make_divisible(min(c2, max_channels) * width, 8)
+            he = args[1] 
+            if scale in "n":
+                he = int(args[1] * 0.5)
+            elif scale in "x":
+                he = int(args[1] * 1.5)
+            args = [c1, c2, n, he, *args[2:]]
+            n = 1
+            if scale in "lx":  # for L/X sizes
+                args.append(False)
+        elif m is DownsampleConv:
+            c1 = ch[f]
+            c2 = c1 * 2
+            args = [c1]
+            if scale in "lx":  # for L/X sizes
+                args.append(False)
+                c2 =c1
+        elif m is FullPADTunnel:
+            c2 = ch[f[0]]
         elif m in {convnextv2_atto, convnextv2_femto, convnextv2_pico, convnextv2_nano, convnextv2_tiny, convnextv2_base, convnextv2_large, convnextv2_huge,
                    fasternet_t0, fasternet_t1, fasternet_t2, fasternet_s, fasternet_m, fasternet_l,
                    EfficientViT_M0, EfficientViT_M1, EfficientViT_M2, EfficientViT_M3, EfficientViT_M4, EfficientViT_M5,
