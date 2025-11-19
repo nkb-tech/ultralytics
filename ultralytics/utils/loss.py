@@ -338,21 +338,6 @@ class v8DetectionLoss:
         self.nc: list[int] = m.nc
         self.n_tasks = len(self.nc)
         assert self.n_tasks >= 1, "nc must be at least 1."
-        if clf_loss_weights is not None:
-            # Validate structure: should be list of lists for multi-task, or list for single task
-            if isinstance(clf_loss_weights, list) and len(clf_loss_weights) > 0:
-                if isinstance(clf_loss_weights[0], (int, float)):
-                    # Single list provided - convert to list of lists for single task
-                    clf_loss_weights = [clf_loss_weights]
-                # Validate all weights are positive
-                for task_weights in clf_loss_weights:
-                    assert all(w > 0 for w in task_weights), "Loss weights must be positive."
-                assert len(clf_loss_weights) == self.n_tasks, \
-                    f"Loss weights must be provided for each task, got {len(clf_loss_weights)} weight lists for {self.n_tasks} tasks."
-                # Validate number of weights per task matches number of classes
-                for i, (task_weights, nc) in enumerate(zip(clf_loss_weights, self.nc)):
-                    assert len(task_weights) == nc, \
-                        f"Task {i}: expected {nc} weights (one per class), got {len(task_weights)}"
         self.clf_loss_weights = [
             torch.tensor(
                 clf_loss_weights[i] if clf_loss_weights is not None else [1.0] * self.nc[i],
@@ -360,7 +345,6 @@ class v8DetectionLoss:
             )
             for i in range(self.n_tasks)
         ]
-        LOGGER.info(f'{colorstr("Loss weights ")}: {self.clf_loss_weights[0].tolist()}')
         cls_losses = []
         for i in range(self.n_tasks):
             if clf_loss_fn == "bce":
