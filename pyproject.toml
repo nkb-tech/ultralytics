@@ -84,6 +84,7 @@ dependencies = [
     "tensorboard==2.18.0",
     "einops",
     "numba",
+    "imaug @ git+https://github.com/imaug/imaug.git"
 ]
 
 # Optional dependencies ------------------------------------------------------------------------------------------------

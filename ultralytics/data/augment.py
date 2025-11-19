@@ -33,6 +33,64 @@ try:
 except:
     ALBU_AVAILABLE = False
 
+IMGAUG_AVAILABLE = False
+iaa = None
+try:
+    import imgaug.augmenters as iaa  # type: ignore
+
+    IMGAUG_AVAILABLE = True
+except Exception:
+    iaa = None
+
+if IMGAUG_AVAILABLE:
+
+    class ImgAugWeatherTransform(A.ImageOnlyTransform):
+        """
+        Albumentations-compatible wrapper around ImgAug weather augmentations.
+
+        This transform randomly applies one of several weather-related ImgAug augmenters
+        (snow, fog, clouds, rain, etc.) to the input image.
+        """
+
+        def __init__(self, hyp, always_apply=False, p=0.0):
+            super().__init__(p=p)
+            self.effects = ["fast_snow", "clouds", "fog", "snowflakes", "rain"]
+            self._augmenters = self._build_augmenters()
+            self.always_apply = always_apply
+
+        def _build_augmenters(self):
+            augmenters = []
+            builders = {
+                "fast_snow": lambda: iaa.FastSnowyLandscape(
+                    lightness_threshold=getattr(self.hyp, "imgaug_fast_snow_lightness_threshold", 150),
+                    lightness_multiplier=getattr(self.hyp, "imgaug_fast_snow_lightness_multiplier", 3.0),
+                ),
+                "clouds": lambda: iaa.Clouds(),
+                "fog": lambda: iaa.Fog(),
+                "snowflakes": lambda: iaa.Snowflakes(
+                    flake_size=getattr(self.hyp, "imgaug_snowflakes_size", (0.7, 0.95)),
+                    speed=getattr(self.hyp, "imgaug_snowflakes_speed", (0.001, 0.03)),
+                ),
+                "rain": lambda: iaa.Rain(
+                    drop_size=getattr(self.hyp, "imgaug_rain_drop_size", (0.10, 0.20)),
+                ),
+            }
+            for effect in self.effects:
+                builder = builders.get(effect)
+                if builder is None:
+                    LOGGER.warning(f"ImgAugWeatherTransform: unknown effect '{effect}', skipping.")
+                    continue
+                try:
+                    augmenters.append(builder())
+                except Exception as err:
+                    LOGGER.warning(f"ImgAugWeatherTransform: failed to init '{effect}': {err}")
+            return augmenters
+
+        def apply(self, img, **params):
+            if not self._augmenters:
+                return img
+            augmenter = random.choice(self._augmenters)
+            return augmenter(image=img)
 
 class BaseTransform:
     """
@@ -2337,6 +2395,14 @@ class Albumentations:
                             p=0.1,
                         )
                     ]
+
+                    weather_p = getattr(self.hyp, "p_imgaug_weather", 0)
+                    if IMGAUG_AVAILABLE and weather_p > 0:
+                        try:
+                            tpm = ImgAugWeatherTransform(self.hyp,  p=weather_p)
+                            T.append(tpm)
+                        except Exception as e:
+                            LOGGER.warning(f"Failed to add ImgAug weather transforms: {e}")
 
                 # Compose transforms
                 self.contains_spatial = False if task == "classify" else check_contains_spatial(T)
