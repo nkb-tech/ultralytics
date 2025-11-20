@@ -54,6 +54,7 @@ if IMGAUG_AVAILABLE:
 
         def __init__(self, hyp, always_apply=False, p=0.0):
             super().__init__(p=p)
+            self.hyp = hyp
             self.effects = ["fast_snow", "clouds", "fog", "snowflakes", "rain"]
             self._augmenters = self._build_augmenters()
             self.always_apply = always_apply
@@ -2399,8 +2400,7 @@ class Albumentations:
                     weather_p = getattr(self.hyp, "p_imgaug_weather", 0)
                     if IMGAUG_AVAILABLE and weather_p > 0:
                         try:
-                            tpm = ImgAugWeatherTransform(self.hyp,  p=weather_p)
-                            T.append(tpm)
+                            T.append(ImgAugWeatherTransform(self.hyp,  p=weather_p))
                         except Exception as e:
                             LOGGER.warning(f"Failed to add ImgAug weather transforms: {e}")
 
