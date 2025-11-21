@@ -168,11 +168,11 @@ p_color: 0.2
 p_gray: 0.15
 p_rain: 0.05
 p_snow: 0.05
-p_imgaug_weather: 0.2
+p_imgaug_weather: 0.05
 imgaug_fast_snow_lightness_threshold: 150
 imgaug_fast_snow_lightness_multiplier: 3.0
-imgaug_snowflakes_size: [0.7, 0.95]
-imgaug_snowflakes_speed: [0.001, 0.03]
+imgaug_snowflakes_size: [0.7, 0.75]
+imgaug_snowflakes_speed: [0.025, 0.03]
 imgaug_rain_drop_size: [0.10, 0.20]
 p_BrightnessContrast: 0.0
 

@@ -42,56 +42,144 @@ try:
 except Exception:
     iaa = None
 
-if IMGAUG_AVAILABLE:
+if IMGAUG_AVAILABLE and ALBU_AVAILABLE:
 
-    class ImgAugWeatherTransform(A.ImageOnlyTransform):
+    class ImgAugImageOnlyTransform(A.ImageOnlyTransform):
         """
-        Albumentations-compatible wrapper around ImgAug weather augmentations.
+        Generic Albumentations-compatible wrapper around ImgAug image-only augmenters.
 
-        This transform randomly applies one of several weather-related ImgAug augmenters
-        (snow, fog, clouds, rain, etc.) to the input image.
+        The wrapper validates requested ImgAug augmenter names, instantiates the underlying augmenter with the
+        provided kwargs, and exposes the list of supported augmenters for easier discoverability.
         """
 
-        def __init__(self, hyp, always_apply=False, p=0.0):
+        SUPPORTED_AUGS = {
+            "FastSnowyLandscape": iaa.FastSnowyLandscape,
+            "Clouds": iaa.Clouds,
+            "Fog": iaa.Fog,
+            "Snowflakes": iaa.Snowflakes,
+            "Rain": iaa.Rain,
+        }
+
+        def __init__(self, name: str, kwargs: dict | None = None, always_apply: bool = False, p: float = 0.0):
+            
             super().__init__(p=p)
-            self.hyp = hyp
-            self.effects = ["fast_snow", "clouds", "fog", "snowflakes", "rain"]
-            self._augmenters = self._build_augmenters()
+            if name not in self.SUPPORTED_AUGS:
+                raise ValueError(f"Unsupported ImgAug transform '{name}'. "
+                                 f"Supported transforms: {sorted(self.SUPPORTED_AUGS)}")
             self.always_apply = always_apply
+            self.name = name
+            self.kwargs = kwargs or {}
+            self._augmenter = self._build_augmenter()
 
-        def _build_augmenters(self):
-            augmenters = []
-            builders = {
-                "fast_snow": lambda: iaa.FastSnowyLandscape(
-                    lightness_threshold=getattr(self.hyp, "imgaug_fast_snow_lightness_threshold", 150),
-                    lightness_multiplier=getattr(self.hyp, "imgaug_fast_snow_lightness_multiplier", 3.0),
-                ),
-                "clouds": lambda: iaa.Clouds(),
-                "fog": lambda: iaa.Fog(),
-                "snowflakes": lambda: iaa.Snowflakes(
-                    flake_size=getattr(self.hyp, "imgaug_snowflakes_size", (0.7, 0.95)),
-                    speed=getattr(self.hyp, "imgaug_snowflakes_speed", (0.001, 0.03)),
-                ),
-                "rain": lambda: iaa.Rain(
-                    drop_size=getattr(self.hyp, "imgaug_rain_drop_size", (0.10, 0.20)),
-                ),
-            }
-            for effect in self.effects:
-                builder = builders.get(effect)
-                if builder is None:
-                    LOGGER.warning(f"ImgAugWeatherTransform: unknown effect '{effect}', skipping.")
-                    continue
-                try:
-                    augmenters.append(builder())
-                except Exception as err:
-                    LOGGER.warning(f"ImgAugWeatherTransform: failed to init '{effect}': {err}")
-            return augmenters
+        @classmethod
+        def available_transforms(cls):
+            """Return the list of supported ImgAug augmenters."""
+            return sorted(cls.SUPPORTED_AUGS.keys())
+
+        def _build_augmenter(self):
+            try:
+                a = self.SUPPORTED_AUGS[self.name](**self.kwargs)
+                return self.SUPPORTED_AUGS[self.name](**self.kwargs)
+            except Exception as err:
+                raise RuntimeError(f"Failed to initialize ImgAug transform '{self.name}': {err}") from err
 
         def apply(self, img, **params):
-            if not self._augmenters:
-                return img
-            augmenter = random.choice(self._augmenters)
-            return augmenter(image=img)
+            aug_img = self._augmenter(image=img)
+            # sh = aug_img.shape
+            # cv2.imwrite('/home/maksbel/aug_fix/test.jpg', aug_img)
+            return aug_img
+
+def build_default_albu_transforms(hyp):
+    """Return the default Albumentations transform list used for detection/segmentation tasks."""
+
+    transforms = [
+        A.PixelDropout(
+            dropout_prob=hyp.pixel_dropout_prob,
+            drop_value=hyp.pixel_drop_value,
+            p=hyp.p_pixeldrop,
+        ),
+        A.RandomBrightnessContrast(
+            brightness_limit=hyp.bright_limit,
+            contrast_limit=hyp.contrast_limit,
+            p=hyp.p_bricon,
+        ),
+        A.Sharpen(p=hyp.p_sharpen),
+        A.RGBShift(
+            r_shift_limit=[-10, 10],
+            g_shift_limit=[-10, 10],
+            b_shift_limit=[-10, 10],
+            p=0.15,
+        ),
+        A.Emboss(
+            alpha=(0.2, 0.5),
+            strength=(0.2, 0.6),
+            p=0.2,
+        ),
+        A.FancyPCA(
+            alpha=2,
+            p=0.1,
+        ),
+        A.ShotNoise(
+            scale_range=(0.01, 0.06),
+            p=0.15,
+        ),
+        A.UnsharpMask(
+            blur_limit=(3, 5),
+            sigma_limit=(0.5, 1.0),
+            p=0.1,
+        ),
+        A.OneOf(
+            [
+                ImgAugImageOnlyTransform(
+                    name="FastSnowyLandscape",
+                    kwargs={
+                        "lightness_threshold": hyp.imgaug_fast_snow_lightness_threshold,
+                        "lightness_multiplier": hyp.imgaug_fast_snow_lightness_multiplier,
+                        "seed": 42
+                    },
+                    p=1
+                ),
+                ImgAugImageOnlyTransform(
+                    name="Clouds",
+                    kwargs={},
+                    p=1
+                ),
+                ImgAugImageOnlyTransform(
+                    name="Fog",
+                    kwargs={},
+                    p=1
+                ),
+                ImgAugImageOnlyTransform(
+                    name="Snowflakes",
+                    kwargs={
+                        "flake_size": hyp.imgaug_snowflakes_size,
+                        "speed": hyp.imgaug_snowflakes_speed,
+                        "seed": 42
+                    },
+                    p=1
+                ),
+                ImgAugImageOnlyTransform(
+                    name="Rain",
+                    kwargs={
+                        "drop_size": hyp.imgaug_rain_drop_size,
+                        "seed": 42
+                    },
+                    p=1
+                ),
+            ],
+            p=hyp.p_imgaug_weather
+        ),
+    ]
+        # A.OneOf(
+        #     [
+        #         A.RandomRain(p=hyp.p_rain),
+        #         A.RandomSnow(p=hyp.p_snow, brightness_coeff=2, snow_point_range=(0, 0.15)),
+        #     ],
+        #     p=1.0,
+        # ),
+        # A.ToGray(p=hyp.p_gray),
+
+    return transforms
 
 class BaseTransform:
     """
@@ -2307,6 +2395,7 @@ class Albumentations:
                     "Transpose",
                     "VerticalFlip",
                     "XYMasking",
+                    "ImgAugImageOnlyTransform",
                 }  # from https://albumentations.ai/docs/getting_started/transforms_and_targets/#spatial-level-transforms
 
                 composition_transforms = {
@@ -2351,58 +2440,7 @@ class Albumentations:
                 if transforms is not None:
                     T = [transforms] if not isinstance(transforms, list) else transforms
                 else:
-                    T = [
-                        A.PixelDropout(
-                            dropout_prob=self.hyp.pixel_dropout_prob,
-                            drop_value=self.hyp.pixel_drop_value,
-                            p=self.hyp.p_pixeldrop,
-                        ),
-                        A.OneOf(
-                            [
-                                A.RandomRain(p=self.hyp.p_rain),
-                                A.RandomSnow(p=self.hyp.p_snow, brightness_coeff=2, snow_point_range=(0, 0.15)),
-                            ],
-                            p=0.1,
-                        ),
-                        A.RandomBrightnessContrast(
-                            brightness_limit=self.hyp.bright_limit,
-                            contrast_limit=self.hyp.contrast_limit,
-                            p=self.hyp.p_bricon,
-                        ),
-                        A.Sharpen(p=self.hyp.p_sharpen),
-                        A.ToGray(p=self.hyp.p_gray),
-                        A.RGBShift(
-                                r_shift_limit=[-10, 10],
-                                g_shift_limit=[-10, 10],
-                                b_shift_limit=[-10, 10],
-                                p=0.15,
-                            ),
-                        A.Emboss(
-                            alpha=(0.2, 0.5), 
-                            strength=(0.2, 0.6),
-                            p=0.2,
-                        ),    
-                        A.FancyPCA(
-                            alpha=2, 
-                            p=0.1,
-                        ),    
-                        A.ShotNoise(
-                            scale_range=(0.01, 0.06),
-                            p=0.15 ,
-                        ),
-                        A.UnsharpMask(
-                            blur_limit=(3, 5),
-                            sigma_limit=(0.5, 1.0),
-                            p=0.1,
-                        )
-                    ]
-
-                    weather_p = getattr(self.hyp, "p_imgaug_weather", 0)
-                    if IMGAUG_AVAILABLE and weather_p > 0:
-                        try:
-                            T.append(ImgAugWeatherTransform(self.hyp,  p=weather_p))
-                        except Exception as e:
-                            LOGGER.warning(f"Failed to add ImgAug weather transforms: {e}")
+                    T = build_default_albu_transforms(self.hyp)
 
                 # Compose transforms
                 self.contains_spatial = False if task == "classify" else check_contains_spatial(T)
