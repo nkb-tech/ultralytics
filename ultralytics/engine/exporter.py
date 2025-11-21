@@ -141,7 +141,14 @@ def export_formats():
         ["MNN", "mnn", ".mnn", True, True, ["batch", "half", "int8"]],
         ["NCNN", "ncnn", "_ncnn_model", True, True, ["batch", "half"]],
         ["IMX", "imx", "_imx_model", True, True, ["int8", "fraction", "nms"]],
-        ["RKNN", "rknn", "_rknn_model", False, False, ["batch", "name"]],
+        [
+            "RKNN",
+            "rknn",
+            "_rknn_model",
+            False,
+            False,
+            ["batch", "half", "int8", "simplify", "data", "name", "verbose"],
+        ],
         ["ExecuTorch", "executorch", "_executorch_model", False, False, ["batch"]],
     ]
     return dict(zip(["Format", "Argument", "Suffix", "CPU", "GPU", "Arguments"], zip(*x)))
@@ -267,6 +274,7 @@ class Exporter:
         export_edgetpu: Export model to Edge TPU format.
         export_tfjs: Export model to TensorFlow.js format.
         export_rknn: Export model to RKNN format.
+        export_executorch: Export model to ExecuTorch format.
         export_imx: Export model to IMX format.
 
     Examples:
@@ -388,6 +396,9 @@ class Exporter:
             assert self.args.name in RKNN_CHIPS, (
                 f"Invalid processor name '{self.args.name}' for Rockchip RKNN export. Valid names are {RKNN_CHIPS}."
             )
+            if not (self.args.int8 or self.args.half):
+                LOGGER.warning("WARNING ⚠️ FP32 quantization is not supported for RKNN export, setting half=True.")
+                self.args.half = True
         if isinstance(model, WorldModel):
             LOGGER.warning(
                 "WARNING ⚠️ YOLOWorld (original version) export is not supported to any format.\n"
@@ -1426,16 +1437,31 @@ class Exporter:
         Path(f).rename(new_f)
         f = str(new_f)
 
-        LOGGER.info(f"{prefix} building {'INT8' if int8 else 'FP' + ('16' if half else '32')} engine as {f}")
+        LOGGER.info(f"{prefix} building {'INT8' if int8 else 'FP16' if half} engine as {f}")
         kwargs = dict()
         if int8:
-            kwargs = dict(quantized_algorithm='mmse', quantized_method='channel')
+            # quantized_algorithm - supported normal, mmse, kl_divergence and gdq. Default is normal.
+            # quantized_method - layer, channel, group{SIZE}.
+            # See https://github.com/airockchip/rknn-toolkit2/blob/master/doc/03_Rockchip_RKNPU_API_Reference_RKNN_Toolkit2_V2.3.2_EN.pdf
+            kwargs = dict(
+                quantized_algorithm='mmse',
+                quantized_method='channel',
+                quantized_type="w8a8",
+                float_dtype="float16",
+            )
 
-        rknn = RKNN(verbose=True)
+        rknn = RKNN(verbose=self.args.verbose)
+        LOGGER.info(f"{prefix}\n {rknn.get_sdk_version()}")
         rknn.config(
             mean_values=[[0, 0, 0]],
             std_values=[[255, 255, 255]],
             target_platform=self.args.name,
+            optimization_level=3,
+            compress_weight=True,
+            enable_flash_attention=True,
+            remove_reshape=True,
+            single_core_mode=True,
+            custom_string=self.pretty_name,
             **kwargs,
         )
         ret = rknn.load_onnx(model=f)
@@ -1461,7 +1487,11 @@ class Exporter:
                 LOGGER.error(f'{prefix} Hybrid quantization step2 failed! Error code: {ret}')
                 return f, None
         else:
-            ret = rknn.build(do_quantization=False, dataset=self.args.data)
+            ret = rknn.build(
+                do_quantization=True,
+                dataset=self.args.data,
+                rknn_batch_size=self.args.batch,
+            )
             if ret != 0:
                 LOGGER.error(f'{prefix} Build model failed! Error code: {ret}')
                 return f, None
@@ -1479,6 +1509,8 @@ class Exporter:
         if ret != 0:
             LOGGER.error(f'{prefix} Accuracy analysis failed! Error code: {ret}')
             return f, None
+
+        LOGGER.info(f"{prefix}\n {rknn.eval_perf(is_print=True, fix_freq=True)}")
         rknn.release()
         snapshot_path = export_path.parent / 'snapshot'
         if snapshot_path.exists():

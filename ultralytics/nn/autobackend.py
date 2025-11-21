@@ -73,6 +73,7 @@ class AutoBackend(nn.Module):
             | TensorFlow Edge TPU   | *_edgetpu.tflite |
             | PaddlePaddle          | *_paddle_model   |
             | NCNN                  | *_ncnn_model     |
+            | RKNN                  | *_rknn_model     |
 
     This class offers dynamic backend switching capabilities based on the input model format, making it easier to deploy
     models across various platforms.
@@ -400,6 +401,27 @@ class AutoBackend(nn.Module):
 
             model = TritonRemoteModel(w)
 
+        # Rockchip
+        elif rknn:
+            LOGGER.info(f"Loading {w} for RKNN inference...")
+            check_requirements("rknn-toolkit2")
+            from rknn.api import RKNN
+
+            rknn = RKNN(verbose=False)
+            ret = rknn.load_rknn(str(w))
+            if ret != 0:
+                LOGGER.error(f"Failed to load RKNN model from {str(w)}")
+            ret = rknn.init_runtime(
+                core_mask=RKNN.NPU_CORE_AUTO,
+                async_mode=True,
+                fallback_prior_device='cpu',
+            )
+            if ret != 0:
+                LOGGER.error(f"Failed to initialize RKNN runtime.")
+
+            metadata = w.parent / "metadata.yaml"
+            model = rknn
+
         # Any other format (unsupported)
         else:
             from ultralytics.engine.exporter import export_formats
@@ -569,6 +591,13 @@ class AutoBackend(nn.Module):
         elif self.triton:
             im = im.cpu().numpy()  # torch to numpy
             y = self.model(im)
+
+        elif self.rknn:
+            im = im.cpu().numpy()
+            y = self.model.inference(
+                inputs=[im],
+                data_format="nhwc" if self.nhwc else "nchw",
+            )
 
         # TensorFlow (SavedModel, GraphDef, Lite, Edge TPU)
         else:

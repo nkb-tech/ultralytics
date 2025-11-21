@@ -389,8 +389,8 @@ class ProfileModels:
         num_warmup_runs (int): Number of warmup runs before profiling.
         min_time (float): Minimum number of seconds to profile for.
         imgsz (int): Image size used in the models.
-        half (bool): Flag to indicate whether to use FP16 half-precision for TensorRT profiling.
-        trt (bool): Flag to indicate whether to profile using TensorRT.
+        half (bool): Flag to indicate whether to use FP16 half-precision for profiling.
+        int8 (bool): Flag to indicate whether to use INT8 quantization for profiling.
         device (torch.device): Device used for profiling.
 
     Methods:
@@ -416,11 +416,12 @@ class ProfileModels:
         paths: list[str],
         num_timed_runs: int = 100,
         num_warmup_runs: int = 10,
-        min_time: float = 60,
+        min_time: float = 60.0,
         imgsz: int = 640,
         half: bool = True,
-        trt: bool = True,
-        device: torch.device | str | None = None,
+        int8: bool = False,
+        export_formats: Optional[list[str]] = None,
+        device: Optional[Union[torch.device, str]] = None,
     ):
         """Initialize the ProfileModels class for profiling models.
 
@@ -431,17 +432,21 @@ class ProfileModels:
             min_time (float): Minimum time in seconds for profiling a model.
             imgsz (int): Size of the image used during profiling.
             half (bool): Flag to indicate whether to use FP16 half-precision for TensorRT profiling.
-            trt (bool): Flag to indicate whether to profile using TensorRT.
-            device (torch.device | str | None): Device used for profiling. If None, it is determined automatically.
+            int8 (bool): Flag to indicate whether to use INT8 quantization for profiling.
+            export_formats (Optional[list[str]]): List of formats to profile.
+            device (torch.device | None): Device used for profiling. If None, it is determined automatically.
 
         Examples:
             Initialize and profile models
             >>> from ultralytics.utils.benchmarks import ProfileModels
-            >>> profiler = ProfileModels(["yolo11n.yaml", "yolov8s.yaml"], imgsz=640)
-            >>> profiler.run()
-
-        Notes:
-            FP16 'half' argument option removed for ONNX as slower on CPU than FP32.
+            >>> profiler = ProfileModels(
+                paths=["yolov8n.yaml", "yolov8s.yaml"],
+                imgsz=640,
+                half=True,
+                int8=False,
+                export_formats=["onnx", "engine"],
+            )
+            >>> profiler.profile()
         """
         self.paths = paths
         self.num_timed_runs = num_timed_runs
@@ -449,8 +454,15 @@ class ProfileModels:
         self.min_time = min_time
         self.imgsz = imgsz
         self.half = half
-        self.trt = trt  # run TensorRT profiling
-        self.device = device if isinstance(device, torch.device) else select_device(device)
+        self.int8 = int8
+        self.export_formats = export_formats
+
+        try:
+            device = select_device(device)
+        except ValueError:
+            device = "cpu"
+            LOGGER.warning(f"Invalid device {device}, using CPU instead.")
+        self.device = device
 
     def run(self):
         """Profile YOLO models for speed and accuracy across various formats including ONNX and TensorRT.
@@ -467,69 +479,53 @@ class ProfileModels:
         files = self.get_files()
 
         if not files:
-            LOGGER.warning("No matching *.pt or *.onnx files found.")
-            return []
+            LOGGER.warning("No matching files found.")
+            return
+        else:
+            LOGGER.info(f"Profiling: {files}")
 
-        table_rows = []
-        output = []
+        table_rows, output = [], []
         for file in files:
-            engine_file = file.with_suffix(".engine")
             if file.suffix in {".pt", ".yaml", ".yml"}:
                 model = YOLO(str(file))
                 model.fuse()  # to report correct params and GFLOPs in model.info()
                 model_info = model.info()
-                if self.trt and self.device.type != "cpu" and not engine_file.is_file():
-                    engine_file = model.export(
-                        format="engine",
+
+                for export_format in self.export_formats:
+                    exported_file, _ = model.export(
+                        format=export_format,
                         half=self.half,
                         imgsz=self.imgsz,
                         device=self.device,
+                        simplify=True,
                         verbose=False,
+                        batch=1,
+                        dynamic=False,
                     )
-                onnx_file = model.export(
-                    format="onnx",
-                    imgsz=self.imgsz,
-                    device=self.device,
-                    verbose=False,
-                )
-            elif file.suffix == ".onnx":
-                model_info = self.get_onnx_model_info(file)
-                onnx_file = file
-            else:
-                continue
 
-            t_engine = self.profile_tensorrt_model(str(engine_file))
-            t_onnx = self.profile_onnx_model(str(onnx_file))
-            table_rows.append(self.generate_table_row(file.stem, t_onnx, t_engine, model_info))
-            output.append(self.generate_results_dict(file.stem, t_onnx, t_engine, model_info))
+                    t_export_format = self.profile_export_format(exported_file)
+                    table_rows.append(self.generate_table_row(file.stem, t_export_format, model_info))
+                    output.append(self.generate_results_dict(file.stem, t_export_format, model_info))
 
         self.print_table(table_rows)
         return output
+    
+    def profile_export_format(self, exported_file: str):
 
-    def get_files(self):
-        """Return a list of paths for all relevant model files given by the user.
-
-        Returns:
-            (list[Path]): List of Path objects for the model files.
-        """
+    def _get_files(self):
+        """Returns a list of paths for all relevant model files given by the user."""
         files = []
         for path in self.paths:
             path = Path(path)
             if path.is_dir():
-                extensions = ["*.pt", "*.onnx", "*.yaml"]
+                extensions = ["*.pt", "*.yaml"]
                 files.extend([file for ext in extensions for file in glob.glob(str(path / ext))])
             elif path.suffix in {".pt", ".yaml", ".yml"}:  # add non-existing
                 files.append(str(path))
             else:
                 files.extend(glob.glob(str(path)))
 
-        LOGGER.info(f"Profiling: {sorted(files)}")
         return [Path(file) for file in sorted(files)]
-
-    @staticmethod
-    def get_onnx_model_info(onnx_file: str):
-        """Extract metadata from an ONNX model file including parameters, GFLOPs, and input shape."""
-        return 0.0, 0.0, 0.0, 0.0  # return (num_layers, num_params, num_gradients, num_flops)
 
     @staticmethod
     def iterative_sigma_clipping(data: np.ndarray, sigma: float = 2, max_iters: int = 3):
