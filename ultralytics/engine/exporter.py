@@ -144,7 +144,7 @@ def export_formats():
         [
             "RKNN",
             "rknn",
-            "_rknn_model",
+            ".rknn",
             False,
             False,
             ["batch", "half", "int8", "simplify", "data", "name", "verbose"],
@@ -1437,7 +1437,7 @@ class Exporter:
         Path(f).rename(new_f)
         f = str(new_f)
 
-        LOGGER.info(f"{prefix} building {'INT8' if int8 else 'FP16' if half} engine as {f}")
+        LOGGER.info(f"{prefix} building {'INT8' if int8 else 'FP16'} engine as {f}")
         kwargs = dict()
         if int8:
             # quantized_algorithm - supported normal, mmse, kl_divergence and gdq. Default is normal.

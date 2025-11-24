@@ -404,17 +404,16 @@ class AutoBackend(nn.Module):
         # Rockchip
         elif rknn:
             LOGGER.info(f"Loading {w} for RKNN inference...")
-            check_requirements("rknn-toolkit2")
-            from rknn.api import RKNN
+            check_requirements("rknn-toolkit-lite2")
+            from rknnlite.api import RKNNLite
 
-            rknn = RKNN(verbose=False)
+            rknn = RKNNLite(verbose=False)
             ret = rknn.load_rknn(str(w))
             if ret != 0:
                 LOGGER.error(f"Failed to load RKNN model from {str(w)}")
             ret = rknn.init_runtime(
-                core_mask=RKNN.NPU_CORE_AUTO,
+                core_mask=RKNNLite.NPU_CORE_AUTO,
                 async_mode=True,
-                fallback_prior_device='cpu',
             )
             if ret != 0:
                 LOGGER.error(f"Failed to initialize RKNN runtime.")
@@ -597,6 +596,8 @@ class AutoBackend(nn.Module):
             y = self.model.inference(
                 inputs=[im],
                 data_format="nhwc" if self.nhwc else "nchw",
+                data_type="uint8",
+                get_frame_id=False,
             )
 
         # TensorFlow (SavedModel, GraphDef, Lite, Edge TPU)
@@ -663,7 +664,7 @@ class AutoBackend(nn.Module):
         Returns:
             (torch.Tensor): The converted tensor
         """
-        return torch.tensor(x).to(self.device) if isinstance(x, np.ndarray) else x
+        return torch.tensor(x, device=self.device) if isinstance(x, np.ndarray) else x
 
     def warmup(self, imgsz=(1, 3, 640, 640)):
         """

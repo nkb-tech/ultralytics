@@ -510,7 +510,45 @@ class ProfileModels:
         self.print_table(table_rows)
         return output
     
-    def profile_export_format(self, exported_file: str):
+    def profile_export_format(self, exported_file: str, eps: float = 1e-3):
+        """Profile YOLO model performance with TensorRT, measuring average run time and standard deviation.
+
+        Args:
+            engine_file (str): Path to the TensorRT engine file.
+            eps (float): Small epsilon value to prevent division by zero.
+
+        Returns:
+            mean_time (float): Mean inference time in milliseconds.
+            std_time (float): Standard deviation of inference time in milliseconds.
+        """
+        if not Path(exported_file).is_file():
+            LOGGER.warning(f"File {exported_file} not found.")
+            return 0.0, 0.0
+
+        # Model and input
+        model = YOLO(engine_file)
+        input_data = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)  # use uint8 for Classify
+
+        # Warmup runs
+        elapsed = 0.0
+        for _ in range(3):
+            start_time = time.time()
+            for _ in range(self.num_warmup_runs):
+                _ = model(input_data, imgsz=self.imgsz, verbose=False)
+            elapsed = time.time() - start_time
+
+        # Compute number of runs as higher of min_time or num_timed_runs
+        num_runs = max(round(self.min_time / (elapsed + eps) * self.num_warmup_runs), self.num_timed_runs * 50)
+
+        # Timed runs
+        run_times = []
+        for _ in TQDM(range(num_runs), desc=exported_file):
+            results = model(input_data, imgsz=self.imgsz, verbose=False)
+            run_times.append(results[0].speed["inference"])  # Convert to milliseconds
+
+        run_times = self.iterative_sigma_clipping(np.array(run_times), sigma=2, max_iters=3)  # sigma clipping
+        return np.mean(run_times), np.std(run_times)
+
 
     def _get_files(self):
         """Returns a list of paths for all relevant model files given by the user."""

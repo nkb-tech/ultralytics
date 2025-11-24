@@ -39,6 +39,8 @@ class DetectionPredictor(BasePredictor):
             preds = ops.process_nms_trt_results(preds, self.output_names)
         elif self.onnx:
             preds = ops.process_nms_onnx_results(preds)
+        elif self.rknn:
+            preds = ops.process_nms_rknn_results(preds)
 
         if not isinstance(orig_imgs, list):  # input images are a torch.Tensor, not a list
             orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)
