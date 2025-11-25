@@ -33,24 +33,20 @@ try:
 except:
     ALBU_AVAILABLE = False
 
+# Flag for imgaug
 IMGAUG_AVAILABLE = False
 iaa = None
 try:
-    import imgaug.augmenters as iaa  # type: ignore
-
+    import imgaug.augmenters as iaa
     IMGAUG_AVAILABLE = True
 except Exception:
-    iaa = None
+    iaa = None  # imgaug not available
 
+# Define wrapper only if both libraries are present
 if IMGAUG_AVAILABLE and ALBU_AVAILABLE:
 
     class ImgAugImageOnlyTransform(A.ImageOnlyTransform):
-        """
-        Generic Albumentations-compatible wrapper around ImgAug image-only augmenters.
-
-        The wrapper validates requested ImgAug augmenter names, instantiates the underlying augmenter with the
-        provided kwargs, and exposes the list of supported augmenters for easier discoverability.
-        """
+        """Wrapper to use imgaug image-only augmenters within Albumentations."""
 
         SUPPORTED_AUGS = {
             "FastSnowyLandscape": iaa.FastSnowyLandscape,
@@ -61,11 +57,10 @@ if IMGAUG_AVAILABLE and ALBU_AVAILABLE:
         }
 
         def __init__(self, name: str, kwargs: dict | None = None, always_apply: bool = False, p: float = 0.0):
-            
             super().__init__(p=p)
             if name not in self.SUPPORTED_AUGS:
                 raise ValueError(f"Unsupported ImgAug transform '{name}'. "
-                                 f"Supported transforms: {sorted(self.SUPPORTED_AUGS)}")
+                                 f"Supported: {sorted(self.SUPPORTED_AUGS)}")
             self.always_apply = always_apply
             self.name = name
             self.kwargs = kwargs or {}
@@ -73,25 +68,30 @@ if IMGAUG_AVAILABLE and ALBU_AVAILABLE:
 
         @classmethod
         def available_transforms(cls):
-            """Return the list of supported ImgAug augmenters."""
+            """Return list of supported imgaug transform names."""
             return sorted(cls.SUPPORTED_AUGS.keys())
 
         def _build_augmenter(self):
+            """Instantiate the imgaug augmenter with given kwargs."""
             try:
-                a = self.SUPPORTED_AUGS[self.name](**self.kwargs)
                 return self.SUPPORTED_AUGS[self.name](**self.kwargs)
             except Exception as err:
-                raise RuntimeError(f"Failed to initialize ImgAug transform '{self.name}': {err}") from err
+                raise RuntimeError(f"Failed to initialize '{self.name}': {err}") from err
 
         def apply(self, img, **params):
-            aug_img = self._augmenter(image=img)
-            # sh = aug_img.shape
-            # cv2.imwrite('/home/maksbel/aug_fix/test.jpg', aug_img)
-            return aug_img
+            """Apply the wrapped imgaug transform to the input image."""
+            return self._augmenter(image=img)
 
 def build_default_albu_transforms(hyp):
-    """Return the default Albumentations transform list used for detection/segmentation tasks."""
+    """
+    Build a list of default Albumentations augmentations using hyperparameters.
 
+    Args:
+        hyp: object containing augmentation hyperparameters (e.g., probabilities, limits).
+
+    Returns:
+        List of Albumentations transforms.
+    """
     transforms = [
         A.PixelDropout(
             dropout_prob=hyp.pixel_dropout_prob,
@@ -104,72 +104,49 @@ def build_default_albu_transforms(hyp):
             p=hyp.p_bricon,
         ),
         A.Sharpen(p=hyp.p_sharpen),
-        A.RGBShift(
-            r_shift_limit=[-10, 10],
-            g_shift_limit=[-10, 10],
-            b_shift_limit=[-10, 10],
-            p=0.15,
-        ),
-        A.Emboss(
-            alpha=(0.2, 0.5),
-            strength=(0.2, 0.6),
-            p=0.2,
-        ),
-        A.FancyPCA(
-            alpha=2,
-            p=0.1,
-        ),
-        A.ShotNoise(
-            scale_range=(0.01, 0.06),
-            p=0.15,
-        ),
-        A.UnsharpMask(
-            blur_limit=(3, 5),
-            sigma_limit=(0.5, 1.0),
-            p=0.1,
-        ),
-        A.OneOf(
-            [
-                ImgAugImageOnlyTransform(
-                    name="FastSnowyLandscape",
-                    kwargs={
-                        "lightness_threshold": hyp.imgaug_fast_snow_lightness_threshold,
-                        "lightness_multiplier": hyp.imgaug_fast_snow_lightness_multiplier,
-                        "seed": 42
-                    },
-                    p=1
-                ),
-                ImgAugImageOnlyTransform(
-                    name="Clouds",
-                    kwargs={},
-                    p=1
-                ),
-                ImgAugImageOnlyTransform(
-                    name="Fog",
-                    kwargs={},
-                    p=1
-                ),
-                ImgAugImageOnlyTransform(
-                    name="Snowflakes",
-                    kwargs={
-                        "flake_size": hyp.imgaug_snowflakes_size,
-                        "speed": hyp.imgaug_snowflakes_speed,
-                        "seed": 42
-                    },
-                    p=1
-                ),
-                ImgAugImageOnlyTransform(
-                    name="Rain",
-                    kwargs={
-                        "drop_size": hyp.imgaug_rain_drop_size,
-                        "seed": 42
-                    },
-                    p=1
-                ),
-            ],
-            p=hyp.p_imgaug_weather
-        ),
+        A.RGBShift(r_shift_limit=[-10, 10], g_shift_limit=[-10, 10], b_shift_limit=[-10, 10], p=0.15),
+        A.Emboss(alpha=(0.2, 0.5), strength=(0.2, 0.6), p=0.2),
+        A.FancyPCA(alpha=2, p=0.1),
+        A.ShotNoise(scale_range=(0.01, 0.06), p=0.15),
+        A.UnsharpMask(blur_limit=(3, 5), sigma_limit=(0.5, 1.0), p=0.1),
     ]
+
+    # Add weather effects only if imgaug is available
+    if IMGAUG_AVAILABLE:
+        weather_transforms = [
+            ImgAugImageOnlyTransform(
+                name="FastSnowyLandscape",
+                kwargs={
+                    "lightness_threshold": hyp.imgaug_fast_snow_lightness_threshold,
+                    "lightness_multiplier": hyp.imgaug_fast_snow_lightness_multiplier,
+                    "seed": 42
+                },
+                p=hyp.p_imgaug_weather
+            ),
+            ImgAugImageOnlyTransform(name="Clouds", kwargs={}, p=hyp.p_imgaug_weather),
+            ImgAugImageOnlyTransform(name="Fog", kwargs={}, p=hyp.p_imgaug_weather),
+            ImgAugImageOnlyTransform(
+                name="Snowflakes",
+                kwargs={
+                    "flake_size": hyp.imgaug_snowflakes_size,
+                    "speed": hyp.imgaug_snowflakes_speed,
+                    "seed": 42
+                },
+                p=hyp.p_imgaug_weather
+            ),
+            ImgAugImageOnlyTransform(
+                name="Rain",
+                kwargs={
+                    "drop_size": hyp.imgaug_rain_drop_size,
+                    "seed": 42
+                },
+                p=hyp.p_imgaug_weather
+            ),
+        ]
+        transforms.append(A.OneOf(weather_transforms, p=hyp.p_imgaug_weather))
+
+    return transforms
+        # Old albumentations
         # A.OneOf(
         #     [
         #         A.RandomRain(p=hyp.p_rain),
@@ -178,9 +155,6 @@ def build_default_albu_transforms(hyp):
         #     p=1.0,
         # ),
         # A.ToGray(p=hyp.p_gray),
-
-    return transforms
-
 class BaseTransform:
     """
     Base class for image transformations in the Ultralytics library.
