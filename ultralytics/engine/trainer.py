@@ -403,9 +403,8 @@ class BaseTrainer:
             # Auto-calculate weights if not provided or invalid
             if clf_loss_weights is None:
                 calculated_weights = self._calculate_class_weights(nc_list=nc_list)
-                if calculated_weights is not None: #FIXME
-                    clf_loss_weights = calculated_weights
-                    LOGGER.info(f'{colorstr("Auto-calculated class weights")}: {clf_loss_weights}')
+                clf_loss_weights = calculated_weights
+                LOGGER.info(f'{colorstr("Auto-calculated class weights")}: {clf_loss_weights}')
 
         # Initialize criterion
         if world_size > 1:

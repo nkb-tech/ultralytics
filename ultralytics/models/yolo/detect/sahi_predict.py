@@ -113,15 +113,15 @@ class SAHIPredictAggregator:
             crop_coords: (x1, y1, x2, y2) coordinates of the crop in original image
         """
         # Transform boxes from crop coordinates to original image coordinates
-        x1, y1, x2, y2 = crop_coords
+        x_min, y_min, _, _ = crop_coords
         
         # Copy predictions to avoid modifying original
         transformed_preds = preds.clone()
         
         # Transform boxes from crop space to original image space
         # preds format: [x_center, y_center, width, height, conf, cls]
-        transformed_preds[:, 0] = transformed_preds[:, 0] + x1  # x_center
-        transformed_preds[:, 1] = transformed_preds[:, 1] + y1  # y_center
+        transformed_preds[:, 0] = transformed_preds[:, 0] + x_min  # x_center
+        transformed_preds[:, 1] = transformed_preds[:, 1] + y_min  # y_center
         
         self.image_predictions[img_key].append((transformed_preds, crop_coords))
     
