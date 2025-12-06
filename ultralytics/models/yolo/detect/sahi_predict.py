@@ -98,10 +98,12 @@ class SAHIPredictAggregator:
         self.crop_size = crop_size
         self.overlap_ratio = overlap_ratio
         self.image_predictions = defaultdict(list)  # {img_key: [(preds, coords), ...]}
+        self.device = None
         
     def reset(self):
         """Reset aggregator for new inference run."""
         self.image_predictions.clear()
+        self.device = None
     
     def add_crop_predictions(self, img_key: str, preds: torch.Tensor, crop_coords: Tuple[int, int, int, int]):
         """
@@ -109,23 +111,24 @@ class SAHIPredictAggregator:
         
         Args:
             img_key: Unique identifier for the original image
-            preds: Predictions tensor (N, 6) where columns are [x, y, w, h, conf, cls]
+            preds: Predictions tensor (N, 6) where columns are [x1, y1, x2, y2, conf, cls]
             crop_coords: (x1, y1, x2, y2) coordinates of the crop in original image
         """
-        # Transform boxes from crop coordinates to original image coordinates
-        x_min, y_min, _, _ = crop_coords
         
-        # Copy predictions to avoid modifying original
+        # Transform coordinates from crop space to full image space
+        x_min, y_min = crop_coords[0], crop_coords[1]
         transformed_preds = preds.clone()
+        transformed_preds[:, 0] += x_min  # x1
+        transformed_preds[:, 2] += x_min  # x2
+        transformed_preds[:, 1] += y_min  # y1
+        transformed_preds[:, 3] += y_min  # y2
         
-        # Transform boxes from crop space to original image space
-        # preds format: [x_center, y_center, width, height, conf, cls]
-        transformed_preds[:, 0] = transformed_preds[:, 0] + x_min  # x_center
-        transformed_preds[:, 1] = transformed_preds[:, 1] + y_min  # y_center
+        if self.device is None:
+            self.device = transformed_preds.device
         
         self.image_predictions[img_key].append((transformed_preds, crop_coords))
     
-    def aggregate_predictions(self, img_key: str, orig_shape: Tuple[int, int], conf_threshold: float = 0.001) -> torch.Tensor:
+    def aggregate_predictions(self, img_key: str, orig_shape: Tuple[int, int], conf_threshold: float = 0.1) -> torch.Tensor:
         """
         Aggregate predictions from all crops for a complete image.
         
@@ -135,36 +138,41 @@ class SAHIPredictAggregator:
             conf_threshold: Confidence threshold for filtering predictions
         
         Returns:
-            Aggregated predictions tensor (N, 6) in original image coordinates
+            Aggregated predictions tensor (N, 6) in original image coordinates (xyxy)
         """
+        # Check if we have any predictions for this image
         if img_key not in self.image_predictions or not self.image_predictions[img_key]:
-            # Return empty tensor with correct shape
-            return torch.empty((0, 6), dtype=torch.float32)
+            device = self.device or torch.device("cpu")
+            return torch.empty((0, 6), dtype=torch.float32, device=device)
         
-        # Collect all predictions
+        # Collect all predictions from crops
         all_preds = []
         for preds, _ in self.image_predictions[img_key]:
-            # Filter by confidence
+            # Filter by confidence threshold
             if conf_threshold > 0:
                 mask = preds[:, 4] >= conf_threshold
                 preds = preds[mask]
             
-            if len(preds) > 0:
-                all_preds.append(preds)
+            all_preds.append(preds)
         
+        # Clean up to prevent memory accumulation
+        self.image_predictions.pop(img_key, None)
+        
+        # Return empty tensor if no predictions passed threshold
         if not all_preds:
-            return torch.empty((0, 6), dtype=torch.float32)
+            device = self.device or torch.device("cpu")
+            return torch.empty((0, 6), dtype=torch.float32, device=device)
         
         # Concatenate all predictions
         aggregated = torch.cat(all_preds, dim=0)
         
-        # Clip boxes to image boundaries
+        # Clip boxes to image boundaries (in-place for efficiency)
         h, w = orig_shape
-        aggregated[:, 0] = torch.clamp(aggregated[:, 0], 0, w)  # x_center
-        aggregated[:, 1] = torch.clamp(aggregated[:, 1], 0, h)  # y_center
-        aggregated[:, 2] = torch.clamp(aggregated[:, 2], 0, w)  # width
-        aggregated[:, 3] = torch.clamp(aggregated[:, 3], 0, h)  # height
-        
+        aggregated[:, 0].clamp_(0, w)  # x1
+        aggregated[:, 2].clamp_(0, w)  # x2
+        aggregated[:, 1].clamp_(0, h)  # y1
+        aggregated[:, 3].clamp_(0, h)  # y2
+
         return aggregated
     
     def is_image_complete(self, img_key: str, expected_crops: int) -> bool:

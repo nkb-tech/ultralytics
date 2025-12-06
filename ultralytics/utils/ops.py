@@ -11,13 +11,16 @@ import numpy as np
 import torch
 from torch import Tensor
 import torch.nn.functional as F
+from shapely import STRtree, box
+from typing import Dict, List
 
 from ultralytics.utils import LOGGER
-from ultralytics.utils.metrics import batch_probiou
+from ultralytics.utils.metrics import batch_probiou, box_iou
 from ultralytics.utils.tf import (
     xyxy2xywh,
     xywh2xyxy,
     clip_boxes,
+    clip_coords,
 )
 
 
@@ -182,6 +185,7 @@ def non_max_suppression(
     max_wh=7680,
     in_place=True,
     rotated=False,
+    force_nms_for_e2e=False,  # Force NMS for end-to-end models (e.g., for SAHI final deduplication)
 ):
     """
     Perform non-maximum suppression (NMS) on a set of boxes, with support for masks and multiple labels per box.
@@ -234,6 +238,42 @@ def non_max_suppression(
         #     pred[torchvision.ops.nms(pred[:, :4], pred[:, 4], iou_thres)]
         #     for pred in output
         # ]
+        if force_nms_for_e2e:
+            import torchvision
+            if agnostic:
+                # Class-agnostic NMS
+                output = [
+                    pred[torchvision.ops.nms(pred[:, :4], pred[:, 4], iou_thres)]
+                    for pred in output
+                ]
+            else:
+                # Per-class NMS
+                final_output = []
+                for pred in output:
+                    if pred.shape[0] == 0:
+                        final_output.append(pred)
+                        continue
+                    
+                    keep_indices = []
+                    unique_classes = pred[:, 5].unique()
+                    
+                    for cls in unique_classes:
+                        cls_mask = pred[:, 5] == cls
+                        cls_boxes = pred[cls_mask, :4]
+                        cls_scores = pred[cls_mask, 4]
+                        cls_indices = torch.where(cls_mask)[0]
+                        
+                        cls_keep = torchvision.ops.nms(cls_boxes, cls_scores, iou_thres)
+                        keep_indices.append(cls_indices[cls_keep])
+                    
+                    if len(keep_indices) > 0:
+                        keep_indices = torch.cat(keep_indices)
+                        final_output.append(pred[keep_indices])
+                    else:
+                        final_output.append(pred[:0])  # Empty tensor with correct shape
+                
+                output = final_output
+        
         return output
 
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
@@ -353,6 +393,533 @@ def non_max_suppression(
 
     return output
 
+def batched_nmm(
+    predictions: torch.Tensor,
+    match_metric: str = "IOU",
+    match_threshold: float = 0.5,
+) -> Dict[int, List[int]]:
+    """
+    Apply non-maximum merging per category to avoid detecting too many overlapping bounding boxes.
+
+    Args:
+        predictions (torch.Tensor): Tensor of shape [num_boxes, 6] with format [x1, y1, x2, y2, score, class_id].
+        match_metric (str): "IOU" or "IOS".
+        match_threshold (float): The overlap threshold for match metric.
+
+    Returns:
+        (Dict[int, List[int]]): Mapping from prediction indices to keep to a list of prediction indices to be merged.
+    """
+    category_ids = predictions[:, 5].squeeze()
+    keep_to_merge_list = {}
+    for category_id in torch.unique(category_ids):
+        curr_indices = torch.where(category_ids == category_id)[0]
+        curr_keep_to_merge_list = nmm(predictions[curr_indices], match_metric, match_threshold)
+        curr_indices_list = curr_indices.tolist()
+        for curr_keep, curr_merge_list in curr_keep_to_merge_list.items():
+            keep = curr_indices_list[curr_keep]
+            merge_list = [curr_indices_list[curr_merge_ind] for curr_merge_ind in curr_merge_list]
+            keep_to_merge_list[keep] = merge_list
+    return keep_to_merge_list
+
+
+def nmm(
+    predictions: torch.Tensor,
+    match_metric: str = "IOU",
+    match_threshold: float = 0.5,
+) -> Dict[int, List[int]]:
+    """
+    Non-maximum merging for axis-aligned bounding boxes using STRTree.
+
+    Args:
+        predictions (torch.Tensor): Tensor of shape [num_boxes, 6] with format [x1, y1, x2, y2, score, class_id].
+        match_metric (str): "IOU" or "IOS".
+        match_threshold (float): The overlap threshold for match metric.
+
+    Returns:
+        (Dict[int, List[int]]): Mapping from prediction indices to keep to a list of prediction indices to be merged.
+    """
+    # Extract coordinates and scores as tensors
+    x1 = predictions[:, 0]
+    y1 = predictions[:, 1]
+    x2 = predictions[:, 2]
+    y2 = predictions[:, 3]
+    scores = predictions[:, 4]
+
+    # Calculate areas as tensor (vectorized operation)
+    areas = (x2 - x1) * (y2 - y1)
+
+    # Create Shapely boxes
+    boxes = []
+    for i in range(len(predictions)):
+        boxes.append(
+            box(
+                x1[i].item(),
+                y1[i].item(),
+                x2[i].item(),
+                y2[i].item(),
+            )
+        )
+
+    # Sort indices by score (descending) using torch
+    sorted_idxs = torch.argsort(scores, descending=True).tolist()
+
+    # Build STRtree
+    tree = STRtree(boxes)
+
+    keep_to_merge_list = {}
+    merge_to_keep = {}
+
+    for current_idx in sorted_idxs:
+        current_box = boxes[current_idx]
+        current_area = areas[current_idx].item()
+
+        # Query potential intersections using STRtree
+        candidate_idxs = tree.query(current_box)
+
+        matched_box_indices = []
+        for candidate_idx in candidate_idxs:
+            if candidate_idx == current_idx:
+                continue
+
+            # Only consider candidates with lower or equal score
+            if scores[candidate_idx] > scores[current_idx]:
+                continue
+
+            # For equal scores, use deterministic tie-breaking based on box coordinates
+            if scores[candidate_idx] == scores[current_idx]:
+                current_coords = (
+                    x1[current_idx].item(),
+                    y1[current_idx].item(),
+                    x2[current_idx].item(),
+                    y2[current_idx].item(),
+                )
+                candidate_coords = (
+                    x1[candidate_idx].item(),
+                    y1[candidate_idx].item(),
+                    x2[candidate_idx].item(),
+                    y2[candidate_idx].item(),
+                )
+
+                # Compare coordinates lexicographically
+                if candidate_coords > current_coords:
+                    continue
+
+            # Calculate intersection area
+            candidate_box = boxes[candidate_idx]
+            intersection = current_box.intersection(candidate_box).area
+
+            # Calculate metric
+            if match_metric == "IOU":
+                union = current_area + areas[candidate_idx].item() - intersection
+                metric = intersection / union if union > 0 else 0
+            elif match_metric == "IOS":
+                smaller = min(current_area, areas[candidate_idx].item())
+                metric = intersection / smaller if smaller > 0 else 0
+            else:
+                raise ValueError(f"Invalid match_metric: {match_metric}")
+
+            # Add to matched list if overlap exceeds threshold
+            if metric >= match_threshold:
+                matched_box_indices.append(candidate_idx)
+
+        # Convert current_idx to native Python int
+        current_idx_native = int(current_idx)
+
+        # Create keep_ind to merge_ind_list mapping
+        if current_idx_native not in merge_to_keep:
+            keep_to_merge_list[current_idx_native] = []
+
+            for matched_box_idx in matched_box_indices:
+                matched_box_idx_native = int(matched_box_idx)
+                if matched_box_idx_native not in merge_to_keep:
+                    keep_to_merge_list[current_idx_native].append(matched_box_idx_native)
+                    merge_to_keep[matched_box_idx_native] = current_idx_native
+        else:
+            keep_idx = merge_to_keep[current_idx_native]
+            for matched_box_idx in matched_box_indices:
+                matched_box_idx_native = int(matched_box_idx)
+                if (
+                    matched_box_idx_native not in keep_to_merge_list.get(keep_idx, [])
+                    and matched_box_idx_native not in merge_to_keep
+                ):
+                    if keep_idx not in keep_to_merge_list:
+                        keep_to_merge_list[keep_idx] = []
+                    keep_to_merge_list[keep_idx].append(matched_box_idx_native)
+                    merge_to_keep[matched_box_idx_native] = keep_idx
+
+    return keep_to_merge_list
+
+
+def batched_greedy_nmm(
+    predictions: torch.Tensor,
+    match_metric: str = "IOU",
+    match_threshold: float = 0.5,
+) -> Dict[int, List[int]]:
+    """
+    Apply greedy non-maximum merging per category.
+
+    Args:
+        predictions (torch.Tensor): Tensor of shape [num_boxes, 6] with format [x1, y1, x2, y2, score, class_id].
+        match_metric (str): "IOU" or "IOS".
+        match_threshold (float): The overlap threshold for match metric.
+
+    Returns:
+        (Dict[int, List[int]]): Mapping from prediction indices to keep to a list of prediction indices to be merged.
+    """
+    category_ids = predictions[:, 5].squeeze()
+    keep_to_merge_list = {}
+    for category_id in torch.unique(category_ids):
+        curr_indices = torch.where(category_ids == category_id)[0]
+        curr_keep_to_merge_list = greedy_nmm(predictions[curr_indices], match_metric, match_threshold)
+        curr_indices_list = curr_indices.tolist()
+        for curr_keep, curr_merge_list in curr_keep_to_merge_list.items():
+            keep = curr_indices_list[curr_keep]
+            merge_list = [curr_indices_list[curr_merge_ind] for curr_merge_ind in curr_merge_list]
+            keep_to_merge_list[keep] = merge_list
+    return keep_to_merge_list
+
+
+def greedy_nmm(
+    predictions: torch.Tensor,
+    match_metric: str = "IOU",
+    match_threshold: float = 0.5,
+) -> Dict[int, List[int]]:
+    """
+    Greedy non-maximum merging for axis-aligned bounding boxes using STRTree.
+
+    Args:
+        predictions (torch.Tensor): Tensor of shape [num_boxes, 6] with format [x1, y1, x2, y2, score, class_id].
+        match_metric (str): "IOU" or "IOS".
+        match_threshold (float): The overlap threshold for match metric.
+
+    Returns:
+        (Dict[int, List[int]]): Mapping from prediction indices to keep to a list of prediction indices to be merged.
+    """
+    # Extract coordinates and scores as tensors
+    x1 = predictions[:, 0]
+    y1 = predictions[:, 1]
+    x2 = predictions[:, 2]
+    y2 = predictions[:, 3]
+    scores = predictions[:, 4]
+
+    # Calculate areas as tensor (vectorized operation)
+    areas = (x2 - x1) * (y2 - y1)
+
+    # Create Shapely boxes
+    boxes = []
+    for i in range(len(predictions)):
+        boxes.append(
+            box(
+                x1[i].item(),
+                y1[i].item(),
+                x2[i].item(),
+                y2[i].item(),
+            )
+        )
+
+    # Sort indices by score (descending) using torch
+    sorted_idxs = torch.argsort(scores, descending=True).tolist()
+
+    # Build STRtree
+    tree = STRtree(boxes)
+
+    keep_to_merge_list = {}
+    suppressed = set()
+
+    for current_idx in sorted_idxs:
+        if current_idx in suppressed:
+            continue
+
+        current_box = boxes[current_idx]
+        current_area = areas[current_idx].item()
+
+        # Query potential intersections using STRtree
+        candidate_idxs = tree.query(current_box)
+
+        merge_list = []
+        for candidate_idx in candidate_idxs:
+            if candidate_idx == current_idx or candidate_idx in suppressed:
+                continue
+
+            # Only consider candidates with lower or equal score
+            if scores[candidate_idx] > scores[current_idx]:
+                continue
+
+            # For equal scores, use deterministic tie-breaking based on box coordinates
+            if scores[candidate_idx] == scores[current_idx]:
+                current_coords = (
+                    x1[current_idx].item(),
+                    y1[current_idx].item(),
+                    x2[current_idx].item(),
+                    y2[current_idx].item(),
+                )
+                candidate_coords = (
+                    x1[candidate_idx].item(),
+                    y1[candidate_idx].item(),
+                    x2[candidate_idx].item(),
+                    y2[candidate_idx].item(),
+                )
+
+                # Compare coordinates lexicographically
+                if candidate_coords > current_coords:
+                    continue
+
+            # Calculate intersection area
+            candidate_box = boxes[candidate_idx]
+            intersection = current_box.intersection(candidate_box).area
+
+            # Calculate metric
+            if match_metric == "IOU":
+                union = current_area + areas[candidate_idx].item() - intersection
+                metric = intersection / union if union > 0 else 0
+            elif match_metric == "IOS":
+                smaller = min(current_area, areas[candidate_idx].item())
+                metric = intersection / smaller if smaller > 0 else 0
+            else:
+                raise ValueError(f"Invalid match_metric: {match_metric}")
+
+            # Add to merge list if overlap exceeds threshold
+            if metric >= match_threshold:
+                merge_list.append(candidate_idx)
+                suppressed.add(candidate_idx)
+
+        keep_to_merge_list[int(current_idx)] = [int(idx) for idx in merge_list]
+
+    return keep_to_merge_list
+
+def non_max_merging(
+    prediction,
+    conf_thres=0.25,
+    iou_thres=0.45,
+    classes=None,
+    agnostic=False,
+    multi_label=False,
+    labels=(),
+    max_det=300,
+    nc=[0],  # number of classes (optional)
+    max_time_img=0.05,
+    max_nms=30000,
+    max_wh=7680,
+    in_place=True,
+    rotated=False,
+    force_nmm_for_e2e=False,  # apply NMM to already-decoded boxes (shape [...,6])
+    merge_mode="greedy",  # "greedy" or "full"
+):
+    """
+    Perform non-maximum merging (NMM) on a set of boxes - similar to NMS but merges overlapping boxes instead of suppressing them.
+
+    Args:
+        prediction (torch.Tensor): A tensor of shape (batch_size, num_classes + 4 + num_masks/kpts, num_boxes)
+            containing the predicted boxes, classes, and masks.
+        conf_thres (float): The confidence threshold below which boxes will be filtered out.
+        iou_thres (float): The IoU threshold below which boxes will be filtered out during NMM.
+        classes (List[int]): A list of class indices to consider. If None, all classes will be considered.
+        agnostic (bool): If True, the model is agnostic to the number of classes.
+        multi_label (bool): If True, each box may have multiple labels.
+        labels (List[List[Union[int, float, torch.Tensor]]]): Apriori labels for given image.
+        max_det (int): The maximum number of boxes to keep after NMM.
+        nc (List[int], optional): The number of classes output by the model.
+        max_time_img (float): The maximum time (seconds) for processing one image.
+        max_nms (int): The maximum number of boxes into merging algorithm.
+        max_wh (int): The maximum box width and height in pixels.
+        in_place (bool): If True, the input prediction tensor will be modified in place.
+        rotated (bool): If Oriented Bounding Boxes (OBB) are being passed for NMM.
+        merge_mode (str): "greedy" for greedy NMM or "full" for full NMM.
+
+    Returns:
+        (List[torch.Tensor]): A list of length batch_size, where each element is a tensor of
+            shape (num_boxes, 6 + num_masks) containing the kept/merged boxes.
+    """
+    import torchvision  # scope for faster 'import ultralytics'
+
+    def _merge_from_map(x, keep_to_merge):
+        """Merge boxes according to keep_to_merge mapping."""
+        merged_indices = set()
+        merged_boxes = []
+
+        for keep_idx, merge_list in keep_to_merge.items():
+            if keep_idx in merged_indices:
+                continue
+
+            merged_box = x[keep_idx].clone()
+            merged_indices.add(keep_idx)
+
+            if merge_list:
+                all_boxes = [x[keep_idx]]
+                all_weights = [x[keep_idx, 4].item()]
+
+                for merge_idx in merge_list:
+                    if merge_idx not in merged_indices:
+                        all_boxes.append(x[merge_idx])
+                        all_weights.append(x[merge_idx, 4].item())
+                        merged_indices.add(merge_idx)
+
+                if len(all_boxes) > 1:
+                    stacked = torch.stack(all_boxes)
+                    weights = torch.tensor(all_weights, device=x.device, dtype=x.dtype)
+                    weights = weights / weights.sum()
+
+                    merged_box[:2] = stacked[:, :2].min(dim=0)[0]  # x1, y1
+                    merged_box[2:4] = stacked[:, 2:4].max(dim=0)[0]  # x2, y2
+                    merged_box[4] = stacked[:, 4].max()  # keep best confidence
+                    max_conf_idx = stacked[:, 4].argmax()
+                    merged_box[5] = stacked[max_conf_idx, 5]  # class from best
+
+            merged_boxes.append(merged_box)
+
+        # Add boxes that weren't merged
+        for idx in range(len(x)):
+            if idx not in merged_indices:
+                merged_boxes.append(x[idx])
+
+        return torch.stack(merged_boxes)[:max_det] if merged_boxes else x[:0]
+
+    # Checks
+    assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
+    assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
+    if isinstance(prediction, (list, tuple)):
+        prediction = prediction[0]
+    if classes is not None:
+        classes = torch.tensor(classes, device=prediction.device)
+
+    is_e2e = prediction.shape[-1] == 6 or prediction.shape[-2] == max_det
+    if is_e2e:
+        output = [pred[pred[:, 4] > conf_thres] for pred in prediction]
+        if classes is not None:
+            output = [pred[(pred[:, 5:6] == classes).any(1)] for pred in output]
+
+        if not force_nmm_for_e2e:
+            return output
+
+        merged_output = []
+        for pred in output:
+            if pred.shape[0] == 0:
+                merged_output.append(pred)
+                continue
+
+            if merge_mode == "greedy":
+                keep_to_merge = greedy_nmm(pred, match_metric="IOU", match_threshold=iou_thres) if agnostic else \
+                    batched_greedy_nmm(pred, match_metric="IOU", match_threshold=iou_thres)
+            else:
+                keep_to_merge = nmm(pred, match_metric="IOU", match_threshold=iou_thres) if agnostic else \
+                    batched_nmm(pred, match_metric="IOU", match_threshold=iou_thres)
+
+            merged_output.append(_merge_from_map(pred, keep_to_merge))
+
+        return merged_output
+
+    bs = prediction.shape[0]
+    nm = prediction.shape[1] - 4 - sum(nc)
+
+    # candidate boxes determined by first head confidence only
+    first_nc = nc[0]
+    xc = prediction[:, 4 : 4 + first_nc].amax(1) > conf_thres
+
+    # Settings
+    time_limit = 2.0 + max_time_img * bs
+
+    prediction = prediction.transpose(-1, -2)
+    if not rotated:
+        if in_place:
+            prediction[..., :4] = xywh2xyxy(prediction[..., :4])
+        else:
+            prediction = torch.cat((xywh2xyxy(prediction[..., :4]), prediction[..., 4:]), dim=-1)
+
+    t = time.time()
+    output = [torch.zeros((0, 4 + 2 * len(nc) + nm), device=prediction.device)] * bs
+    
+    for xi, x in enumerate(prediction):
+        x = x[xc[xi]]
+
+        # Cat apriori labels if autolabelling
+        if labels and len(labels[xi]) and not rotated:
+            lb = labels[xi]
+            v = torch.zeros((len(lb), nc + nm + 4), device=x.device)
+            v[:, :4] = xywh2xyxy(lb[:, 1:5])
+            v[range(len(lb)), lb[:, 0].long() + 4] = 1.0
+            x = torch.cat((x, v), 0)
+
+        if not x.shape[0]:
+            continue
+
+        # Detections matrix
+        start = 4
+        box = x[:, :4]
+        confs, clss = [], []
+        for nc_i in nc:
+            cls_slice = x[:, start : start + nc_i]
+            conf_i, j_i = cls_slice.max(1, keepdim=True)
+            confs.append(conf_i)
+            clss.append(j_i.float())
+            start += nc_i
+        mask = x[:, start:]
+
+        conf_mask = confs[0].view(-1) > conf_thres
+        box = box[conf_mask]
+        mask = mask[conf_mask]
+        confs = [c[conf_mask] for c in confs]
+        clss = [j_[conf_mask] for j_ in clss]
+
+        x = torch.cat([box] + sum([[c, j] for c, j in zip(confs, clss)], []) + [mask], 1)
+        conf, j = confs[0].view(-1), clss[0].view(-1)
+
+        # Filter by class
+        if classes is not None:
+            x = x[(j.view(-1, 1) == classes).any(1)]
+            conf = x[:, 4]
+            j = x[:, 5]
+
+        n = x.shape[0]
+        if not n:
+            continue
+        if n > max_nms:
+            x = x[x[:, 4].argsort(descending=True)[:max_nms]]
+            conf = x[:, 4]
+            j = x[:, 5]
+
+        # Prepare boxes for NMM (format: [x1, y1, x2, y2, score, class_id])
+        if agnostic:
+            c = torch.zeros_like(j.view(-1, 1))
+        else:
+            if len(nc) > 1:
+                unique_id = j.view(-1, 1)
+                multiplier = nc[0]
+                for head_idx in range(1, len(nc)):
+                    attr_class = clss[head_idx].view(-1, 1)
+                    unique_id = unique_id + attr_class * multiplier
+                    multiplier *= nc[head_idx]
+                c = unique_id * max_wh
+            else:
+                c = j.view(-1, 1) * max_wh
+
+        boxes_for_nmm = x[:, :4].clone()
+        if not agnostic:
+            boxes_for_nmm = boxes_for_nmm + c  # offset by class for class-specific merging
+        
+        # Create tensor for NMM: [x1, y1, x2, y2, score, class_id]
+        nmm_input = torch.cat([boxes_for_nmm, conf.view(-1, 1), j.view(-1, 1)], dim=1)
+
+        # Apply NMM
+        if merge_mode == "greedy":
+            if agnostic:
+                keep_to_merge = greedy_nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
+            else:
+                keep_to_merge = batched_greedy_nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
+        else:  # full NMM
+            if agnostic:
+                keep_to_merge = nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
+            else:
+                keep_to_merge = batched_nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
+
+        merged = _merge_from_map(x, keep_to_merge)
+        if merged.numel():
+            output[xi] = merged
+        
+        if (time.time() - t) > time_limit:
+            LOGGER.warning(f"WARNING ⚠️ NMM time limit {time_limit:.3f}s exceeded")
+            break
+
+    return output
 
 
 def scale_image(masks, im0_shape, ratio_pad=None):
