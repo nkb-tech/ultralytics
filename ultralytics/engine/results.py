@@ -680,9 +680,24 @@ class Results(SimpleClass):
         if probs is not None:
             log_string += f"{', '.join(f'{self.names[j]} {probs.data[j]:.2f}' for j in probs.top5)}, "
         if boxes:
-            for c in boxes.cls.unique():
-                n = (boxes.cls == c).sum()  # detections per class
-                log_string += f"{n} {self.names[0][int(c)]}{'s' * (n > 1)}, "
+            # Handle multitask: iterate over all classification heads
+            if boxes.is_multitask:
+                cls_all = boxes.cls_all
+                for task_idx, cls_tensor in enumerate(cls_all):
+                    # Get the names dictionary for this task
+                    task_names = self.names[task_idx] if isinstance(self.names, list) else self.names
+                    
+                    for c in cls_tensor.unique():
+                        n = (cls_tensor == c).sum()  # detections per class for this task
+                        class_name = task_names[int(c)] if isinstance(task_names, dict) else task_names[int(c)]
+                        log_string += f"{n} {class_name}{'s' * (n > 1)}, "
+            else:
+                # Single task: original behavior
+                for c in boxes.cls.unique():
+                    n = (boxes.cls == c).sum()  # detections per class
+                    task_names = self.names[0] if isinstance(self.names, list) else self.names
+                    class_name = task_names[int(c)] if isinstance(task_names, dict) else task_names[int(c)]
+                    log_string += f"{n} {class_name}{'s' * (n > 1)}, "
         return log_string
 
     def save_txt(self, txt_file, save_conf=False):
@@ -769,10 +784,13 @@ class Results(SimpleClass):
             LOGGER.warning("WARNING ⚠️ OBB task do not support `save_crop`.")
             return
         for d in self.boxes:
+            # Get class name from the first task for single-task or multitask
+            task_names = self.names[0] if isinstance(self.names, list) else self.names
+            class_name = task_names[int(d.cls)] if isinstance(task_names, dict) else task_names[int(d.cls)]
             save_one_box(
                 d.xyxy,
                 self.orig_img.copy(),
-                file=Path(save_dir) / self.names[int(d.cls)] / f"{Path(file_name)}.jpg",
+                file=Path(save_dir) / class_name / f"{Path(file_name)}.jpg",
                 BGR=True,
             )
 
@@ -1007,6 +1025,7 @@ class Boxes(BaseTensor):
             boxes (torch.Tensor | np.ndarray): A tensor or numpy array with detection boxes of shape
                 (num_boxes, 6) or (num_boxes, 7). Columns should contain
                 [x1, y1, x2, y2, confidence, class, (optional) track_id].
+                For multitask: [x1, y1, x2, y2, conf0, cls0, conf1, cls1, ...].
             orig_shape (Tuple[int, int]): The original image shape as (height, width). Used for normalization.
             is_track (bool): Indicates whether tracking IDs are included in the box data. Defaults to False.
 
@@ -1030,6 +1049,11 @@ class Boxes(BaseTensor):
         super().__init__(boxes, orig_shape)
         self.is_track = is_track
         self.orig_shape = orig_shape
+        
+        # Detect multitask format: more than 6 columns means multiple conf/cls pairs
+        # Format: [x1, y1, x2, y2, conf0, cls0, conf1, cls1, ...]
+        self._num_tasks = max(1, (n - 4) // 2)
+        self.is_multitask = self._num_tasks > 1
 
     @property
     def xyxy(self):
@@ -1081,6 +1105,64 @@ class Boxes(BaseTensor):
             >>> print(class_ids)  # tensor([0., 2., 1.])
         """
         return self.data[:, 5]
+    
+    @property
+    def cls_all(self):
+        """
+        Returns all class IDs for multitask detection (one per task/head).
+
+        For multitask models, returns a list of class ID tensors, one per classification head.
+        For single-task models, returns a list with one element (same as cls property).
+
+        Returns:
+            (list): List of tensors/arrays, where each contains class IDs for that task.
+                Each tensor has shape (N,), where N is the number of boxes.
+
+        Examples:
+            >>> results = model("image.jpg")  # multitask model
+            >>> boxes = results[0].boxes
+            >>> all_classes = boxes.cls_all  # [[cls_task0], [cls_task1], ...]
+            >>> print(all_classes[0])  # Classes from first task
+            >>> print(all_classes[1])  # Classes from second task
+        """
+        if not self.is_multitask:
+            return [self.data[:, 5]]
+        
+        # Extract class columns: positions 5, 7, 9, ... (every other column after position 4)
+        cls_list = []
+        for task_idx in range(self._num_tasks):
+            col_idx = 5 + task_idx * 2  # cls0 at 5, cls1 at 7, cls2 at 9, etc.
+            cls_list.append(self.data[:, col_idx])
+        return cls_list
+    
+    @property
+    def conf_all(self):
+        """
+        Returns all confidence scores for multitask detection (one per task/head).
+
+        For multitask models, returns a list of confidence score tensors, one per classification head.
+        For single-task models, returns a list with one element (same as conf property).
+
+        Returns:
+            (list): List of tensors/arrays, where each contains confidence scores for that task.
+                Each tensor has shape (N,), where N is the number of boxes.
+
+        Examples:
+            >>> results = model("image.jpg")  # multitask model
+            >>> boxes = results[0].boxes
+            >>> all_confs = boxes.conf_all  # [[conf_task0], [conf_task1], ...]
+            >>> print(all_confs[0])  # Confidences from first task
+            >>> print(all_confs[1])  # Confidences from second task
+        """
+        if not self.is_multitask:
+            return [self.data[:, 4]]
+        
+        # Extract confidence columns: positions 4, 6, 8, ... (every other column starting from 4)
+        conf_list = []
+        for task_idx in range(self._num_tasks):
+            col_idx = 4 + task_idx * 2  # conf0 at 4, conf1 at 6, conf2 at 8, etc.
+            conf_list.append(self.data[:, col_idx])
+        return conf_list
     
     @property
     def id(self):

@@ -228,6 +228,39 @@ def non_max_suppression(
         prediction = prediction[0]  # select only inference output
     if classes is not None:
         classes = torch.tensor(classes, device=prediction.device)
+        
+    if force_nms_for_e2e:
+        import torchvision
+
+        boxes = prediction[:, :4]
+        scores = prediction[:, 4]
+        
+        # Extract classes from all heads
+        # Format: [x1, y1, x2, y2, conf0, cls0, conf1, cls1, conf2, cls2, ...]
+        # For head i: cls is at index 4 + 2*i + 1 = 5 + 2*i
+        clss = []
+        for head_idx in range(len(nc)):
+            cls_idx = 5 + 2 * head_idx
+            clss.append(prediction[:, cls_idx])
+
+        if agnostic:
+            c = torch.zeros_like(clss[0].view(-1, 1))  # No offset for agnostic NMS
+        else:
+            if len(nc) > 1:  # Мультитаск
+                unique_id = clss[0].view(-1, 1)
+                multiplier = nc[0]
+                for head_idx in range(1, len(nc)):
+                    attr_class = clss[head_idx].view(-1, 1)
+                    unique_id = unique_id + attr_class * multiplier
+                    multiplier *= nc[head_idx]
+                c = unique_id * max_wh
+            else:  # Одна голова - оригинальная реализация
+                c = clss[0].view(-1, 1) * max_wh
+
+        boxes_offset = boxes + c 
+        keep = torchvision.ops.nms(boxes_offset, scores, iou_thres)
+
+        return prediction[keep]  
 
     if prediction.shape[-1] == 6 or prediction.shape[-2] == max_det:  # end-to-end model (BNC, i.e. 1,300,6)
         output = [pred[pred[:, 4] > conf_thres] for pred in prediction]
@@ -237,43 +270,7 @@ def non_max_suppression(
         # output = [
         #     pred[torchvision.ops.nms(pred[:, :4], pred[:, 4], iou_thres)]
         #     for pred in output
-        # ]
-        if force_nms_for_e2e:
-            import torchvision
-            if agnostic:
-                # Class-agnostic NMS
-                output = [
-                    pred[torchvision.ops.nms(pred[:, :4], pred[:, 4], iou_thres)]
-                    for pred in output
-                ]
-            else:
-                # Per-class NMS
-                final_output = []
-                for pred in output:
-                    if pred.shape[0] == 0:
-                        final_output.append(pred)
-                        continue
-                    
-                    keep_indices = []
-                    unique_classes = pred[:, 5].unique()
-                    
-                    for cls in unique_classes:
-                        cls_mask = pred[:, 5] == cls
-                        cls_boxes = pred[cls_mask, :4]
-                        cls_scores = pred[cls_mask, 4]
-                        cls_indices = torch.where(cls_mask)[0]
-                        
-                        cls_keep = torchvision.ops.nms(cls_boxes, cls_scores, iou_thres)
-                        keep_indices.append(cls_indices[cls_keep])
-                    
-                    if len(keep_indices) > 0:
-                        keep_indices = torch.cat(keep_indices)
-                        final_output.append(pred[keep_indices])
-                    else:
-                        final_output.append(pred[:0])  # Empty tensor with correct shape
-                
-                output = final_output
-        
+        # ]  
         return output
 
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
@@ -687,6 +684,48 @@ def greedy_nmm(
 
     return keep_to_merge_list
 
+def _merge_from_map(x, keep_to_merge, max_det=300):
+    """Merge boxes according to keep_to_merge mapping."""
+    merged_indices = set()
+    merged_boxes = []
+
+    for keep_idx, merge_list in keep_to_merge.items():
+        if keep_idx in merged_indices:
+            continue
+
+        merged_box = x[keep_idx].clone()
+        merged_indices.add(keep_idx)
+
+        if merge_list:
+            all_boxes = [x[keep_idx]]
+            all_weights = [x[keep_idx, 4].item()]
+
+            for merge_idx in merge_list:
+                if merge_idx not in merged_indices:
+                    all_boxes.append(x[merge_idx])
+                    all_weights.append(x[merge_idx, 4].item())
+                    merged_indices.add(merge_idx)
+
+            if len(all_boxes) > 1:
+                stacked = torch.stack(all_boxes)
+                weights = torch.tensor(all_weights, device=x.device, dtype=x.dtype)
+                weights = weights / weights.sum()
+
+                merged_box[:2] = stacked[:, :2].min(dim=0)[0]  # x1, y1
+                merged_box[2:4] = stacked[:, 2:4].max(dim=0)[0]  # x2, y2
+                merged_box[4] = stacked[:, 4].max()  # keep best confidence
+                max_conf_idx = stacked[:, 4].argmax()
+                merged_box[5] = stacked[max_conf_idx, 5]  # class from best
+
+        merged_boxes.append(merged_box)
+
+    # Add boxes that weren't merged
+    for idx in range(len(x)):
+        if idx not in merged_indices:
+            merged_boxes.append(x[idx])
+
+    return torch.stack(merged_boxes)[:max_det] if merged_boxes else x[:0]
+
 def non_max_merging(
     prediction,
     conf_thres=0.25,
@@ -732,47 +771,6 @@ def non_max_merging(
     """
     import torchvision  # scope for faster 'import ultralytics'
 
-    def _merge_from_map(x, keep_to_merge):
-        """Merge boxes according to keep_to_merge mapping."""
-        merged_indices = set()
-        merged_boxes = []
-
-        for keep_idx, merge_list in keep_to_merge.items():
-            if keep_idx in merged_indices:
-                continue
-
-            merged_box = x[keep_idx].clone()
-            merged_indices.add(keep_idx)
-
-            if merge_list:
-                all_boxes = [x[keep_idx]]
-                all_weights = [x[keep_idx, 4].item()]
-
-                for merge_idx in merge_list:
-                    if merge_idx not in merged_indices:
-                        all_boxes.append(x[merge_idx])
-                        all_weights.append(x[merge_idx, 4].item())
-                        merged_indices.add(merge_idx)
-
-                if len(all_boxes) > 1:
-                    stacked = torch.stack(all_boxes)
-                    weights = torch.tensor(all_weights, device=x.device, dtype=x.dtype)
-                    weights = weights / weights.sum()
-
-                    merged_box[:2] = stacked[:, :2].min(dim=0)[0]  # x1, y1
-                    merged_box[2:4] = stacked[:, 2:4].max(dim=0)[0]  # x2, y2
-                    merged_box[4] = stacked[:, 4].max()  # keep best confidence
-                    max_conf_idx = stacked[:, 4].argmax()
-                    merged_box[5] = stacked[max_conf_idx, 5]  # class from best
-
-            merged_boxes.append(merged_box)
-
-        # Add boxes that weren't merged
-        for idx in range(len(x)):
-            if idx not in merged_indices:
-                merged_boxes.append(x[idx])
-
-        return torch.stack(merged_boxes)[:max_det] if merged_boxes else x[:0]
 
     # Checks
     assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
@@ -782,31 +780,61 @@ def non_max_merging(
     if classes is not None:
         classes = torch.tensor(classes, device=prediction.device)
 
-    is_e2e = prediction.shape[-1] == 6 or prediction.shape[-2] == max_det
-    if is_e2e:
+    if force_nmm_for_e2e:
+        import torchvision
+
+        boxes = prediction[:, :4]
+        scores = prediction[:, 4]
+        
+        # Extract classes from all heads
+        # Format: [x1, y1, x2, y2, conf0, cls0, conf1, cls1, conf2, cls2, ...]
+        # For head i: cls is at index 4 + 2*i + 1 = 5 + 2*i
+        clss = []
+        for head_idx in range(len(nc)):
+            cls_idx = 5 + 2 * head_idx
+            clss.append(prediction[:, cls_idx])
+
+        if agnostic:
+            c = torch.zeros_like(clss[0].view(-1, 1))  # No offset for agnostic NMS
+        else:
+            if len(nc) > 1:  # Мультитаск
+                unique_id = clss[0].view(-1, 1)
+                multiplier = nc[0]
+                for head_idx in range(1, len(nc)):
+                    attr_class = clss[head_idx].view(-1, 1)
+                    unique_id = unique_id + attr_class * multiplier
+                    multiplier *= nc[head_idx]
+                c = unique_id * max_wh
+            else:  # Одна голова - оригинальная реализация
+                c = clss[0].view(-1, 1) * max_wh
+
+        boxes_offset = boxes + c 
+
+        # Create tensor for NMM: [x1, y1, x2, y2, score, class_id]
+        # Use class from first head for NMM input
+        nmm_input = torch.cat([boxes_offset, scores.view(-1, 1), clss[0].view(-1, 1)], dim=1)
+
+        # Apply NMM - with offset, we can use single call for all boxes (like NMS)
+        # Offset ensures boxes of different classes won't merge
+        if merge_mode == "greedy":
+            keep_to_merge = greedy_nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
+        else:  # full NMM
+            keep_to_merge = nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
+
+        merged = _merge_from_map(prediction, keep_to_merge)
+
+        return merged
+    
+    if prediction.shape[-1] == 6 or prediction.shape[-2] == max_det:  # end-to-end model (BNC, i.e. 1,300,6)
         output = [pred[pred[:, 4] > conf_thres] for pred in prediction]
         if classes is not None:
             output = [pred[(pred[:, 5:6] == classes).any(1)] for pred in output]
-
-        if not force_nmm_for_e2e:
-            return output
-
-        merged_output = []
-        for pred in output:
-            if pred.shape[0] == 0:
-                merged_output.append(pred)
-                continue
-
-            if merge_mode == "greedy":
-                keep_to_merge = greedy_nmm(pred, match_metric="IOU", match_threshold=iou_thres) if agnostic else \
-                    batched_greedy_nmm(pred, match_metric="IOU", match_threshold=iou_thres)
-            else:
-                keep_to_merge = nmm(pred, match_metric="IOU", match_threshold=iou_thres) if agnostic else \
-                    batched_nmm(pred, match_metric="IOU", match_threshold=iou_thres)
-
-            merged_output.append(_merge_from_map(pred, keep_to_merge))
-
-        return merged_output
+            # nms for yolov10
+            # output = [
+            #     pred[torchvision.ops.nms(pred[:, :4], pred[:, 4], iou_thres)]
+            #     for pred in output
+            # ]  
+        return output
 
     bs = prediction.shape[0]
     nm = prediction.shape[1] - 4 - sum(nc)
@@ -878,10 +906,12 @@ def non_max_merging(
             j = x[:, 5]
 
         # Prepare boxes for NMM (format: [x1, y1, x2, y2, score, class_id])
+        # Use offset approach (same as NMS): offset separates boxes by class in space,
+        # allowing single NMM call for all boxes instead of per-class batching
         if agnostic:
             c = torch.zeros_like(j.view(-1, 1))
         else:
-            if len(nc) > 1:
+            if len(nc) > 1:  # Multi-task
                 unique_id = j.view(-1, 1)
                 multiplier = nc[0]
                 for head_idx in range(1, len(nc)):
@@ -889,27 +919,22 @@ def non_max_merging(
                     unique_id = unique_id + attr_class * multiplier
                     multiplier *= nc[head_idx]
                 c = unique_id * max_wh
-            else:
+            else:  # Single head
                 c = j.view(-1, 1) * max_wh
 
         boxes_for_nmm = x[:, :4].clone()
         if not agnostic:
-            boxes_for_nmm = boxes_for_nmm + c  # offset by class for class-specific merging
+            boxes_for_nmm = boxes_for_nmm + c  # offset separates boxes by class in space
         
         # Create tensor for NMM: [x1, y1, x2, y2, score, class_id]
         nmm_input = torch.cat([boxes_for_nmm, conf.view(-1, 1), j.view(-1, 1)], dim=1)
 
-        # Apply NMM
+        # Apply NMM - with offset, we can use single call for all boxes (like NMS)
+        # Offset ensures boxes of different classes won't merge
         if merge_mode == "greedy":
-            if agnostic:
-                keep_to_merge = greedy_nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
-            else:
-                keep_to_merge = batched_greedy_nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
+            keep_to_merge = greedy_nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
         else:  # full NMM
-            if agnostic:
-                keep_to_merge = nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
-            else:
-                keep_to_merge = batched_nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
+            keep_to_merge = nmm(nmm_input, match_metric="IOU", match_threshold=iou_thres)
 
         merged = _merge_from_map(x, keep_to_merge)
         if merged.numel():

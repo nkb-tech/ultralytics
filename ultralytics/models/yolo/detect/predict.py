@@ -237,7 +237,7 @@ class DetectionPredictor(BasePredictor):
             preds,
             self.args.conf,
             self.args.iou,
-            agnostic=agnostic,
+            agnostic=False,
             max_det=self.args.max_det,
             classes=self.args.classes,
             nc=head.nc,
@@ -258,9 +258,7 @@ class DetectionPredictor(BasePredictor):
 
             if combined.shape[0] == 0:
                 return combined
-
-            _, agnostic = self._get_detection_head_meta()
-            return self._deduplicate_final_boxes(combined, agnostic)
+            return self._deduplicate_final_boxes(combined)
 
     def _run_full_image_prediction(self, im0, *args, **kwargs):
         """Run a standard forward pass on the full-resolution image."""
@@ -296,22 +294,47 @@ class DetectionPredictor(BasePredictor):
         # Both have predictions - concatenate
         return torch.cat([tile_preds, full_image_preds], dim=0)
 
-    def _deduplicate_final_boxes(self, preds, agnostic):
+    def _deduplicate_final_boxes(self, preds,):
         """Apply the requested duplicate-removal routine on fused SAHI predictions."""
         if self.postprocess_type == "nms":
-            return self._apply_final_nms(preds, agnostic)
+            return self._apply_final_nms(preds)
         
         greedy = self.postprocess_type == "greedy_nmm"
-        return self._apply_final_merge(preds, agnostic, greedy)
+        return self._apply_final_merge(preds, greedy)
 
     def _apply_final_nms(self, preds, agnostic):
         """Final NMS step operating directly on [xyxy, conf, cls] tensors."""
         if preds.shape[0] == 0:
             return preds
-        head, _ = self._get_detection_head_meta()
-        detection_preds = preds.unsqueeze(0)
+        head, agnostic = self._get_detection_head_meta()
+
+        # If SAHI already produced decoded boxes (xyxy, conf, cls, [attrs...]),
+        # run a lightweight NMS directly on them instead of passing through
+        # the raw-head NMS which expects class-prob columns.
+        # if preds.ndim == 2 and preds.shape[1] >= 6 and preds.shape[1] < 4 + sum(head.nc):
+        #     import torchvision
+
+        #     boxes = preds[:, :4]
+        #     scores = preds[:, 4]
+        #     cls = preds[:, 5]
+
+        #     if agnostic:
+        #         keep = torchvision.ops.nms(boxes, scores, self.args.iou)
+        #     else:
+        #         keep_indices = []
+        #         for c in cls.unique():
+        #             mask = cls == c
+        #             if mask.sum() == 0:
+        #                 continue
+        #             cls_keep = torchvision.ops.nms(boxes[mask], scores[mask], self.args.iou)
+        #             keep_indices.append(torch.where(mask)[0][cls_keep])
+        #         keep = torch.cat(keep_indices) if keep_indices else torch.zeros(0, dtype=torch.long, device=preds.device)
+
+        #     return preds[keep]
+
+        # detection_preds = preds.unsqueeze(0)
         merged = ops.non_max_suppression(
-            detection_preds,
+            preds,
             self.args.conf,
             self.args.iou,
             agnostic=agnostic,
@@ -319,20 +342,19 @@ class DetectionPredictor(BasePredictor):
             classes=self.args.classes,
             nc=head.nc,
             force_nms_for_e2e=True,  # Force NMS for SAHI final deduplication
-        )[0]
+        )
         return merged
 
-    def _apply_final_merge(self, preds, agnostic, greedy):
+    def _apply_final_merge(self, preds, greedy):
         """Use merge-style suppression on already decoded detections."""
         if preds.shape[0] == 0:
             return preds
         
         # Use specialized merge function for already-decoded detections
         merge_mode = "greedy" if greedy else "full"
-        head, _ = self._get_detection_head_meta()
-        detection_preds = preds.unsqueeze(0)
+        head, agnostic = self._get_detection_head_meta()
         merged = ops.non_max_merging(
-            detection_preds,
+            preds,
             self.args.conf,
             self.args.iou,
             agnostic=agnostic,
@@ -341,7 +363,7 @@ class DetectionPredictor(BasePredictor):
             nc=head.nc,
             merge_mode=merge_mode,
             force_nmm_for_e2e=True,  # Force NMM for SAHI final deduplication
-        )[0]
+        )
         return merged
 
     def _create_sahi_results(self, aggregated_preds_list, im0s, paths):
@@ -398,22 +420,30 @@ class DetectionPredictor(BasePredictor):
             
     # For standar inference without Sahi
     def postprocess(self, preds, img, orig_imgs):
-        """Post-processes predictions and returns a list of Results objects."""
-        if not self.nms:
-            m = self.model.model.model[-1]  # detect head
-            is_multitask = isinstance(m.nc, (list, tuple)) and len(m.nc) > 1
-            agnostic = self.args.agnostic_nms or is_multitask
-            preds = self._apply_detection_postprocess(preds, agnostic, m.nc)
-        elif self.engine:
-            preds = ops.process_nms_trt_results(preds, self.output_names)
-        elif self.onnx:
-            preds = ops.process_nms_onnx_results(preds)
+            """Post-processes predictions and returns a list of Results objects."""
+            if not self.nms:
+                m = self.model.model.model[-1]  # detect head
+                is_multitask = isinstance(m.nc, (list, tuple)) and len(m.nc) > 1
+                agnostic = self.args.agnostic_nms or is_multitask
+                preds = ops.non_max_suppression(
+                    preds,
+                    self.args.conf,
+                    self.args.iou,
+                    agnostic=agnostic,
+                    max_det=self.args.max_det,
+                    classes=self.args.classes,
+                    nc=m.nc,
+                )
+            elif self.engine:
+                preds = ops.process_nms_trt_results(preds, self.output_names)
+            elif self.onnx:
+                preds = ops.process_nms_onnx_results(preds)
 
-        if not isinstance(orig_imgs, list):
-            orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)
+            if not isinstance(orig_imgs, list):  # input images are a torch.Tensor, not a list
+                orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)
 
-        results = []
-        for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0]):
-            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
-            results.append(Results(orig_img, path=img_path, names=self._results_names(), boxes=pred))
-        return results
+            results = []
+            for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0]):
+                pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
+                results.append(Results(orig_img, path=img_path, names=self.model.names, boxes=pred))
+            return results
