@@ -390,35 +390,6 @@ def non_max_suppression(
 
     return output
 
-def batched_nmm(
-    predictions: torch.Tensor,
-    match_metric: str = "IOU",
-    match_threshold: float = 0.5,
-) -> Dict[int, List[int]]:
-    """
-    Apply non-maximum merging per category to avoid detecting too many overlapping bounding boxes.
-
-    Args:
-        predictions (torch.Tensor): Tensor of shape [num_boxes, 6] with format [x1, y1, x2, y2, score, class_id].
-        match_metric (str): "IOU" or "IOS".
-        match_threshold (float): The overlap threshold for match metric.
-
-    Returns:
-        (Dict[int, List[int]]): Mapping from prediction indices to keep to a list of prediction indices to be merged.
-    """
-    category_ids = predictions[:, 5].squeeze()
-    keep_to_merge_list = {}
-    for category_id in torch.unique(category_ids):
-        curr_indices = torch.where(category_ids == category_id)[0]
-        curr_keep_to_merge_list = nmm(predictions[curr_indices], match_metric, match_threshold)
-        curr_indices_list = curr_indices.tolist()
-        for curr_keep, curr_merge_list in curr_keep_to_merge_list.items():
-            keep = curr_indices_list[curr_keep]
-            merge_list = [curr_indices_list[curr_merge_ind] for curr_merge_ind in curr_merge_list]
-            keep_to_merge_list[keep] = merge_list
-    return keep_to_merge_list
-
-
 def nmm(
     predictions: torch.Tensor,
     match_metric: str = "IOU",
@@ -545,36 +516,6 @@ def nmm(
                     merge_to_keep[matched_box_idx_native] = keep_idx
 
     return keep_to_merge_list
-
-
-def batched_greedy_nmm(
-    predictions: torch.Tensor,
-    match_metric: str = "IOU",
-    match_threshold: float = 0.5,
-) -> Dict[int, List[int]]:
-    """
-    Apply greedy non-maximum merging per category.
-
-    Args:
-        predictions (torch.Tensor): Tensor of shape [num_boxes, 6] with format [x1, y1, x2, y2, score, class_id].
-        match_metric (str): "IOU" or "IOS".
-        match_threshold (float): The overlap threshold for match metric.
-
-    Returns:
-        (Dict[int, List[int]]): Mapping from prediction indices to keep to a list of prediction indices to be merged.
-    """
-    category_ids = predictions[:, 5].squeeze()
-    keep_to_merge_list = {}
-    for category_id in torch.unique(category_ids):
-        curr_indices = torch.where(category_ids == category_id)[0]
-        curr_keep_to_merge_list = greedy_nmm(predictions[curr_indices], match_metric, match_threshold)
-        curr_indices_list = curr_indices.tolist()
-        for curr_keep, curr_merge_list in curr_keep_to_merge_list.items():
-            keep = curr_indices_list[curr_keep]
-            merge_list = [curr_indices_list[curr_merge_ind] for curr_merge_ind in curr_merge_list]
-            keep_to_merge_list[keep] = merge_list
-    return keep_to_merge_list
-
 
 def greedy_nmm(
     predictions: torch.Tensor,
