@@ -86,6 +86,8 @@ class YOLODataset(BaseDataset):
         desc = f"{desc_prefix}..."
         total = len(self.im_files)
         nkpt, ndim = self.data.get("kpt_shape", (0, 0))
+        # Determine number of class columns for empty labels
+        num_cls_cols = 1 if self.single_cls else (len(self.nc) if isinstance(self.nc, (list, tuple)) else 1)
         if self.use_keypoints and (nkpt <= 0 or ndim not in {2, 3}):
             raise ValueError(
                 "'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
@@ -118,8 +120,7 @@ class YOLODataset(BaseDataset):
                         current_scan_dir = scan_dir
                 desc_prefix = f"{self.prefix}Scanning {current_scan_dir}"
                 if im_file and len(lb):
-                    # Filter out small boxes
-                    ab += len(lb)  # count total boxes before filtering
+                    ab += len(lb)
                     boxes_pix = lb[:, -4:].copy()
                     boxes_pix[:, [2, 3]] *= shape[1], shape[0]
                     
@@ -137,6 +138,19 @@ class YOLODataset(BaseDataset):
                             "bboxes": lb[:, -4:],  # n, 4
                             "segments": segments,
                             "keypoints": keypoint,
+                            "normalized": True,
+                            "bbox_format": "xywh",
+                        }
+                    )
+                elif im_file and shape is not None:
+                    x["labels"].append(
+                        {
+                            "im_file": im_file,
+                            "shape": shape,
+                            "cls": np.zeros((0, num_cls_cols), dtype=np.float32),
+                            "bboxes": np.zeros((0, 4), dtype=np.float32),
+                            "segments": [],
+                            "keypoints": None,
                             "normalized": True,
                             "bbox_format": "xywh",
                         }

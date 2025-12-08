@@ -2355,49 +2355,49 @@ class Albumentations:
                         A.PixelDropout(
                             dropout_prob=self.hyp.pixel_dropout_prob,
                             drop_value=self.hyp.pixel_drop_value,
-                            p=self.hyp.p_pixeldrop,
+                            p=0,
                         ),
                         A.OneOf(
                             [
                                 A.RandomRain(p=self.hyp.p_rain),
                                 A.RandomSnow(p=self.hyp.p_snow, brightness_coeff=2, snow_point_range=(0, 0.15)),
                             ],
-                            p=0.1,
+                            p=0,
                         ),
                         A.RandomBrightnessContrast(
                             brightness_limit=self.hyp.bright_limit,
                             contrast_limit=self.hyp.contrast_limit,
-                            p=self.hyp.p_bricon,
+                            p=0,
                         ),
-                        A.Sharpen(p=self.hyp.p_sharpen),
-                        A.ToGray(p=self.hyp.p_gray),
+                        A.Sharpen(p=0),
+                        A.ToGray(p=0),
                         A.RGBShift(
                                 r_shift_limit=[-10, 10],
                                 g_shift_limit=[-10, 10],
                                 b_shift_limit=[-10, 10],
-                                p=0.15,
+                                p=0,
                             ),
                         A.Emboss(
                             alpha=(0.2, 0.5), 
                             strength=(0.2, 0.6),
-                            p=0.2,
+                            p=0,
                         ),    
                         A.FancyPCA(
                             alpha=2, 
-                            p=0.1,
+                            p=0,
                         ),    
                         A.ShotNoise(
                             scale_range=(0.01, 0.06),
-                            p=0.15 ,
+                            p=0 ,
                         ),
                         A.UnsharpMask(
                             blur_limit=(3, 5),
                             sigma_limit=(0.5, 1.0),
-                            p=0.1,
+                            p=0,
                         )
                     ]
 
-                    weather_p = getattr(self.hyp, "p_imgaug_weather", 0)
+                    weather_p = 0
                     if IMGAUG_AVAILABLE and weather_p > 0:
                         try:
                             T.append(ImgAugWeatherTransform(self.hyp,  p=weather_p))

@@ -540,6 +540,16 @@ class BaseTrainer:
 
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
+             # SAHI: Regenerate random crops for next epoch
+            if hasattr(self.train_loader, 'dataset'):
+                dataset = self.train_loader.dataset
+                if hasattr(dataset, 'on_epoch_end'):
+                    dataset.on_epoch_end()
+                    
+            # SAHI: Update distributed sampler epoch
+            if hasattr(self.train_loader, 'batch_sampler') and hasattr(self.train_loader.batch_sampler, 'set_epoch'):
+                self.train_loader.batch_sampler.set_epoch(epoch + 1)
+                
             if RANK in {-1, 0}:
                 final_epoch = epoch + 1 >= self.epochs
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])

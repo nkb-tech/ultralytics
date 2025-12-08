@@ -412,8 +412,6 @@ class DetectionValidator(BaseValidator):
             'ratio_pad': [ratio_pad],
         }
         
-        # Increment seen counter for this image
-        self.seen += 1
         
         # Update metrics with aggregated results
         self._update_metrics_standard([aggregated_preds], synthetic_batch)

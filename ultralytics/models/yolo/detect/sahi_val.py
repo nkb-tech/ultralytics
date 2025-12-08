@@ -1,134 +1,212 @@
-import numpy as np
 import torch
-from pathlib import Path
 from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
+
 from ultralytics.utils import LOGGER, ops
 
 
+def _to_tuple(val) -> tuple:
+    """Recursively convert lists/arrays to tuples."""
+    if isinstance(val, (list, tuple)):
+        return tuple(_to_tuple(v) for v in val)
+    if hasattr(val, 'tolist'):  # numpy array
+        return tuple(_to_tuple(v) for v in val.tolist()) if val.ndim > 0 else val.item()
+    return val
+
+
+def _fix_ratio_pad(ratio_pad: tuple) -> Optional[tuple]:
+    """
+    Fix ratio_pad format from collate_fn artifacts.
+    
+    Sometimes ratio_pad gets extra nesting: (((scale, scale), (pad_w, pad_h)), (0, 0))
+    This function extracts the correct format: ((scale, scale), (pad_w, pad_h))
+    """
+    if ratio_pad is None:
+        return None
+    
+    # Check for extra nesting: (((a, b), (c, d)), ...)
+    if (isinstance(ratio_pad, tuple) and 
+        len(ratio_pad) >= 1 and 
+        isinstance(ratio_pad[0], tuple) and
+        len(ratio_pad[0]) == 2 and
+        isinstance(ratio_pad[0][0], tuple)):
+        return ratio_pad[0]
+    
+    return ratio_pad
+
+
 class SAHICropAggregator:
-    """Aggregates predictions from crops back to full images for SAHI validation."""
+    """
+    Aggregates predictions from SAHI crops back to full image coordinates.
+    
+    For each image:
+    1. Collects predictions from all crops (grid + full image)
+    2. Transforms crop coordinates to original image coordinates
+    3. Concatenates all predictions for final NMS
+    
+    Args:
+        validator: Reference to DetectionValidator for device and nc info
+    """
     
     def __init__(self, validator):
-        """
-        Initialize SAHI crop aggregator.
-        
-        Args:
-            validator: Reference to the DetectionValidator instance
-        """
         self.validator = validator
         self.reset()
         
     def reset(self):
         """Reset aggregator for new validation run."""
         self.image_crops = defaultdict(lambda: {
-            'predictions': [],  # List of predictions from all crops (before NMS)
-            'crop_coords': [],  # Coordinates of each crop
-            'processed_crops': set(),  # Track which crops we've seen
-            'original_shape': None,
-            'original_img_idx': None,  # Original image index in dataset
+            'predictions': [],       # List of prediction tensors
+            'crop_coords': [],       # Corresponding crop coordinates
+            'processed_crops': set(), # Set of processed slice indices
+            'original_shape': None,   # (h, w) of original image
+            'original_img_idx': None, # Index in dataset
         })
-        # Track total expected crops per image (calculated from dataset info)
         self.expected_crops_per_image = {}
         
     def calculate_expected_crops(self, dataset):
-        """Calculate expected number of crops for each image based on dataset."""
+        """Pre-calculate expected crop count per image from dataset."""
         if not hasattr(dataset, 'slice_indices'):
             return
             
-        # Group slice_indices by original image index
-        for slice_info in dataset.slice_indices:
-            if len(slice_info) >= 3:  # (img_idx, slice_idx, coords)
-                img_idx = slice_info[0]
-                if img_idx not in self.expected_crops_per_image:
-                    self.expected_crops_per_image[img_idx] = 0
-                self.expected_crops_per_image[img_idx] += 1
+        self.expected_crops_per_image.clear()
+        for img_idx, _, _ in dataset.slice_indices:
+            self.expected_crops_per_image[img_idx] = self.expected_crops_per_image.get(img_idx, 0) + 1
         
-    def add_crop_predictions(self, batch, preds_before_nms, preds_after_nms):
+    def add_crop_predictions(self, batch: Dict[str, Any], preds_before_nms, preds_after_nms) -> bool:
         """
         Add predictions from a batch of crops.
+        
+        Args:
+            batch: Batch dict with SAHI metadata (original_img_idx, slice_coords, etc.)
+            preds_before_nms: Raw model predictions [batch, channels, anchors]
+            preds_after_nms: Not used (NMS done after aggregation)
+            
+        Returns:
+            True if successful, False if metadata missing
         """
+        # Extract SAHI metadata from batch
         original_img_idx = batch.get('original_img_idx', [])
         slice_idx = batch.get('slice_idx', [])
         slice_coords = batch.get('slice_coords', [])
-        ori_shapes = batch.get('ori_shape', []) # shape of the original full image
-        
-        imgsz = batch['img'].shape[2:] # shape of the padded crop tensor
-        resized_shapes = batch.get('resized_shape', []) # shape of the crop before padding
+        ori_shapes = batch.get('ori_shape', [])
+        resized_shapes = batch.get('resized_shape', [])
         ratio_pads = batch.get('ratio_pad', [])
+        is_full_image_list = batch.get('is_full_image', [False] * len(original_img_idx))
 
-        if preds_before_nms is not None:
-            if isinstance(preds_before_nms, tuple):
-                preds_before_nms = preds_before_nms[0] if len(preds_before_nms) > 0 else None
-
-        if not original_img_idx or not resized_shapes or not ratio_pads:
-            LOGGER.warning("SAHI metadata (original_img_idx, resized_shape, ratio_pad) missing in batch, skipping aggregation")
+        if not original_img_idx:
+            LOGGER.warning("SAHI metadata missing in batch, skipping aggregation")
             return False
-            
-        # Process each crop in the batch
+
+        imgsz = batch['img'].shape[2:]  # Model input size (h, w)
+
+        # Handle tuple output from model
+        if isinstance(preds_before_nms, tuple):
+            preds_before_nms = preds_before_nms[0] if preds_before_nms else None
+
+        if preds_before_nms is None or not hasattr(preds_before_nms, 'shape'):
+            return True  # No predictions, but not an error
+
+        if len(preds_before_nms.shape) != 3:
+            LOGGER.error(f"Unexpected preds_before_nms shape: {preds_before_nms.shape}")
+            return False
+
+        # Process each crop in batch
         for i in range(len(original_img_idx)):
-            img_idx = original_img_idx[i]
-            img_key = str(img_idx)
-            if self.image_crops[img_key]['original_shape'] is None:
-                self.image_crops[img_key]['original_shape'] = ori_shapes[i]
-                self.image_crops[img_key]['original_img_idx'] = img_idx
-            
-            self.image_crops[img_key]['processed_crops'].add(slice_idx[i])
-            
-            if preds_before_nms is not None and hasattr(preds_before_nms, 'shape'):
-                if len(preds_before_nms.shape) == 3:
-                    crop_preds = preds_before_nms[i].T  # [outputs, anchors] -> [anchors, outputs]
-                    
-                    conf_threshold = 0.001
-                    valid_mask = crop_preds[:, 4] > conf_threshold
-                    
-                    crop_preds_filtered = crop_preds[valid_mask]
-                    
-                    if len(crop_preds_filtered) > 0:
-                        boxes_xyxy_padded = ops.xywh2xyxy(crop_preds_filtered[:, :4])
-
-                        # scale boxes from padded to original crop size
-                        ops.scale_boxes(imgsz, boxes_xyxy_padded, resized_shapes[i], ratio_pad=ratio_pads[i])
-
-                        # shift coordinates to the full image space
-                        x_min, y_min, _, _ = slice_coords[i]
-                        boxes_xyxy_padded[:, 0] += x_min  # x1
-                        boxes_xyxy_padded[:, 1] += y_min  # y1
-                        boxes_xyxy_padded[:, 2] += x_min  # x2
-                        boxes_xyxy_padded[:, 3] += y_min  # y2
-                        boxes_xywh_full = ops.xyxy2xywh(boxes_xyxy_padded)
-        
-                        crop_preds_transformed = crop_preds_filtered.clone()
-                        crop_preds_transformed[:, :4] = boxes_xywh_full
-                
-                        
-                        self.image_crops[img_key]['predictions'].append(crop_preds_transformed)
-                        self.image_crops[img_key]['crop_coords'].append(slice_coords[i])
-                else:
-                    LOGGER.error(f"Unexpected preds_before_nms shape: {preds_before_nms.shape}")
-                    continue
+            self._process_single_crop(
+                i, original_img_idx[i], slice_idx[i],
+                _to_tuple(slice_coords[i]),
+                _to_tuple(ori_shapes[i]),
+                _to_tuple(resized_shapes[i]),
+                _fix_ratio_pad(_to_tuple(ratio_pads[i])),
+                bool(is_full_image_list[i]) if i < len(is_full_image_list) else False,
+                preds_before_nms[i],
+                imgsz
+            )
                     
         return True
+
+    def _process_single_crop(
+        self,
+        batch_idx: int,
+        img_idx: int,
+        slice_idx: int,
+        slice_coord: Tuple[int, int, int, int],
+        ori_shape: Tuple[int, int],
+        resized_shape: Tuple[int, int],
+        ratio_pad: Optional[Tuple],
+        is_full: bool,
+        crop_preds_raw: torch.Tensor,
+        imgsz: Tuple[int, int]
+    ):
+        """Process predictions from a single crop."""
+        img_key = str(img_idx)
+        
+        # Initialize image data
+        if self.image_crops[img_key]['original_shape'] is None:
+            self.image_crops[img_key]['original_shape'] = ori_shape
+            self.image_crops[img_key]['original_img_idx'] = img_idx
+        
+        self.image_crops[img_key]['processed_crops'].add(slice_idx)
+        
+        # Transpose: [channels, anchors] -> [anchors, channels]
+        crop_preds = crop_preds_raw.T
+        
+        # Filter by confidence
+        conf_threshold = 0.001
+        valid_mask = crop_preds[:, 4] > conf_threshold
+        crop_preds_filtered = crop_preds[valid_mask]
+        
+        if len(crop_preds_filtered) == 0:
+            return
+        
+        # Transform boxes to original image coordinates
+        boxes_xyxy = ops.xywh2xyxy(crop_preds_filtered[:, :4].clone())
+        
+        if is_full:
+            # Full image: scale_boxes handles letterbox -> original transform
+            ops.scale_boxes(imgsz, boxes_xyxy, ori_shape, ratio_pad=ratio_pad)
+        else:
+            # Crop: scale_boxes does nothing (ratio_pad=((1,1),(0,0))), then add offset
+            ops.scale_boxes(imgsz, boxes_xyxy, resized_shape, ratio_pad=ratio_pad)
+            x_min, y_min = slice_coord[0], slice_coord[1]
+            boxes_xyxy[:, 0] += x_min
+            boxes_xyxy[:, 1] += y_min
+            boxes_xyxy[:, 2] += x_min
+            boxes_xyxy[:, 3] += y_min
+        
+        # Clip to image bounds
+        h, w = ori_shape
+        boxes_xyxy[:, 0].clamp_(0, w)
+        boxes_xyxy[:, 1].clamp_(0, h)
+        boxes_xyxy[:, 2].clamp_(0, w)
+        boxes_xyxy[:, 3].clamp_(0, h)
+        
+        # Store as xywh (required for NMS later)
+        crop_preds_transformed = crop_preds_filtered.clone()
+        crop_preds_transformed[:, :4] = ops.xyxy2xywh(boxes_xyxy)
+        
+        self.image_crops[img_key]['predictions'].append(crop_preds_transformed)
+        self.image_crops[img_key]['crop_coords'].append(slice_coord)
     
-    def get_aggregated_predictions(self, img_key):
+    def get_aggregated_predictions(self, img_key: str) -> torch.Tensor:
         """
-        Get aggregated predictions for a complete image.
+        Get concatenated predictions for a complete image.
         
         Returns:
-            Tensor: Concatenated predictions from all crops (before NMS)
+            Tensor of shape [N, 4 + num_classes*2] with xywh boxes and class predictions
         """
         data = self.image_crops[img_key]
+        
         if not data['predictions']:
-            num_cols = 4  # boxes
+            # Return empty tensor with correct number of columns
+            num_cols = 4
             if hasattr(self.validator, 'nc'):
-                for nc in self.validator.nc:
-                    num_cols += nc + 1  # classes + confidence
+                num_cols += sum(nc + 1 for nc in self.validator.nc)
             return torch.empty((0, num_cols), device=self.validator.device)
         
-        # Concatenate all predictions
-        all_preds = torch.cat(data['predictions'], dim=0)  
-        return all_preds
+        return torch.cat(data['predictions'], dim=0)
     
-    def is_image_complete(self, img_key):
+    def is_image_complete(self, img_key: str) -> bool:
         """Check if all crops for an image have been processed."""
         img_idx = self.image_crops[img_key].get('original_img_idx')
         if img_idx is None:
@@ -139,10 +217,6 @@ class SAHICropAggregator:
         
         return expected > 0 and processed >= expected
     
-    def get_completed_images(self):
-        """Get list of images that have all crops processed."""
-        completed = []
-        for img_key in list(self.image_crops.keys()):
-            if self.is_image_complete(img_key):
-                completed.append(img_key)
-        return completed
+    def get_completed_images(self) -> List[str]:
+        """Get list of image keys that have all crops processed."""
+        return [img_key for img_key in self.image_crops if self.is_image_complete(img_key)]
