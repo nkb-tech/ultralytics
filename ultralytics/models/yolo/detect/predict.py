@@ -412,7 +412,7 @@ class DetectionPredictor(BasePredictor):
         greedy = self.postprocess_type == "greedy_nmm"
         return self._apply_final_merge(preds, greedy)
 
-    def _apply_final_nms(self, preds, agnostic):
+    def _apply_final_nms(self, preds):
         """Final NMS step on [xyxy, conf, cls, ....] tensors."""
         if preds.shape[0] == 0:
             return preds
