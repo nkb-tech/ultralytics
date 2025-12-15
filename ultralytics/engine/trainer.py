@@ -320,7 +320,11 @@ class BaseTrainer:
                 mode="val",
             )
             self.validator = self.get_validator()
-            metric_keys = self.validator.metrics[0].keys + self.label_loss_items(prefix="val")
+            metrics = self.validator.metrics
+            if isinstance(metrics, list):
+                metric_keys = metrics[0].keys + self.label_loss_items(prefix="val")
+            else:
+                metric_keys = metrics.keys + self.label_loss_items(prefix="val")
             self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
             self.ema = ModelEMA(self.model)
             if self.args.plots:

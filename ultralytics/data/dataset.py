@@ -86,7 +86,6 @@ class YOLODataset(BaseDataset):
         desc = f"{desc_prefix}..."
         total = len(self.im_files)
         nkpt, ndim = self.data.get("kpt_shape", (0, 0))
-        # Determine number of class columns for empty labels
         num_cls_cols = 1 if self.single_cls else (len(self.nc) if isinstance(self.nc, (list, tuple)) else 1)
         if self.use_keypoints and (nkpt <= 0 or ndim not in {2, 3}):
             raise ValueError(
@@ -94,7 +93,6 @@ class YOLODataset(BaseDataset):
                 "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'"
             )
         with ThreadPool(NUM_THREADS) as pool:
-            # forward per-head class counts so each worker validates correctly
             results = pool.imap(
                 func=lambda args: verify_image_label(args, min_imgsz=self.min_imgsz),
                 iterable=zip(
@@ -127,7 +125,11 @@ class YOLODataset(BaseDataset):
                     # Keep boxes with width and height >= min_bbox pixels
                     valid_mask = (boxes_pix[:, 2] >= self.min_bbox) & (boxes_pix[:, 3] >= self.min_bbox)
                     lb = lb[valid_mask]
-                    fb += len(lb)  # count boxes after filtering
+                    fb += len(lb)
+                    
+                    # Filter segments by the same mask
+                    if segments:
+                        segments = [seg for seg, valid in zip(segments, valid_mask) if valid]
 
                     cls_cols = lb[:, :1] if self.single_cls else lb[:, 0:-4]
                     x["labels"].append(
@@ -135,7 +137,7 @@ class YOLODataset(BaseDataset):
                             "im_file": im_file,
                             "shape": shape,
                             "cls": cls_cols,
-                            "bboxes": lb[:, -4:],  # n, 4
+                            "bboxes": lb[:, -4:],
                             "segments": segments,
                             "keypoints": keypoint,
                             "normalized": True,

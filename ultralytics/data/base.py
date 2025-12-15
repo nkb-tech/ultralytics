@@ -217,7 +217,10 @@ class BaseDataset(Dataset):
             self.buffer.append(i)
             if len(self.buffer) >= self.max_buffer_length:
                 j = self.buffer.pop(0)
-                if self.cache != "ram":
+                # Don't set self.ims[j] = None for low-ram mode
+                if self.cache == "disk":
+                    self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+                elif self.cache != "ram" and self.cache != "low-ram":
                     self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
 
         return im, (h0, w0), im.shape[:2]

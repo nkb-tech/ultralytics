@@ -2,7 +2,6 @@ from functools import lru_cache
 from multiprocessing.pool import ThreadPool
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
-import random
 import numpy as np
 import numba as nb
 
@@ -14,6 +13,192 @@ from .dataset import YOLODataset
 
 # Marker for full image slice (used in validation to include letterboxed full image)
 FULL_IMAGE_SLICE_IDX = -1
+
+# ==================== Numba-accelerated Polygon Utilities ====================
+
+@nb.jit(nopython=True, fastmath=True, cache=True)
+def _polygon_area(polygon: np.ndarray) -> float:
+    """Calculate polygon area using shoelace formula (numba-accelerated)."""
+    n = len(polygon)
+    if n < 3:
+        return 0.0
+    area = 0.0
+    for i in range(n):
+        j = (i + 1) % n
+        area += polygon[i, 0] * polygon[j, 1]
+        area -= polygon[j, 0] * polygon[i, 1]
+    return abs(area) * 0.5
+
+
+def _clip_polygon_to_rect(
+    polygon: np.ndarray,
+    x1: float, y1: float, x2: float, y2: float
+) -> Optional[np.ndarray]:
+    """
+    Clip polygon to rectangle using Sutherland-Hodgman algorithm.
+    
+    Args:
+        polygon: [N, 2] array of (x, y) points (absolute coordinates)
+        x1, y1, x2, y2: Rectangle bounds
+        
+    Returns:
+        Clipped polygon or None if completely outside
+    """
+    def inside(p, edge):
+        if edge == 'left':
+            return p[0] >= x1
+        elif edge == 'right':
+            return p[0] <= x2
+        elif edge == 'top':
+            return p[1] >= y1
+        else:  # bottom
+            return p[1] <= y2
+    
+    def intersection(p1, p2, edge):
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        
+        if edge == 'left':
+            t = (x1 - p1[0]) / (dx + 1e-10)
+            return np.array([x1, p1[1] + t * dy])
+        elif edge == 'right':
+            t = (x2 - p1[0]) / (dx + 1e-10)
+            return np.array([x2, p1[1] + t * dy])
+        elif edge == 'top':
+            t = (y1 - p1[1]) / (dy + 1e-10)
+            return np.array([p1[0] + t * dx, y1])
+        else:  # bottom
+            t = (y2 - p1[1]) / (dy + 1e-10)
+            return np.array([p1[0] + t * dx, y2])
+    
+    output = list(polygon)
+    
+    for edge in ['left', 'right', 'top', 'bottom']:
+        if len(output) == 0:
+            return None
+        
+        input_poly = output
+        output = []
+        
+        for i in range(len(input_poly)):
+            current = input_poly[i]
+            next_pt = input_poly[(i + 1) % len(input_poly)]
+            
+            if inside(current, edge):
+                if inside(next_pt, edge):
+                    output.append(next_pt)
+                else:
+                    output.append(intersection(current, next_pt, edge))
+            elif inside(next_pt, edge):
+                output.append(intersection(current, next_pt, edge))
+                output.append(next_pt)
+    
+    if len(output) < 3:
+        return None
+    
+    return np.array(output, dtype=np.float64)
+
+
+def _transform_segments_to_crop(
+    segments: List[np.ndarray],
+    coords: Tuple[int, int, int, int],
+    img_h: int, img_w: int,
+    min_area_ratio: float = 0.3
+) -> Tuple[List[np.ndarray], np.ndarray]:
+    """
+    Transform polygon segments from original image to crop coordinates.
+    
+    Args:
+        segments: List of [N, 2] arrays with normalized (x, y) points
+        coords: (x1, y1, x2, y2) crop coordinates in pixels
+        img_h, img_w: Original image dimensions
+        min_area_ratio: Minimum fraction of original area to keep segment
+        
+    Returns:
+        new_segments: List of transformed segments (normalized to crop)
+        valid_mask: Boolean array indicating which segments survived
+    """
+    x1, y1, x2, y2 = coords
+    crop_w, crop_h = x2 - x1, y2 - y1
+    
+    new_segments = []
+    valid_mask = np.zeros(len(segments), dtype=bool)
+    
+    for idx, seg in enumerate(segments):
+        if len(seg) < 3:
+            continue
+        
+        # Denormalize to absolute coordinates
+        poly = seg.copy().astype(np.float64)
+        poly[:, 0] *= img_w
+        poly[:, 1] *= img_h
+        
+        # Calculate original area
+        original_area = _polygon_area(poly)
+        if original_area < 1e-6:
+            continue
+        
+        # Clip to crop bounds
+        clipped = _clip_polygon_to_rect(poly, x1, y1, x2, y2)
+        
+        if clipped is None or len(clipped) < 3:
+            continue
+        
+        # Check area threshold
+        clipped_area = _polygon_area(clipped)
+        if clipped_area / original_area < min_area_ratio:
+            continue
+        
+        # Transform to crop coordinates (normalized)
+        clipped[:, 0] = (clipped[:, 0] - x1) / crop_w
+        clipped[:, 1] = (clipped[:, 1] - y1) / crop_h
+        
+        # Clip to [0, 1]
+        clipped = np.clip(clipped, 0, 1)
+        
+        new_segments.append(clipped.astype(np.float32))
+        valid_mask[idx] = True
+    
+    return new_segments, valid_mask
+
+
+def _transform_segments_for_letterbox(
+    segments: List[np.ndarray],
+    ratio: Tuple[float, float],
+    pad: Tuple[int, int],
+    img_h: int, img_w: int,
+    target_size: int
+) -> Tuple[List[np.ndarray], np.ndarray]:
+    """
+    Transform polygon segments for letterboxed full image.
+    
+    Returns:
+        new_segments: List of transformed segments
+        valid_mask: Boolean array indicating which input segments were kept
+    """
+    scale = ratio[0]
+    pad_w, pad_h = pad
+    
+    new_segments = []
+    valid_mask = np.zeros(len(segments), dtype=bool)
+    
+    for i, seg in enumerate(segments):
+        if len(seg) < 3:
+            continue
+        
+        new_seg = seg.copy().astype(np.float64)
+        
+        # Transform: original normalized -> letterbox normalized
+        new_seg[:, 0] = (seg[:, 0] * img_w * scale + pad_w) / target_size
+        new_seg[:, 1] = (seg[:, 1] * img_h * scale + pad_h) / target_size
+        
+        # Clip to [0, 1]
+        new_seg = np.clip(new_seg, 0, 1)
+        
+        new_segments.append(new_seg.astype(np.float32))
+        valid_mask[i] = True
+    
+    return new_segments, valid_mask
 
 
 # ==================== Numba-accelerated functions ====================
@@ -156,6 +341,56 @@ def _filter_bboxes(
     return new_bboxes[:count], new_cls[:count]
 
 
+@nb.jit(nopython=True, fastmath=True, cache=True)
+def _generate_random_coords_numba(
+    img_h: int,
+    img_w: int,
+    boxes_xyxy: np.ndarray,
+    num_crops: int,
+    crop_size: int,
+    object_crop_prob: float,
+    random_vals: np.ndarray,
+    box_indices: np.ndarray,
+    jitter_vals: np.ndarray,
+    pos_vals: np.ndarray,
+) -> np.ndarray:
+    """
+    Numba-accelerated random crop coordinate generation.
+    
+    Random values are pre-generated by numpy for numba compatibility.
+    """
+    max_x = max(0, img_w - crop_size)
+    max_y = max(0, img_h - crop_size)
+    has_boxes = len(boxes_xyxy) > 0
+    
+    coords = np.empty((num_crops, 4), dtype=np.int64)
+    
+    for i in range(num_crops):
+        if random_vals[i] < object_crop_prob and has_boxes:
+            # Center on random object with jitter
+            box = boxes_xyxy[box_indices[i] % len(boxes_xyxy)]
+            cx = (box[0] + box[2]) * 0.5
+            cy = (box[1] + box[3]) * 0.5
+            jitter_x = jitter_vals[i, 0] * crop_size * 0.6 - crop_size * 0.3
+            jitter_y = jitter_vals[i, 1] * crop_size * 0.6 - crop_size * 0.3
+            x1 = int(cx - crop_size * 0.5 + jitter_x)
+            y1 = int(cy - crop_size * 0.5 + jitter_y)
+        else:
+            # Random position
+            x1 = int(pos_vals[i, 0] * max_x) if max_x > 0 else 0
+            y1 = int(pos_vals[i, 1] * max_y) if max_y > 0 else 0
+        
+        # Clamp to image bounds
+        x1 = max(0, min(x1, max_x))
+        y1 = max(0, min(y1, max_y))
+        coords[i, 0] = x1
+        coords[i, 1] = y1
+        coords[i, 2] = min(x1 + crop_size, img_w)
+        coords[i, 3] = min(y1 + crop_size, img_h)
+    
+    return coords
+
+
 # ==================== LRU-cached wrappers ====================
 
 @lru_cache(maxsize=4096)
@@ -230,6 +465,7 @@ class SAHIDataset(YOLODataset):
         # Per-worker image cache (initialized lazily)
         self._worker_image_cache: Optional[Dict[int, np.ndarray]] = None
         self._worker_id: Optional[int] = None
+        self._cache_size_bytes: int = 0
 
         self._log_config()
 
@@ -280,7 +516,6 @@ class SAHIDataset(YOLODataset):
             resized_shape = crop_im.shape[:2]
             ratio_pad = (ratio, (pad_w, pad_h))
         else:
-            # Extract crop (with bounds checking)
             x1 = min(x1, max(0, actual_w - self.crop_size))
             y1 = min(y1, max(0, actual_h - self.crop_size))
             x2 = min(x1 + self.crop_size, actual_w)
@@ -288,8 +523,17 @@ class SAHIDataset(YOLODataset):
             coords = (x1, y1, x2, y2)
 
             crop_im = im[y1:y2, x1:x2].copy()
-            resized_shape = crop_im.shape[:2]
-            ratio_pad = ((1.0, 1.0), (0, 0))
+            crop_h, crop_w = crop_im.shape[:2]
+            
+            # Compute what LetterBox will do to this crop
+            target = self.crop_size
+            scale = min(target / crop_h, target / crop_w)
+            new_h, new_w = int(crop_h * scale), int(crop_w * scale)
+            pad_h, pad_w = target - new_h, target - new_w
+            pad_top, pad_left = pad_h // 2, pad_w // 2
+            
+            resized_shape = (new_h, new_w)  # Shape after resize, before padding
+            ratio_pad = ((scale, scale), (pad_left, pad_top))
 
         # Transform labels
         labels = deepcopy(self.labels[img_idx])
@@ -305,6 +549,7 @@ class SAHIDataset(YOLODataset):
             "ratio_pad": ratio_pad,
             "bboxes": crop_labels["bboxes"],
             "cls": crop_labels["cls"],
+            "segments": crop_labels.get("segments", []), 
             "original_img_idx": img_idx,
             "slice_idx": slice_idx,
             "slice_coords": coords,
@@ -338,36 +583,70 @@ class SAHIDataset(YOLODataset):
         ratio_pad: Tuple[Tuple[float, float], Tuple[int, int]],
         img_h: int,
         img_w: int,
-    ) -> Dict[str, np.ndarray]:
+    ) -> Dict[str, Any]:
         """Transform labels for letterboxed full image."""
+        n_cls_cols = len(self.nc) if isinstance(self.nc, (list, tuple)) else 1
+        
         bboxes = labels.get("bboxes", np.zeros((0, 4), dtype=np.float32))
-        cls = labels.get("cls", np.zeros((0, 1), dtype=np.float32))
+        cls = labels.get("cls", np.zeros((0, n_cls_cols), dtype=np.float32))
+        segments = labels.get("segments", [])
 
         if not isinstance(bboxes, np.ndarray):
             bboxes = np.array(bboxes, dtype=np.float32) if bboxes is not None and len(bboxes) > 0 else np.zeros((0, 4), dtype=np.float32)
         if not isinstance(cls, np.ndarray):
-            cls = np.array(cls, dtype=np.float32) if cls is not None and len(cls) > 0 else np.zeros((0, 1), dtype=np.float32)
+            cls = np.array(cls, dtype=np.float32) if cls is not None and len(cls) > 0 else np.zeros((0, n_cls_cols), dtype=np.float32)
 
         if bboxes.ndim == 1:
             bboxes = bboxes.reshape(-1, 4) if len(bboxes) > 0 else np.zeros((0, 4), dtype=np.float32)
         if cls.ndim == 1:
-            cls = cls.reshape(-1, 1) if len(cls) > 0 else np.zeros((0, 1), dtype=np.float32)
+            cls = cls.reshape(-1, n_cls_cols) if len(cls) > 0 else np.zeros((0, n_cls_cols), dtype=np.float32)
 
         if len(bboxes) == 0:
-            return {"bboxes": np.zeros((0, 4), dtype=np.float32), "cls": np.zeros((0, 1), dtype=np.float32)}
+            return {
+                "bboxes": np.zeros((0, 4), dtype=np.float32),
+                "cls": cls.astype(np.float32),
+                "segments": [],
+            }
 
         ratio, (pad_w, pad_h) = ratio_pad
         scale = ratio[0]
         target = self.crop_size
 
-        # Transform: original normalized -> letterbox normalized
+        # For segmentation: filter by segments first to keep sync
+        if segments and len(segments) > 0 and len(segments) == len(bboxes):
+            new_segments, valid_mask = _transform_segments_for_letterbox(
+                segments, ratio, (pad_w, pad_h), img_h, img_w, target
+            )
+            
+            # Use same mask for bboxes
+            valid_indices = np.where(valid_mask)[0]
+            
+            if len(valid_indices) == 0:
+                return {
+                    "bboxes": np.zeros((0, 4), dtype=np.float32),
+                    "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
+                    "segments": [],
+                }
+            
+            bboxes = bboxes[valid_indices]
+            cls = cls[valid_indices]
+        else:
+            new_segments = []
+
+        # Transform bboxes
         new_bboxes = np.zeros_like(bboxes)
         new_bboxes[:, 0] = (bboxes[:, 0] * img_w * scale + pad_w) / target
         new_bboxes[:, 1] = (bboxes[:, 1] * img_h * scale + pad_h) / target
         new_bboxes[:, 2] = bboxes[:, 2] * img_w * scale / target
         new_bboxes[:, 3] = bboxes[:, 3] * img_h * scale / target
 
-        return {"bboxes": new_bboxes.astype(np.float32), "cls": cls.astype(np.float32)}
+        return {
+            "bboxes": new_bboxes.astype(np.float32),
+            "cls": cls.astype(np.float32),
+            "segments": new_segments,
+        }
+
+
 
     def _transform_labels_to_crop(
         self,
@@ -375,48 +654,121 @@ class SAHIDataset(YOLODataset):
         coords: Tuple[int, int, int, int],
         img_h: int,
         img_w: int,
-    ) -> Dict[str, np.ndarray]:
+    ) -> Dict[str, Any]:
         """Transform labels from full image to crop coordinates."""
         x1, y1, x2, y2 = coords
+        n_cls_cols = len(self.nc) if isinstance(self.nc, (list, tuple)) else 1
 
         bboxes = labels.get("bboxes", np.array([]))
         cls = labels.get("cls", np.array([]))
+        segments = labels.get("segments", [])
 
         if not isinstance(bboxes, np.ndarray):
             bboxes = np.array(bboxes) if bboxes is not None and len(bboxes) > 0 else np.zeros((0, 4))
         if not isinstance(cls, np.ndarray):
-            cls = np.array(cls) if cls is not None and len(cls) > 0 else np.zeros((0,))
+            cls = np.array(cls) if cls is not None and len(cls) > 0 else np.zeros((0, n_cls_cols))
 
-        n_cls_cols = cls.shape[1] if cls.ndim > 1 else 1
+        if cls.ndim == 1 and len(cls) > 0:
+            cls = cls.reshape(-1, 1) if n_cls_cols == 1 else cls.reshape(-1, n_cls_cols) if len(cls) % n_cls_cols == 0 else cls.reshape(-1, 1)
 
         if len(bboxes) == 0:
-            return {"bboxes": np.zeros((0, 4), dtype=np.float32), "cls": np.zeros((0, n_cls_cols), dtype=np.float32)}
+            return {
+                "bboxes": np.zeros((0, 4), dtype=np.float32),
+                "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
+                "segments": [],
+            }
 
         if bboxes.ndim == 1:
             bboxes = bboxes.reshape(-1, 4)
 
-        cls_flat = cls.flatten() if cls.ndim > 1 else cls
+        if cls.ndim == 1:
+            cls = cls.reshape(-1, 1)
+        
+        if cls.shape[1] != n_cls_cols and cls.shape[1] == 1 and n_cls_cols > 1:
+            new_cls_arr = np.zeros((len(cls), n_cls_cols), dtype=cls.dtype)
+            new_cls_arr[:, 0] = cls[:, 0]
+            cls = new_cls_arr
 
-        # Filter and transform bboxes
-        boxes_xyxy = _xywh_to_xyxy(bboxes.astype(np.float64), img_h, img_w)
-        new_bboxes, new_cls = _filter_bboxes(boxes_xyxy, cls_flat.astype(np.float64), x1, y1, x2, y2, self.min_object_coverage)
+        # For segmentation: filter segments first, then use the same mask for bboxes
+        if segments and len(segments) > 0 and len(segments) == len(bboxes):
+            # Transform segments and get valid mask
+            new_segments, segment_valid_mask = _transform_segments_to_crop(
+                segments, coords, img_h, img_w, self.min_object_coverage
+            )
+            
+            # Use segment_valid_mask to filter bboxes too
+            valid_indices = np.where(segment_valid_mask)[0]
+            
+            if len(valid_indices) == 0:
+                return {
+                    "bboxes": np.zeros((0, 4), dtype=np.float32),
+                    "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
+                    "segments": [],
+                }
+            
+            # Transform only valid bboxes to crop coordinates
+            crop_w, crop_h = x2 - x1, y2 - y1
+            boxes_xyxy = _xywh_to_xyxy(bboxes[valid_indices].astype(np.float64), img_h, img_w)
+            
+            new_bboxes = np.zeros((len(valid_indices), 4), dtype=np.float32)
+            for i, box in enumerate(boxes_xyxy):
+                # Clip to crop bounds
+                new_x1 = max(box[0] - x1, 0)
+                new_y1 = max(box[1] - y1, 0)
+                new_x2 = min(box[2] - x1, crop_w)
+                new_y2 = min(box[3] - y1, crop_h)
+                
+                # Convert to normalized xywh
+                new_bboxes[i, 0] = (new_x1 + new_x2) / 2 / crop_w
+                new_bboxes[i, 1] = (new_y1 + new_y2) / 2 / crop_h
+                new_bboxes[i, 2] = (new_x2 - new_x1) / crop_w
+                new_bboxes[i, 3] = (new_y2 - new_y1) / crop_h
+            
+            new_cls = cls[valid_indices].astype(np.float32)
+            
+        else:
+            # Detection only or segments don't match bboxes - use numba-accelerated bbox filtering
+            boxes_xyxy = _xywh_to_xyxy(bboxes.astype(np.float64), img_h, img_w)
+            cls_flat = cls[:, 0].astype(np.float64) if cls.ndim > 1 else cls.astype(np.float64)
+            
+            new_bboxes, filtered_cls = _filter_bboxes(
+                boxes_xyxy, cls_flat, x1, y1, x2, y2, self.min_object_coverage
+            )
+            
+            if len(new_bboxes) == 0:
+                return {
+                    "bboxes": np.zeros((0, 4), dtype=np.float32),
+                    "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
+                    "segments": [],
+                }
+            
+            new_bboxes = new_bboxes.astype(np.float32)
+            # Restore multi-column cls if needed
+            if n_cls_cols > 1:
+                new_cls = np.zeros((len(filtered_cls), n_cls_cols), dtype=np.float32)
+                new_cls[:, 0] = filtered_cls
+            else:
+                new_cls = filtered_cls.reshape(-1, 1).astype(np.float32)
+            new_segments = []
 
+        # Format outputs
         new_bboxes = new_bboxes.astype(np.float32)
         if len(new_bboxes) == 0:
-            return {"bboxes": np.zeros((0, 4), dtype=np.float32), "cls": np.zeros((0, n_cls_cols), dtype=np.float32)}
+            return {
+                "bboxes": np.zeros((0, 4), dtype=np.float32),
+                "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
+                "segments": [],
+            }
         
-        # Reshape cls to match original structure
-        cls_values = new_cls.astype(np.float32).flatten()
-        if n_cls_cols > 1:
-            new_cls = np.zeros((len(cls_values), n_cls_cols), dtype=np.float32)
-            new_cls[:, 0] = cls_values
-        else:
-            new_cls = cls_values.reshape(-1, 1)
-        
-        return {"bboxes": new_bboxes, "cls": new_cls}
+        return {
+            "bboxes": new_bboxes,
+            "cls": new_cls,
+            "segments": new_segments,
+        }
+
 
     def _get_cached_image(self, img_idx: int) -> np.ndarray:
-        """Get image with per-worker LRU caching."""
+        """Get image with per-worker LRU caching and memory-aware eviction."""
         import torch
         
         worker_info = torch.utils.data.get_worker_info()
@@ -426,6 +778,7 @@ class SAHIDataset(YOLODataset):
         if self._worker_image_cache is None or self._worker_id != current_worker_id:
             self._worker_image_cache = {}
             self._worker_id = current_worker_id
+            self._cache_size_bytes = 0
         
         if img_idx in self._worker_image_cache:
             return self._worker_image_cache[img_idx]
@@ -434,12 +787,18 @@ class SAHIDataset(YOLODataset):
         if im is None:
             raise FileNotFoundError(f"Image not found: {self.im_files[img_idx]}")
         
-        # Simple FIFO eviction
-        if len(self._worker_image_cache) >= self._buffer_size:
+        im_size = im.nbytes
+        
+        # FIFO eviction - evict until we have room
+        while len(self._worker_image_cache) >= self._buffer_size:
             oldest_key = next(iter(self._worker_image_cache))
-            del self._worker_image_cache[oldest_key]
+            old_im = self._worker_image_cache.pop(oldest_key)
+            self._cache_size_bytes -= old_im.nbytes
+            del old_im
         
         self._worker_image_cache[img_idx] = im
+        self._cache_size_bytes += im_size
+        
         return im
 
     def _precompute_slices(self) -> List[Tuple[int, int, Tuple[int, int, int, int]]]:
@@ -517,6 +876,7 @@ class SAHIDataset(YOLODataset):
             mask_ratio=hyp.mask_ratio if hyp else 4,
             mask_overlap=hyp.overlap_mask if hyp else True,
             bgr=hyp.bgr if hyp and self.augment else 0.0,
+            n_cls_tasks=1 if self.single_cls else len(self.nc),
         ))
         return transforms
 
@@ -533,8 +893,9 @@ class SAHIDataset(YOLODataset):
     def _log_config(self):
         """Log dataset configuration."""
         mode = "train" if self.augment else "val"
+        task = "segment" if self.use_segments else "detect"
         lines = [
-            f"\n{colorstr('SAHIDataset')} ({mode}):",
+            f"\n{colorstr('SAHIDataset')} ({mode}, {task}):",
             f"  strategy: {self.cut_strategy}",
             f"  crop_size: {self.crop_size}",
             f"  images: {self.ni}",
@@ -548,6 +909,8 @@ class SAHIDataset(YOLODataset):
         LOGGER.info("\n".join(lines))
 
 
+# ==================== Random Crop Generation ====================
+
 def _generate_random_coords(
     img_h: int,
     img_w: int,
@@ -560,34 +923,22 @@ def _generate_random_coords(
     """
     Generate random crop coordinates, biased towards objects.
     
-    Args:
-        object_crop_prob: Probability to center crop on a random object
-        seed: Random seed for reproducibility
+    Wrapper that pre-generates random values for numba-accelerated core.
     """
-    rng = random.Random(seed)
-    max_x, max_y = max(0, img_w - crop_size), max(0, img_h - crop_size)
-
-    boxes_xyxy = _xywh_to_xyxy(bboxes.astype(np.float64), img_h, img_w) if len(bboxes) > 0 else np.array([])
-    has_boxes = len(boxes_xyxy) > 0
-    coords = []
-
-    for _ in range(num_crops):
-        if rng.random() < object_crop_prob and has_boxes:
-            # Center on random object with jitter
-            box = boxes_xyxy[rng.randint(0, len(boxes_xyxy) - 1)]
-            cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
-            jitter_x = rng.uniform(-crop_size * 0.3, crop_size * 0.3)
-            jitter_y = rng.uniform(-crop_size * 0.3, crop_size * 0.3)
-            x1 = int(cx - crop_size / 2 + jitter_x)
-            y1 = int(cy - crop_size / 2 + jitter_y)
-        else:
-            # Random position
-            x1 = rng.randint(0, max_x) if max_x > 0 else 0
-            y1 = rng.randint(0, max_y) if max_y > 0 else 0
-
-        # Clamp to image bounds
-        x1 = max(0, min(x1, max_x))
-        y1 = max(0, min(y1, max_y))
-        coords.append((x1, y1, min(x1 + crop_size, img_w), min(y1 + crop_size, img_h)))
-
-    return coords
+    # Pre-generate all random values with numpy (numba-compatible)
+    rng = np.random.default_rng(seed)
+    random_vals = rng.random(num_crops)
+    box_indices = rng.integers(0, max(1, len(bboxes)), size=num_crops)
+    jitter_vals = rng.random((num_crops, 2))
+    pos_vals = rng.random((num_crops, 2))
+    
+    # Convert bboxes to xyxy format
+    boxes_xyxy = _xywh_to_xyxy(bboxes.astype(np.float64), img_h, img_w) if len(bboxes) > 0 else np.empty((0, 4), dtype=np.float64)
+    
+    # Call numba-accelerated function
+    coords = _generate_random_coords_numba(
+        img_h, img_w, boxes_xyxy, num_crops, crop_size, object_crop_prob,
+        random_vals, box_indices, jitter_vals, pos_vals
+    )
+    
+    return [tuple(c) for c in coords]

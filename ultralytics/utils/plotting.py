@@ -1018,12 +1018,16 @@ class ValidatorPlotter:
 
     def _plot_sahi_from_cache(self, plot_preds=True):
         """Вспомогательная функция для отрисовки GT или предсказаний из кэша SAHI."""
+        import torch
+        import torch.nn.functional as F
+        
         img_indices = list(self._sahi_plot_cache.keys())
         if not img_indices:
             return
 
-        images_list, paths_list, all_targets = [], [], []
+        images_list, paths_list, all_targets, all_masks = [], [], [], []
         target_size = None
+        has_masks = False
 
         for idx, img_idx in enumerate(img_indices):
             cache_data = self._sahi_plot_cache[img_idx]
@@ -1051,28 +1055,73 @@ class ValidatorPlotter:
                     preds[:, [0, 2]] *= scale_x  # x1, x2
                     preds[:, [1, 3]] *= scale_y  # y1, y2
                 all_targets.append(preds)
+                
+                # Handle prediction masks for segmentation
+                pred_masks = cache_data.get('pred_masks')
+                if pred_masks is not None and len(pred_masks) > 0:
+                    has_masks = True
+                    # Resize masks to target size
+                    masks_resized = F.interpolate(
+                        pred_masks.float().unsqueeze(0),
+                        size=(target_size[1], target_size[0]),  # (H, W)
+                        mode='nearest'
+                    )[0].to(torch.uint8)
+                    all_masks.append(masks_resized)
+                else:
+                    all_masks.append(None)
             else:
                 gt_cls = cache_data['gt_cls']
                 gt_bboxes = cache_data['gt_bboxes']  # normalized xywh
                 if len(gt_bboxes) > 0:
                     batch_idx_col = torch.full((len(gt_cls), 1), float(idx))
+                    # Ensure gt_cls is 2D for concatenation
+                    if gt_cls.dim() == 1:
+                        gt_cls = gt_cls.unsqueeze(1)
                     target = torch.cat([batch_idx_col, gt_cls, gt_bboxes], dim=1)
                     all_targets.append(target)
                 else:
                     all_targets.append(torch.empty(0, 1 + len(self.nc) + 4))
+                
+                # Handle GT masks for segmentation
+                gt_masks = cache_data.get('gt_masks')
+                if gt_masks is not None and len(gt_masks) > 0:
+                    has_masks = True
+                    # Resize masks to target size
+                    masks_resized = F.interpolate(
+                        gt_masks.float().unsqueeze(0),
+                        size=(target_size[1], target_size[0]),  # (H, W)
+                        mode='nearest'
+                    )[0].to(torch.uint8)
+                    all_masks.append(masks_resized)
+                else:
+                    all_masks.append(None)
 
         if not images_list:
             return
 
         images = np.stack(images_list)
         fname = "val_batch0_pred.jpg" if plot_preds else "val_batch0_labels.jpg"
+        
+        # Prepare masks for plot_images if available
+        masks_for_plot = np.zeros(0, dtype=np.uint8)
+        if has_masks and any(m is not None for m in all_masks):
+            # Concatenate all masks, handling None entries
+            mask_list = []
+            for m in all_masks:
+                if m is not None:
+                    mask_list.append(m.numpy())
+            if mask_list:
+                masks_for_plot = np.concatenate(mask_list, axis=0)
 
         if plot_preds:
-            plot_images(images, *output_to_target(all_targets, max_det=self.max_det),
+            batch_idx, cls, bboxes, conf = output_to_target(all_targets, max_det=self.max_det)
+            plot_images(images, batch_idx, cls, bboxes, conf,
+                        masks=masks_for_plot,
                         paths=paths_list, fname=self.save_dir / fname, names=self.names, on_plot=self.on_plot)
         else:
             targets = torch.cat(all_targets, dim=0).numpy()
             plot_images(images, targets[:, 0], targets[:, 1:1 + len(self.nc)], targets[:, 1 + len(self.nc):],
+                        masks=masks_for_plot,
                         paths=paths_list, fname=self.save_dir / fname, names=self.names, on_plot=self.on_plot)
 
         LOGGER.debug(f"Saved SAHI validation plot to {self.save_dir / fname}")
@@ -1230,33 +1279,14 @@ def plot_images(
     max_subplots: int = 16,
     save: bool = True,
     conf_thres: float = 0.25,
+    show_all_tasks: bool = False,  # НОВЫЙ ПАРАМЕТР: показывать все задачи или только лучшую
 ) -> Optional[np.ndarray]:
     """
     Plot image grid with labels, bounding boxes, masks, and keypoints.
-
+    
     Args:
-        images: Batch of images to plot. Shape: (batch_size, channels, height, width).
-        batch_idx: Batch indices for each detection. Shape: (num_detections,).
-        cls: Class labels for each detection. Shape: (num_detections, n_tasks) for multi-task classification.
-        bboxes: Bounding boxes for each detection. Shape: (num_detections, 4) or (num_detections, 5) for rotated boxes.
-        confs: Confidence scores for each detection. Shape: (num_detections, n_tasks) for multi-task classification.
-        masks: Instance segmentation masks. Shape: (num_detections, height, width) or (1, height, width).
-        kpts: Keypoints for each detection. Shape: (num_detections, 51).
-        paths: List of file paths for each image in the batch.
-        fname: Output filename for the plotted image grid.
-        names: List of dictionary mapping class indices to class names.
-        on_plot: Optional callback function to be called after saving the plot.
-        max_size: Maximum size of the output image grid.
-        max_subplots: Maximum number of subplots in the image grid.
-        save: Whether to save the plotted image grid to a file.
-        conf_thres: Confidence threshold for displaying detections.
-
-    Returns:
-        np.ndarray: Plotted image grid as a numpy array if save is False, None otherwise.
-
-    Note:
-        This function supports both tensor and numpy array inputs. It will automatically
-        convert tensor inputs to numpy arrays for processing.
+        ...
+        show_all_tasks: If True, show all task labels. If False (default), show only the most confident one.
     """
     if isinstance(images, torch.Tensor):
         images = images.cpu().float().numpy()
@@ -1270,6 +1300,21 @@ def plot_images(
         kpts = kpts.cpu().numpy()
     if isinstance(batch_idx, torch.Tensor):
         batch_idx = batch_idx.cpu().numpy()
+
+    # Ensure cls is 2D for consistent handling (N,) -> (N, 1)
+    if cls.ndim == 1:
+        cls = cls[:, np.newaxis]
+    
+    # Ensure confs is 2D if present
+    if confs is not None:
+        if isinstance(confs, torch.Tensor):
+            confs = confs.cpu().numpy()
+        if confs.ndim == 1:
+            confs = confs[:, np.newaxis]
+
+    # Normalize names to list of dicts format
+    if names is not None and not isinstance(names, list):
+        names = [names]  # single task: dict -> [dict]
 
     bs, _, h, w = images.shape  # batch size, _, height, width
     bs = min(bs, max_subplots)  # limit plot images
@@ -1319,41 +1364,79 @@ def plot_images(
                 boxes = ops.xywhr2xyxyxyxy(boxes) if is_obb else ops.xywh2xyxy(boxes)
                 for j, box in enumerate(boxes.astype(np.int64).tolist()):
                     classes_task = classes[j]
-                    plot_labels = []
                     
-                    show_box = labels or (conf is not None and len(conf[j]) > 0 and conf[j, 0] > conf_thres)
+                    # Check confidence threshold (use first/max confidence)
+                    if conf is not None and len(conf) > 0:
+                        max_conf = conf[j].max() if conf[j].size > 0 else 0
+                        show_box = max_conf > conf_thres
+                    else:
+                        show_box = labels  # No conf means ground truth labels
                     
                     if show_box:
-                        for k, class_task in enumerate(classes_task):
-                            class_name = names[k].get(class_task, class_task) if names else class_task
-                            if labels:
-                                label = f"{class_name}"
+                        if show_all_tasks:
+                            plot_labels = []
+                            for k, class_task in enumerate(classes_task):
+                                if names and k < len(names):
+                                    class_name = names[k].get(int(class_task), int(class_task))
+                                else:
+                                    class_name = int(class_task)
+                                
+                                if labels:
+                                    label = f"{class_name}"
+                                else:
+                                    conf_val = conf[j, k] if conf is not None and k < conf[j].size else 0
+                                    label = f"{class_name} {conf_val:.1f}"
+                                plot_labels.append(label)
+                            color = colors(int(classes_task[0]))
+                        else:
+                            if conf is not None and conf[j].size > 1:
+                                best_task_idx = int(np.argmax(conf[j]))
+                                best_conf = conf[j, best_task_idx]
+                                best_class = int(classes_task[best_task_idx])
                             else:
-                                label = f"{class_name} {conf[j, k]:.1f}"
-                            plot_labels.append(label)
-                        color = colors(classes_task[0])
+                                best_task_idx = 0
+                                best_conf = conf[j, 0] if conf is not None and conf[j].size > 0 else 1.0
+                                best_class = int(classes_task[0])
+                            
+                            if names and best_task_idx < len(names):
+                                class_name = names[best_task_idx].get(best_class, best_class)
+                            else:
+                                class_name = best_class
+                            
+                            if labels:
+                                plot_labels = [f"{class_name}"]
+                            else:
+                                plot_labels = [f"{class_name} {best_conf:.2f}"]
+                            
+                            color = colors(best_class)
+                        
                         if plot_labels:
                             annotator.box_label(box, plot_labels, color=color)
 
             elif len(classes):
                 for c in classes:
-                    color = colors(c)
-                    c = names.get(c, c) if names else c
-                    annotator.text((x, y), f"{c}", txt_color=color, box_style=True)
+                    c_val = int(c[0]) if hasattr(c, '__len__') else int(c)
+                    color = colors(c_val)
+                    if names and len(names) > 0:
+                        c_name = names[0].get(c_val, c_val)
+                    else:
+                        c_name = c_val
+                    annotator.text((x, y), f"{c_name}", txt_color=color, box_style=True)
 
             # Plot keypoints
             if len(kpts):
                 kpts_ = kpts[idx].copy()
                 if len(kpts_):
-                    if kpts_[..., 0].max() <= 1.01 or kpts_[..., 1].max() <= 1.01:  # if normalized with tolerance .01
-                        kpts_[..., 0] *= w  # scale to pixels
+                    if kpts_[..., 0].max() <= 1.01 or kpts_[..., 1].max() <= 1.01:
+                        kpts_[..., 0] *= w
                         kpts_[..., 1] *= h
-                    elif scale < 1:  # absolute coords need scale if image scales
+                    elif scale < 1:
                         kpts_ *= scale
                 kpts_[..., 0] += x
                 kpts_[..., 1] += y
                 for j in range(len(kpts_)):
-                    if labels or conf[j] > conf_thres:
+                    conf_val = conf[j].max() if conf is not None and conf[j].size > 0 else 1.0
+                    if labels or conf_val > conf_thres:
                         annotator.kpts(kpts_[j], conf_thres=conf_thres)
 
             # Plot masks
@@ -1369,8 +1452,14 @@ def plot_images(
 
                 im = np.asarray(annotator.im).copy()
                 for j in range(len(image_masks)):
-                    if labels or conf[j] > conf_thres:
-                        color = colors(classes[j])
+                    conf_val = conf[j].max() if conf is not None and conf[j].size > 0 else 1.0
+                    if labels or conf_val > conf_thres:
+                        if not show_all_tasks and conf is not None and conf[j].size > 1:
+                            best_task_idx = int(np.argmax(conf[j]))
+                            c_val = int(classes[j, best_task_idx])
+                        else:
+                            c_val = int(classes[j, 0]) if classes[j].size > 0 else 0
+                        color = colors(c_val)
                         mh, mw = image_masks[j].shape
                         if mh != h or mw != w:
                             mask = image_masks[j].astype(np.uint8)
