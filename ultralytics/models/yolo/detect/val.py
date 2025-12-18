@@ -28,6 +28,7 @@ from ultralytics.utils import LOGGER, ops
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
 from ultralytics.utils.plotting import ValidatorPlotter
+from ultralytics.data.sahi_dataset import SAHIDataset
 
 
 class DetectionValidator(BaseValidator):
@@ -738,6 +739,14 @@ class DetectionValidator(BaseValidator):
             DataLoader instance
         """
         dataset = self.build_dataset(dataset_path, batch=batch_size, mode="val")
+        if isinstance(dataset, SAHIDataset):
+            self.sahi_enabled = True
+            self.sahi_aggregator = SAHICropAggregator(self)
+            self.sahi_aggregator.calculate_expected_crops(dataset)
+            LOGGER.info(f"SAHI validation enabled: {len(dataset.im_files)} images, {len(dataset)} crops")
+        else:
+            self.sahi_enabled = False
+            self.sahi_aggregator = None
         return build_dataloader(dataset, batch_size, self.args.workers, shuffle=False, rank=-1, drop_last=False)
 
     # ==================== Plotting ====================

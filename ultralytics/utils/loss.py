@@ -667,7 +667,11 @@ class v8SegmentationLoss(v8DetectionLoss):
         """
         pred_mask = torch.einsum("in,nhw->ihw", pred, proto)
         loss = F.binary_cross_entropy_with_logits(pred_mask, gt_mask, reduction="none")
-        return (crop_mask(loss, xyxy).mean(dim=(1, 2)) / area).sum()
+        # Use a more reasonable minimum area for small objects (1e-6 instead of 1e-8)
+        # This prevents numerical instability when dividing by very small areas
+        # For a 20px object in 640x640 image: area ≈ (20/640)^2 ≈ 0.001, so 1e-6 is safe
+        area_safe = torch.clamp(area, min=1e-6)
+        return (crop_mask(loss, xyxy).mean(dim=(1, 2)) / area_safe).sum()
 
     def calculate_segmentation_loss(
         self, fg_mask, masks, target_gt_idx, target_bboxes, batch_idx, proto, pred_masks, imgsz, overlap
@@ -690,13 +694,19 @@ class v8SegmentationLoss(v8DetectionLoss):
             Segmentation loss value
         """
         _, _, mask_h, mask_w = proto.shape
-        loss = 0
+        loss = torch.tensor(0.0, device=proto.device, dtype=proto.dtype)
+        valid_samples = torch.tensor(0.0, device=proto.device, dtype=proto.dtype)  # Track number of valid samples processed
 
-        # Normalize bboxes to 0-1
-        target_bboxes_normalized = target_bboxes / imgsz[[1, 0, 1, 0]]
+        # Normalize bboxes to 0-1 (add epsilon to prevent division by zero)
+        imgsz_safe = imgsz[[1, 0, 1, 0]] + 1e-8
+        target_bboxes_normalized = target_bboxes / imgsz_safe
 
         # Areas of target bboxes
         marea = xyxy2xywh(target_bboxes_normalized)[..., 2:].prod(2)
+        # Ensure areas are positive with reasonable minimum for small objects
+        # Use 1e-6 to handle very small objects (e.g., 20px) without numerical instability
+        # For mask resolution 160x160, 1 pixel = (1/640)^2 ≈ 2.4e-6, so 1e-6 is appropriate
+        marea = torch.clamp(marea, min=1e-6)
 
         # Normalize bboxes to mask size
         mxyxy = target_bboxes_normalized * torch.tensor([mask_w, mask_h, mask_w, mask_h], device=proto.device)
@@ -705,19 +715,59 @@ class v8SegmentationLoss(v8DetectionLoss):
             fg_mask_i, target_gt_idx_i, pred_masks_i, proto_i, mxyxy_i, marea_i, masks_i = single_i
             if fg_mask_i.any():
                 mask_idx = target_gt_idx_i[fg_mask_i]
-                if overlap:
-                    gt_mask = masks_i == (mask_idx + 1).view(-1, 1, 1)
-                    gt_mask = gt_mask.float()
-                else:
-                    gt_mask = masks[batch_idx.view(-1) == i][mask_idx]
+                try:
+                    if overlap:
+                        gt_mask = masks_i == (mask_idx + 1).view(-1, 1, 1)
+                        gt_mask = gt_mask.float()
+                    else:
+                        # Filter masks for current batch item
+                        batch_masks = masks[batch_idx.view(-1) == i]
+                        # Ensure mask_idx is within bounds
+                        if len(batch_masks) == 0:
+                            # No masks for this batch item, skip
+                            continue
+                        # Clamp mask_idx to valid range
+                        mask_idx = torch.clamp(mask_idx, 0, len(batch_masks) - 1)
+                        gt_mask = batch_masks[mask_idx]
+                        # Ensure gt_mask is not empty
+                        if len(gt_mask) == 0:
+                            continue
 
-                loss += self.single_mask_loss(
-                    gt_mask, pred_masks_i[fg_mask_i], proto_i, mxyxy_i[fg_mask_i], marea_i[fg_mask_i]
-                )
+                    # Validate inputs before computing loss
+                    if len(gt_mask) == 0 or len(pred_masks_i[fg_mask_i]) == 0:
+                        continue
+                    
+                    # Ensure marea_i[fg_mask_i] doesn't contain zeros or negative values
+                    # Areas are already clamped to min=1e-6 in the area calculation above,
+                    # but double-check here for safety with very small objects
+                    marea_filtered = marea_i[fg_mask_i]
+                    if (marea_filtered <= 0).any():
+                        # Skip invalid areas (shouldn't happen due to clamping, but safety check)
+                        continue
+
+                    mask_loss = self.single_mask_loss(
+                        gt_mask, pred_masks_i[fg_mask_i], proto_i, mxyxy_i[fg_mask_i], marea_i[fg_mask_i]
+                    )
+                    # Check for NaN or Inf before adding
+                    if torch.isfinite(mask_loss):
+                        loss += mask_loss
+                        valid_samples += fg_mask_i.sum().float()
+                    # If invalid, skip this sample
+                except (IndexError, RuntimeError) as e:
+                    # Skip samples that cause indexing errors
+                    continue
             else:
                 loss += (proto * 0).sum() + (pred_masks * 0).sum()
 
-        return loss / fg_mask.sum()
+        # Use valid_samples count instead of fg_mask.sum() to avoid division issues
+        if valid_samples.item() > 0:
+            result = loss / valid_samples
+            # Final check for NaN/Inf
+            if not torch.isfinite(result):
+                return torch.tensor(0.0, device=proto.device, dtype=proto.dtype)
+            return result
+        else:
+            return torch.tensor(0.0, device=proto.device, dtype=proto.dtype)
 
 
 

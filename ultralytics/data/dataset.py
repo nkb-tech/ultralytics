@@ -117,7 +117,7 @@ class YOLODataset(BaseDataset):
                     if scan_dir != current_scan_dir:
                         current_scan_dir = scan_dir
                 desc_prefix = f"{self.prefix}Scanning {current_scan_dir}"
-                if im_file and len(lb):
+                if im_file:
                     ab += len(lb)
                     boxes_pix = lb[:, -4:].copy()
                     boxes_pix[:, [2, 3]] *= shape[1], shape[0]
@@ -144,19 +144,19 @@ class YOLODataset(BaseDataset):
                             "bbox_format": "xywh",
                         }
                     )
-                elif im_file and shape is not None:
-                    x["labels"].append(
-                        {
-                            "im_file": im_file,
-                            "shape": shape,
-                            "cls": np.zeros((0, num_cls_cols), dtype=np.float32),
-                            "bboxes": np.zeros((0, 4), dtype=np.float32),
-                            "segments": [],
-                            "keypoints": None,
-                            "normalized": True,
-                            "bbox_format": "xywh",
-                        }
-                    )
+                # elif im_file and shape is not None:
+                #     x["labels"].append(
+                #         {
+                #             "im_file": im_file,
+                #             "shape": shape,
+                #             "cls": np.zeros((0, num_cls_cols), dtype=np.float32),
+                #             "bboxes": np.zeros((0, 4), dtype=np.float32),
+                #             "segments": [],
+                #             "keypoints": None,
+                #             "normalized": True,
+                #             "bbox_format": "xywh",
+                #         }
+                #     )
                 if msg:
                     msgs.append(msg)
                 stats = f"{nf} images, {nm + ne} backgrounds, {ncpt} corrupt, {fb}/{ab} boxes"
