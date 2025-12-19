@@ -1,8 +1,11 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
+import numpy as np
+import torch
+
 from ultralytics.engine.predictor import BasePredictor
 from ultralytics.engine.results import Results
-from ultralytics.utils import ops
+from ultralytics.utils import LOGGER, ops
 
 
 class DetectionPredictor(BasePredictor):
@@ -20,33 +23,41 @@ class DetectionPredictor(BasePredictor):
         ```
     """
 
-    def postprocess(self, preds, img, orig_imgs):
+    def postprocess(self, preds, img, orig_imgs, nc: list[int] = [80]):
         """Post-processes predictions and returns a list of Results objects."""
-        if not self.nms:
-            m = self.model.model.model[-1]  # detect head
-            is_multitask = isinstance(m.nc, (list, tuple)) and len(m.nc) > 1
-            agnostic = self.args.agnostic_nms or is_multitask
+
+        nhwc = getattr(self.model, "nhwc", False)
+        img_hw = tuple(int(i) for i in (img.shape[1:3] if nhwc else img.shape[2:4]))
+
+        if self.nms: # nms inside the graph
+            if self.engine:
+                preds = ops.process_nms_trt_results(preds, self.output_names)
+            elif self.onnx:
+                preds = ops.process_nms_onnx_results(preds)
+        else:
+            if self.rknn:
+                preds = ops.process_rknn_dfl_results(
+                    input_data=preds,
+                    imgsz=img_hw,
+                    conf_thres=self.args.conf,
+                )
+
+            agnostic = self.args.agnostic_nms or self.is_multitask
             preds = ops.non_max_suppression(
                 preds,
                 self.args.conf,
                 self.args.iou,
                 agnostic=agnostic,
+                nc=self.nc,
                 max_det=self.args.max_det,
                 classes=self.args.classes,
-                nc=m.nc,
             )
-        elif self.engine:
-            preds = ops.process_nms_trt_results(preds, self.output_names)
-        elif self.onnx:
-            preds = ops.process_nms_onnx_results(preds)
-        elif self.rknn:
-            preds = ops.process_nms_rknn_results(preds)
 
         if not isinstance(orig_imgs, list):  # input images are a torch.Tensor, not a list
             orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)
 
         results = []
         for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0]):
-            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
+            pred[:, :4] = ops.scale_boxes(img_hw, pred[:, :4], orig_img.shape)
             results.append(Results(orig_img, path=img_path, names=self.model.names, boxes=pred))
         return results

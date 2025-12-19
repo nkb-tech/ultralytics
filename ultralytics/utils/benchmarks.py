@@ -446,7 +446,7 @@ class ProfileModels:
                 int8=False,
                 export_formats=["onnx", "engine"],
             )
-            >>> profiler.profile()
+            >>> profiler.run()
         """
         self.paths = paths
         self.num_timed_runs = num_timed_runs
@@ -476,7 +476,7 @@ class ProfileModels:
             >>> profiler = ProfileModels(["yolo11n.yaml", "yolov8s.yaml"])
             >>> results = profiler.run()
         """
-        files = self.get_files()
+        files = self._get_files()
 
         if not files:
             LOGGER.warning("No matching files found.")
@@ -492,7 +492,7 @@ class ProfileModels:
                 model_info = model.info()
 
                 for export_format in self.export_formats:
-                    exported_file, _ = model.export(
+                    exported_file = model.export(
                         format=export_format,
                         half=self.half,
                         imgsz=self.imgsz,

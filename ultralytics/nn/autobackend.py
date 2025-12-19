@@ -23,23 +23,62 @@ def check_class_names(names):
     """
     Check class names.
 
-    Map imagenet class codes to human-readable names if required. Convert lists to dicts.
+    Map imagenet class codes to human-readable names if required.
+    Supports multi-task structures (list/tuple of lists or dicts) by normalizing
+    each task independently instead of flattening.
+    
+    Always returns a multi-task structure: list of dicts.
+    If input is old single-task format (list/tuple of str, dict), wraps it in a list.
     """
-    if isinstance(names, list):  # names is a list
-        names = dict(enumerate(names))  # convert to dict
+
+    # Multi-task: list/tuple where each element is its own set of class names
+    if isinstance(names, (list, tuple)):
+        if names and isinstance(names[0], (list, tuple, dict)):
+            # Already multi-task structure - process each task recursively
+            result = []
+            for n in names:
+                processed = check_class_names(n)
+                # processed is already a list (from recursive call), so extend result
+                if isinstance(processed, list):
+                    result.extend(processed)
+                else:
+                    result.append(processed)
+            return result
+        # Old single-task format: list/tuple of strings - convert to dict then wrap in list
+        names = dict(enumerate(names))  # flat single-task list -> dict
+
     if isinstance(names, dict):
+        # If values themselves are nested class definitions, normalize them recursively
+        sample = next(iter(names.values())) if names else None
+        if isinstance(sample, (list, tuple, dict)):
+            # Dict with nested structures - this is a multi-task dict (e.g., {0: {...}, 1: {...}})
+            # Process each task recursively and convert to list of dicts
+            result = []
+            for k, v in sorted(names.items(), key=lambda x: int(x[0])):
+                processed = check_class_names(v)
+                # processed is already a list (from recursive call), so extend result
+                if isinstance(processed, list):
+                    result.extend(processed)
+                else:
+                    result.append(processed)
+            return result
+
         # Convert 1) string keys to int, i.e. '0' to 0, and non-string values to strings, i.e. True to 'True'
         names = {int(k): str(v) for k, v in names.items()}
         n = len(names)
-        if max(names.keys()) >= n:
+        if n and max(names.keys()) >= n:
             raise KeyError(
                 f"{n}-class dataset requires class indices 0-{n - 1}, but you have invalid class indices "
                 f"{min(names.keys())}-{max(names.keys())} defined in your dataset YAML."
             )
-        if isinstance(names[0], str) and names[0].startswith("n0"):  # imagenet class codes, i.e. 'n01440764'
+        if n and isinstance(names[0], str) and names[0].startswith("n0"):  # imagenet class codes, i.e. 'n01440764'
             names_map = YAML.load(ROOT / "cfg/datasets/ImageNet.yaml")["map"]  # human-readable names
             names = {k: names_map[v] for k, v in names.items()}
-    return names
+        # Wrap single-task dict in list to make it multi-task compatible
+        return [names]
+    
+    # If we get here, it's an unexpected type - wrap in list for multi-task compatibility
+    return [names]
 
 
 def default_class_names(data=None):
@@ -87,6 +126,7 @@ class AutoBackend(nn.Module):
         dnn=False,
         data=None,
         fp16=False,
+        int8=False,
         batch=1,
         fuse=True,
         verbose=True,
@@ -100,6 +140,7 @@ class AutoBackend(nn.Module):
             dnn (bool): Use OpenCV DNN module for ONNX inference. Defaults to False.
             data (str | Path | optional): Path to the additional data.yaml file containing class names. Optional.
             fp16 (bool): Enable half-precision inference. Supported only on specific backends. Defaults to False.
+            int8 (bool): Enable int8 inference. Supported only on specific backends. Defaults to False.
             batch (int): Batch-size to assume for inference.
             fuse (bool): Fuse Conv2D + BatchNorm layers for optimization. Defaults to True.
             verbose (bool): Enable verbose logging. Defaults to True.
@@ -131,7 +172,11 @@ class AutoBackend(nn.Module):
         ) = model_types if len(model_types) == 18 else model_types + [False] * (18 - len(model_types))
 
         fp16 &= pt or jit or onnx or xml or engine or nn_module or triton  # FP16
-        nhwc = coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs torch BCWH)
+        int8 &= rknn or jit or onnx & engine # INT8
+        nhwc = rknn or coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs torch BCWH)
+        if int8 and fp16:
+            LOGGER.warning("WARNING ⚠️ int8=True and fp16=True are mutually exclusive, setting fp16=False.")
+            fp16 = False
         stride = 32  # default stride
         model, metadata = None, None
 
@@ -140,6 +185,7 @@ class AutoBackend(nn.Module):
         if cuda and not any([nn_module, pt, jit, engine, onnx]):  # GPU dataloader formats
             device = torch.device("cpu")
             cuda = False
+            LOGGER.warning("WARNING ⚠️ CUDA supported by this format, setting device to CPU.")
 
         # Download if not local
         if not (pt or triton or nn_module):
@@ -163,7 +209,10 @@ class AutoBackend(nn.Module):
             from ultralytics.nn.tasks import attempt_load_weights
 
             model = attempt_load_weights(
-                weights if isinstance(weights, list) else w, device=device, inplace=True, fuse=fuse
+                weights if isinstance(weights, list) else w,
+                device=device,
+                inplace=True,
+                fuse=fuse,
             )
             if hasattr(model, "kpt_shape"):
                 kpt_shape = model.kpt_shape  # pose-only
@@ -406,11 +455,22 @@ class AutoBackend(nn.Module):
             LOGGER.info(f"Loading {w} for RKNN inference...")
             check_requirements("rknn-toolkit-lite2")
             from rknnlite.api import RKNNLite
+            from ultralytics.utils import _restore_standard_logging_names
 
-            rknn = RKNNLite(verbose=False)
+            _restore_standard_logging_names()
+
+            rknn = RKNNLite(
+                verbose=False,
+                verbose_file=None,
+            )
+            w = Path(w)
+            if not w.is_file():  # if not *.rknn
+                w = next(w.rglob("*.rknn"))  # get *.rknn file from *_rknn_model dir
+
             ret = rknn.load_rknn(str(w))
             if ret != 0:
                 LOGGER.error(f"Failed to load RKNN model from {str(w)}")
+            
             ret = rknn.init_runtime(
                 core_mask=RKNNLite.NPU_CORE_AUTO,
                 async_mode=True,
@@ -447,14 +507,22 @@ class AutoBackend(nn.Module):
             nms = metadata["nms"]
             conf = metadata["conf"]
             max_det = metadata["max_det"]
-            kpt_shape = metadata.get("kpt_shape")
+            kpt_shape = metadata.get("kpt_shape", None)
+            int8 = metadata["dtype"] == "uint8"
+            fp16 = metadata["dtype"] == "float16"
+            float32 = metadata["dtype"] == "float32"
+            if not int8 and not fp16 and not float32:
+                LOGGER.warning(f"WARNING ⚠️ Unsupported data type: {metadata['dtype']}. Setting to float32.")
+                int8 = False
+                fp16 = False
+                float32 = True
         elif not (pt or triton or nn_module):
             LOGGER.warning(f"WARNING ⚠️ Metadata not found for 'model={weights}'")
 
         # Check names
         if "names" not in locals():  # names missing
             names = default_class_names(data)
-        
+
         # TODO: Remove this once we have a better way to handle names
         if not(isinstance(names, list) and all(isinstance(n, dict) for n in names)):
             names = check_class_names(names)
@@ -480,10 +548,6 @@ class AutoBackend(nn.Module):
             (tuple): Tuple containing the raw output tensor, and processed output for visualization (if visualize=True)
         """
         b, ch, h, w = im.shape  # batch, channel, height, width
-        if self.fp16 and im.dtype != torch.float16:
-            im = im.half()  # to FP16
-        if self.nhwc:
-            im = im.permute(0, 2, 3, 1)  # torch BCHW to numpy BHWC shape(1,320,192,3)
 
         # PyTorch
         if self.pt or self.nn_module:
@@ -591,12 +655,12 @@ class AutoBackend(nn.Module):
             im = im.cpu().numpy()  # torch to numpy
             y = self.model(im)
 
-        elif self.rknn:
+        elif self.rknn: # nhwc only supported
             im = im.cpu().numpy()
             y = self.model.inference(
                 inputs=[im],
-                data_format="nhwc" if self.nhwc else "nchw",
-                data_type="uint8",
+                data_format="nhwc",
+                data_type="uint8" if self.int8 else "float16" if self.fp16 else "float32",
                 get_frame_id=False,
             )
 
@@ -643,8 +707,6 @@ class AutoBackend(nn.Module):
                     y[1] = np.transpose(y[1], (0, 3, 1, 2))  # should be y = (1, 116, 8400), (1, 32, 160, 160)
             y = [x if isinstance(x, np.ndarray) else x.numpy() for x in y]
 
-        # for x in y:
-        #     print(type(x), len(x)) if isinstance(x, (list, tuple)) else print(type(x), x.shape)  # debug shapes
         if isinstance(y, (list, tuple)):
             if len(self.names) == 999 and (self.task == "segment" or len(y) == 2):  # segments and names not defined
                 ip, ib = (0, 1) if len(y[0].shape) == 4 else (1, 0)  # index of protos, boxes
@@ -677,7 +739,11 @@ class AutoBackend(nn.Module):
 
         warmup_types = self.pt, self.jit, self.onnx, self.engine, self.saved_model, self.pb, self.triton, self.nn_module
         if any(warmup_types) and (self.device.type != "cpu" or self.triton):
-            im = torch.empty(*imgsz, dtype=torch.half if self.fp16 else torch.float, device=self.device)  # input
+            im = torch.empty(
+                *imgsz,
+                dtype=torch.uint8 if self.int8 else torch.half if self.fp16 else torch.float,
+                device=self.device,
+            )  # input
             for _ in range(2 if self.jit else 1):
                 self.forward(im)  # warmup
 

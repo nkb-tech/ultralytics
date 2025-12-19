@@ -62,6 +62,7 @@ RKNN_CHIPS = frozenset(
         "rv1103b",
         "rv1106b",
         "rk2118",
+        "rv1126b",
     }
 )  # Rockchip processors available for export
 HELP_MSG = """
@@ -1367,3 +1368,22 @@ torch.save = torch_save
 if WINDOWS:
     # Apply cv2 patches for non-ASCII and non-UTF characters in image paths
     cv2.imread, cv2.imwrite, cv2.imshow = imread, imwrite, imshow
+
+def _restore_standard_logging_names() -> None:
+    """rknn_log remaps logging levels to single-letter names; restore defaults."""
+
+    if "WARNING" in logging._nameToLevel:
+        return
+
+    level_name_map = {
+        logging.CRITICAL: ("CRITICAL", "FATAL"),
+        logging.ERROR: ("ERROR",),
+        logging.WARNING: ("WARN", "WARNING"),
+        logging.INFO: ("INFO",),
+        logging.DEBUG: ("DEBUG",),
+        logging.NOTSET: ("NOTSET",),
+    }
+
+    for level, names in level_name_map.items():
+        for name in names:
+            logging.addLevelName(level, name)

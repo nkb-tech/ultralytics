@@ -4,7 +4,7 @@ import contextlib
 import math
 import re
 import time
-from typing import List
+from typing import List, Sequence
 
 import cv2
 import numpy as np
@@ -168,7 +168,7 @@ def nms_rotated(boxes, scores, threshold=0.45):
 
 
 def non_max_suppression(
-    prediction,
+    prediction: Tensor,
     conf_thres=0.25,
     iou_thres=0.45,
     classes=None,
@@ -240,8 +240,8 @@ def non_max_suppression(
     nm = prediction.shape[1] - 4 - sum(nc)
 
     # candidate boxes determined by first head confidence only
-    first_nc = nc[0]
-    xc = prediction[:, 4 : 4 + first_nc].amax(1) > conf_thres
+    first_nc = nc[0] or nm
+    xc = prediction[:, 4: 4 + first_nc].amax(1) > conf_thres
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
@@ -314,7 +314,7 @@ def non_max_suppression(
         if agnostic:
             c = torch.zeros_like(j.view(-1, 1))  # No offset for agnostic NMS
         else:
-            if len(nc) > 1:  # Мультитаск
+            if len(nc) > 1:  # multi-task
                 unique_id = j.view(-1, 1)
                 multiplier = nc[0]
                 for head_idx in range(1, len(nc)):
@@ -322,7 +322,7 @@ def non_max_suppression(
                     unique_id = unique_id + attr_class * multiplier
                     multiplier *= nc[head_idx]
                 c = unique_id * max_wh
-            else:  # Одна голова - оригинальная реализация
+            else:  # one head - original implementation
                 c = j.view(-1, 1) * max_wh
         scores = conf
 
@@ -687,3 +687,181 @@ def process_nms_onnx_results(preds: Tensor) -> List[Tensor]:
         outputs.append(yolo_dets[batch_index == i])
 
     return outputs
+
+
+def dfl(position: Tensor) -> Tensor:
+    # Distribution Focal Loss (DFL)
+    n, c, h, w = position.shape
+    p_num = 4
+    mc = c // p_num
+    y = position.view(n, p_num, mc, h, w).softmax(dim=2)
+    bins = torch.arange(mc, device=position.device, dtype=position.dtype).view(1, 1, mc, 1, 1)
+    return (y * bins).sum(2)
+
+
+def box_process(position: Tensor, imgsz: tuple[int, int]) -> Tensor:
+    """
+    Process DFL results into YOLO-style predictions.
+
+    Args:
+        position (Tensor): Tensor containing the DFL results.
+        imgsz (tuple[int, int]): Image size.
+
+    Returns:
+        Tensor: xywh layout shaped (batch, 4, H, W).
+    """
+    device, dtype = position.device, position.dtype
+    grid_h, grid_w = position.shape[2:4]
+    y = torch.arange(grid_h, device=device, dtype=dtype)
+    x = torch.arange(grid_w, device=device, dtype=dtype)
+    grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
+    grid = torch.stack((grid_x, grid_y), dim=0).unsqueeze(0)  # (1,2,H,W) with channel0=x, channel1=y
+    # stride aligns x with width (grid_w) and y with height (grid_h)
+    stride = torch.tensor([imgsz[1] / grid_w, imgsz[0] / grid_h], device=device, dtype=dtype).view(1, 2, 1, 1)
+
+    position = dfl(position)
+    xywh = torch.empty_like(position[:, :4])
+    neg = position[:, 0:2]
+    pos = position[:, 2:4]
+
+    # center = (grid + 0.5) + (pos - neg) / 2
+    xywh[:, 0:2] = (grid + 0.5 + (pos - neg) * 0.5) * stride
+    xywh[:, 2:4] = (neg + pos) * stride
+
+    return xywh
+
+def process_rknn_dfl_results(
+    input_data: List[Tensor],
+    default_branch: int = 3,
+    imgsz: tuple[int, int] = (640, 640),
+    conf_thres: float = 0.01,
+) -> Tensor:
+    """
+    Process RKNN DFL results into YOLO-style predictions.
+
+    Args:
+        input_data (List[Tensor]): List of tensors containing the DFL results.
+        default_branch (int): Number of default branches.
+        imgsz (tuple[int, int]): Image size.
+
+    Returns:
+        Tensor: Tensor shaped (batch, 4 + sum(num_classes), num_boxes) ready for NMS.
+    """
+    boxes, classes_conf, scores_conf = [], [], []
+    pair_per_branch = len(input_data)//default_branch
+    for i in range(default_branch):
+        boxes.append(box_process(input_data[pair_per_branch*i], imgsz=imgsz))
+        classes_conf.append(input_data[pair_per_branch*i+1])
+        scores_conf.append(input_data[pair_per_branch*i+2])
+
+    def sp_flatten(_in: Tensor) -> Tensor:
+        b, ch, h, w = _in.shape
+        return _in.reshape(b, ch, h * w)
+
+    boxes = torch.cat([sp_flatten(_v) for _v in boxes], dim=2)
+    classes_conf = torch.cat([sp_flatten(_v) for _v in classes_conf], dim=2)
+    obj_conf = torch.cat([sp_flatten(_v) for _v in scores_conf], dim=2)
+    # drop cells below objectness threshold while keeping shape
+    keep = (obj_conf >= conf_thres).to(boxes.dtype)
+    boxes = boxes * keep
+    classes_conf = classes_conf * keep
+
+    return torch.cat((boxes, classes_conf), dim=1)
+
+
+# def process_rknn_dfl_results(
+#     preds: list[Tensor],
+#     imgsz: tuple[int, int] = (640, 640),
+#     nc: list[int] = [80],
+# ) -> Tensor:
+#     """
+#     Decode RKNN Detect head outputs (pre-DFL) into YOLO-style predictions using pure torch ops.
+
+#     Args:
+#         preds (list[torch.Tensor]): Outputs collected in `Detect.pre_forward` when
+#             `self.export` and `self.format == "rknn"`. The layout per detection branch is
+#             [box_dist_level_0, cls_head_0_level_0, cls_sum_0_level_0, box_dist_level_1, cls_head_1_level_1, cls_sum_1_level_1, ...].
+#         imgsz (int | tuple[int, int]): Input resolution used during export/inference.
+#         nc (Sequence[int] | int): Number of classes per head (matches `Detect.nc` ordering).
+
+#     Returns:
+#         torch.Tensor: Tensor shaped (batch, 4 + sum(num_classes), num_boxes) ready for NMS.
+#     """
+
+#     if not preds:
+#         return torch.empty(0)
+
+#     device = preds[0].device
+#     dtype = preds[0].dtype
+#     bs = preds[0].shape[0]
+
+#     img_h, img_w = imgsz
+
+#     grid_cache, stride_cache, proj_cache = {}, {}, {}
+
+#     def _get_grid(h, w):
+#         key = (h, w)
+#         if key not in grid_cache:
+#             y = torch.arange(h, device=device, dtype=dtype)
+#             x = torch.arange(w, device=device, dtype=dtype)
+#             grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
+#             grid_cache[key] = torch.stack((grid_x, grid_y), 0).unsqueeze(0)
+#         return grid_cache[key]
+
+#     def _get_stride(h, w):
+#         key = (h, w)
+#         if key not in stride_cache:
+#             stride = torch.tensor([img_w / w, img_h / h], device=device, dtype=dtype).view(1, 2, 1, 1)
+#             stride_cache[key] = stride
+#         return stride_cache[key]
+
+#     def _get_proj(reg_max):
+#         if reg_max not in proj_cache:
+#             proj_cache[reg_max] = torch.arange(reg_max, device=device, dtype=dtype).view(1, 1, reg_max, 1, 1)
+#         return proj_cache[reg_max]
+
+#     boxes_per_branch, cls_per_branch = [], []
+#     idx, n = 0, len(preds)
+#     while idx < n:
+#         box_dist = preds[idx]
+#         idx += 1
+#         h, w = box_dist.shape[2:]
+
+#         cls_candidates = []
+#         while idx < n and preds[idx].shape[2:] == (h, w):
+#             cls_candidates.append(preds[idx])
+#             idx += 1
+
+#         available = cls_candidates.copy()
+#         cls_heads = []
+#         for nc_i in nc:
+#             candidate_idx = next((j for j, t in enumerate(available) if t.shape[1] == nc_i), None)
+#             if candidate_idx is None:
+#                 candidate_idx = next((j for j, t in enumerate(available) if t.shape[1] == 1), None)
+#             if candidate_idx is None:
+#                 raise RuntimeError(f"RKNN branch missing classification tensor with {nc_i} channels at {h}x{w}.")
+#             cls_heads.append(available.pop(candidate_idx))
+
+#         reg_max = box_dist.shape[1] // 4
+#         proj = _get_proj(reg_max)
+#         dist = box_dist.view(bs, 4, reg_max, h, w).softmax(2)
+#         dist = (dist * proj).sum(2)  # (bs, 4, h, w)
+
+#         grid = _get_grid(h, w)
+#         stride = _get_stride(h, w)
+#         center = grid + 0.5
+#         lt = center - dist[:, 0:2]
+#         rb = center + dist[:, 2:4]
+#         xyxy = torch.cat((lt * stride, rb * stride), dim=1)
+
+#         cxy = (xyxy[:, 0:2] + xyxy[:, 2:4]) * 0.5
+#         wh = xyxy[:, 2:4] - xyxy[:, 0:2]
+#         boxes_per_branch.append(torch.cat((cxy, wh), dim=1).view(bs, 4, -1))
+
+#         cls_flat = [head.reshape(bs, head.shape[1], -1) for head in cls_heads]
+#         cls_per_branch.append(torch.cat(cls_flat, dim=1))
+
+#     boxes = torch.cat(boxes_per_branch, dim=2)
+#     scores = torch.cat(cls_per_branch, dim=2)
+
+#     return torch.cat((boxes, scores), dim=1)
