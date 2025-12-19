@@ -97,6 +97,13 @@ class DetectionValidator(BaseValidator):
         # SAHI configuration
         self.sahi_aggregator = None
         self.sahi_enabled = False
+        
+        if self.dataloader is not None and hasattr(self.dataloader, 'dataset'):
+            if isinstance(self.dataloader.dataset, SAHIDataset):
+                self.sahi_enabled = True
+                from ultralytics.models.yolo.detect.sahi_val import SAHICropAggregator
+                self.sahi_aggregator = SAHICropAggregator(self)
+                self.sahi_aggregator.calculate_expected_crops(self.dataloader.dataset)
 
     def init_metrics(self, model):
         """

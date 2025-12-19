@@ -79,6 +79,14 @@ class SegmentationValidator(DetectionValidator):
         self.process = None
         self.args.task = "segment"
         self.metrics = [SegmentMetrics(save_dir=self.save_dir, on_plot=self.on_plot)]
+        
+        if self.dataloader is not None and hasattr(self.dataloader, 'dataset'):
+            from ultralytics.data.sahi_dataset import SAHIDataset
+            if isinstance(self.dataloader.dataset, SAHIDataset):
+                self.sahi_enabled = True
+                from ultralytics.models.yolo.segment.sahi_val import SAHISegmentAggregator
+                self.sahi_aggregator = SAHISegmentAggregator(self)
+                self.sahi_aggregator.calculate_expected_crops(self.dataloader.dataset)
 
     def init_metrics(self, model):
         """
