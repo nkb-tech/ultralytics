@@ -117,9 +117,22 @@ class SegmentationValidator(DetectionValidator):
             self._setup_sahi_segmentation()
 
     def _setup_sahi_segmentation(self):
-        """Setup SAHI mask aggregator for segmentation."""
+        """
+        Setup SAHI mask aggregator for segmentation.
+        
+        Note: The aggregator is typically already set up in get_dataloader().
+        This method serves as a fallback or re-initialization if needed.
+        """
+        # Check if aggregator is already correctly set up
+        from ultralytics.models.yolo.segment.sahi_val import SAHISegmentAggregator
+        if isinstance(self.sahi_aggregator, SAHISegmentAggregator):
+            # Already correctly set up, just initialize tracking variables
+            self._last_raw_preds = None
+            self._last_proto = None
+            return
+        
+        # Fallback: set up aggregator if it wasn't set up correctly
         try:
-            from ultralytics.models.yolo.segment.sahi_val import SAHISegmentAggregator
             self.sahi_aggregator = SAHISegmentAggregator(self)
             if hasattr(self.dataloader, 'dataset'):
                 self.sahi_aggregator.calculate_expected_crops(self.dataloader.dataset)
@@ -136,6 +149,37 @@ class SegmentationValidator(DetectionValidator):
             "Box(P", "R", "mAP50", "mAP50-95)",
             "Mask(P", "R", "mAP50", "mAP50-95)",
         )
+
+    # ==================== Dataset & Dataloader ====================
+
+    def get_dataloader(self, dataset_path, batch_size):
+        """
+        Construct and return dataloader for segmentation validation.
+        
+        Overrides DetectionValidator.get_dataloader to use SAHISegmentAggregator
+        instead of SAHICropAggregator for proper mask handling.
+        
+        Args:
+            dataset_path: Path to dataset
+            batch_size: Batch size
+            
+        Returns:
+            DataLoader instance
+        """
+        from ultralytics.data import build_dataloader
+        from ultralytics.data.sahi_dataset import SAHIDataset
+        from ultralytics.models.yolo.segment.sahi_val import SAHISegmentAggregator
+        
+        dataset = self.build_dataset(dataset_path, batch=batch_size, mode="val")
+        if isinstance(dataset, SAHIDataset):
+            self.sahi_enabled = True
+            self.sahi_aggregator = SAHISegmentAggregator(self)
+            self.sahi_aggregator.calculate_expected_crops(dataset)
+            LOGGER.info(f"SAHI validation enabled: {len(dataset.im_files)} images, {len(dataset)} crops")
+        else:
+            self.sahi_enabled = False
+            self.sahi_aggregator = None
+        return build_dataloader(dataset, batch_size, self.args.workers, shuffle=False, rank=-1, drop_last=False)
 
     # ==================== Data Processing ====================
 
@@ -675,7 +719,11 @@ class SegmentationValidator(DetectionValidator):
             batch_boxes = boxes_model[local_indices]
             batch_coeffs = mask_coeffs_all[det_indices]
             
-            masks_lb = ops.process_mask(proto, batch_coeffs, batch_boxes, shape=imgsz, upsample=True)
+            try:
+                masks_lb = ops.process_mask(proto, batch_coeffs, batch_boxes, shape=imgsz, upsample=True)
+            except Exception as e:
+                LOGGER.warning(f"process_mask failed: {e}, coeffs={batch_coeffs.shape}, proto={proto.shape}, boxes={batch_boxes.shape}")
+                continue
             
             if masks_lb is None or masks_lb.numel() == 0:
                 continue
