@@ -414,12 +414,14 @@ class ProfileModels:
     def __init__(
         self,
         paths: list[str],
-        num_timed_runs: int = 100,
-        num_warmup_runs: int = 10,
-        min_time: float = 60.0,
+        num_timed_runs: int = 20,
+        num_warmup_runs: int = 5,
+        min_time: float = 10.0,
         imgsz: int = 640,
         half: bool = True,
         int8: bool = False,
+        data: Optional[str] = None,
+        task: str = 'detect',
         export_formats: Optional[list[str]] = None,
         device: Optional[Union[torch.device, str]] = None,
     ):
@@ -456,6 +458,8 @@ class ProfileModels:
         self.half = half
         self.int8 = int8
         self.export_formats = export_formats
+        self.task = task
+        self.data = data
 
         try:
             device = select_device(device)
@@ -477,17 +481,14 @@ class ProfileModels:
             >>> results = profiler.run()
         """
         files = self._get_files()
-
-        if not files:
-            LOGGER.warning("No matching files found.")
-            return
-        else:
-            LOGGER.info(f"Profiling: {files}")
+        print(files)
+        exportable_formats = {".pt", ".yaml", ".yml"}
 
         table_rows, output = [], []
         for file in files:
-            if file.suffix in {".pt", ".yaml", ".yml"}:
-                model = YOLO(str(file))
+            if file.suffix in exportable_formats:
+                # Source model files: export to each format, then benchmark
+                model = YOLO(str(file), task=self.task)
                 model.fuse()  # to report correct params and GFLOPs in model.info()
                 model_info = model.info()
 
@@ -495,6 +496,8 @@ class ProfileModels:
                     exported_file = model.export(
                         format=export_format,
                         half=self.half,
+                        int8=self.int8,
+                        data=self.data,
                         imgsz=self.imgsz,
                         device=self.device,
                         simplify=True,
@@ -502,63 +505,81 @@ class ProfileModels:
                         batch=1,
                         dynamic=False,
                     )
-
                     t_export_format = self.profile_export_format(exported_file)
-                    table_rows.append(self.generate_table_row(file.stem, t_export_format, model_info))
-                    output.append(self.generate_results_dict(file.stem, t_export_format, model_info))
+                    full_format = export_format + (" half" if self.half else " int8")
+                    table_rows.append(self.generate_table_row(file.stem, full_format, t_export_format, model_info))
+                    output.append(self.generate_results_dict(file.stem, full_format, t_export_format, model_info))
+            else:
+                # Pre-exported format files (.rknn, .onnx, .engine, etc.): benchmark directly
+                t_export_format = self.profile_export_format(str(file))
+                model_info = (0, 0, 0, 0)  # layers, params, gradients, flops not available
+                table_rows.append(self.generate_table_row(file.stem[:10], '', t_export_format, model_info))
+                output.append(self.generate_results_dict(file.stem[:10], '', t_export_format, model_info))
 
         self.print_table(table_rows)
         return output
-    
-    def profile_export_format(self, exported_file: str, eps: float = 1e-3):
-        """Profile YOLO model performance with TensorRT, measuring average run time and standard deviation.
+
+    def profile_export_format(self, exported_file, eps: float = 1e-3):
+        """Profile YOLO model performance, measuring average run time and standard deviation.
 
         Args:
-            engine_file (str): Path to the TensorRT engine file.
+            exported_file (str | tuple): Path to the exported model file, or tuple where first element is the path.
             eps (float): Small epsilon value to prevent division by zero.
 
         Returns:
-            mean_time (float): Mean inference time in milliseconds.
-            std_time (float): Standard deviation of inference time in milliseconds.
+            tuple: Three tuples containing (mean, std) for inference, preprocess, and postprocess times in ms.
         """
-        if not Path(exported_file).is_file():
+        # Handle tuple case (e.g., some exports return (path, metadata))
+        if isinstance(exported_file, tuple):
+            exported_file = exported_file[0]
+
+        # Check for file or directory (RKNN exports return a folder path)
+        if not exported_file or not (Path(exported_file).is_file() or Path(exported_file).is_dir()):
             LOGGER.warning(f"File {exported_file} not found.")
-            return 0.0, 0.0
+            return (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)
 
-        # Model and input
-        model = YOLO(engine_file)
-        input_data = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)  # use uint8 for Classify
+        try:
+            # Model and input
+            model = YOLO(exported_file, task=self.task)
+            input_data = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)  # use uint8 for Classify
 
-        # Warmup runs
-        elapsed = 0.0
-        for _ in range(3):
-            start_time = time.time()
-            for _ in range(self.num_warmup_runs):
-                _ = model(input_data, imgsz=self.imgsz, verbose=False)
-            elapsed = time.time() - start_time
+            # Warmup runs
+            elapsed = 0.0
+            for _ in range(3):
+                start_time = time.time()
+                for _ in range(self.num_warmup_runs):
+                    _ = model.predict(input_data, imgsz=self.imgsz, verbose=False)
+                elapsed = time.time() - start_time
 
-        # Compute number of runs as higher of min_time or num_timed_runs
-        num_runs = max(round(self.min_time / (elapsed + eps) * self.num_warmup_runs), self.num_timed_runs * 50)
+            # Compute number of runs as higher of min_time or num_timed_runs
+            num_runs = max(round(self.min_time / (elapsed + eps) * self.num_warmup_runs), self.num_timed_runs * 50)
 
-        # Timed runs
-        run_times = []
-        for _ in TQDM(range(num_runs), desc=exported_file):
-            results = model(input_data, imgsz=self.imgsz, verbose=False)
-            run_times.append(results[0].speed["inference"])  # Convert to milliseconds
+            # Timed runs
+            run_times, preprocess_times, postprocess_times = [], [], []
+            for _ in TQDM(range(num_runs), desc=str(exported_file)):
+                results = model.predict(input_data, imgsz=self.imgsz, verbose=False)
+                run_times.append(results[0].speed["inference"])
+                preprocess_times.append(results[0].speed["preprocess"])
+                postprocess_times.append(results[0].speed["postprocess"])
 
-        run_times = self.iterative_sigma_clipping(np.array(run_times), sigma=2, max_iters=3)  # sigma clipping
-        return np.mean(run_times), np.std(run_times)
-
+            run_times = self.iterative_sigma_clipping(np.array(run_times), sigma=2, max_iters=3)
+            preprocess_times = self.iterative_sigma_clipping(np.array(preprocess_times), sigma=2, max_iters=3)
+            postprocess_times = self.iterative_sigma_clipping(np.array(postprocess_times), sigma=2, max_iters=3)
+            return (
+                (np.mean(run_times), np.std(run_times)),
+                (np.mean(preprocess_times), np.std(preprocess_times)),
+                (np.mean(postprocess_times), np.std(postprocess_times)),
+            )
+        except Exception as e:
+            LOGGER.warning(f"Failed to profile {exported_file}: {e}")
+            return (0.0, 0.0), (0.0, 0.0), (0.0, 0.0)
 
     def _get_files(self):
         """Returns a list of paths for all relevant model files given by the user."""
         files = []
         for path in self.paths:
             path = Path(path)
-            if path.is_dir():
-                extensions = ["*.pt", "*.yaml"]
-                files.extend([file for ext in extensions for file in glob.glob(str(path / ext))])
-            elif path.suffix in {".pt", ".yaml", ".yml"}:  # add non-existing
+            if path.suffix in {".pt", ".yaml", ".yml"}:  # add non-existing
                 files.append(str(path))
             else:
                 files.extend(glob.glob(str(path)))
@@ -586,171 +607,68 @@ class ProfileModels:
             data = clipped_data
         return data
 
-    def profile_tensorrt_model(self, engine_file: str, eps: float = 1e-3):
-        """Profile YOLO model performance with TensorRT, measuring average run time and standard deviation.
-
-        Args:
-            engine_file (str): Path to the TensorRT engine file.
-            eps (float): Small epsilon value to prevent division by zero.
-
-        Returns:
-            mean_time (float): Mean inference time in milliseconds.
-            std_time (float): Standard deviation of inference time in milliseconds.
-        """
-        if not self.trt or not Path(engine_file).is_file():
-            return 0.0, 0.0
-
-        # Model and input
-        model = YOLO(engine_file)
-        input_data = np.zeros((self.imgsz, self.imgsz, 3), dtype=np.uint8)  # use uint8 for Classify
-
-        # Warmup runs
-        elapsed = 0.0
-        for _ in range(3):
-            start_time = time.time()
-            for _ in range(self.num_warmup_runs):
-                model(input_data, imgsz=self.imgsz, verbose=False)
-            elapsed = time.time() - start_time
-
-        # Compute number of runs as higher of min_time or num_timed_runs
-        num_runs = max(round(self.min_time / (elapsed + eps) * self.num_warmup_runs), self.num_timed_runs * 50)
-
-        # Timed runs
-        run_times = []
-        for _ in TQDM(range(num_runs), desc=engine_file):
-            results = model(input_data, imgsz=self.imgsz, verbose=False)
-            run_times.append(results[0].speed["inference"])  # Convert to milliseconds
-
-        run_times = self.iterative_sigma_clipping(np.array(run_times), sigma=2, max_iters=3)  # sigma clipping
-        return np.mean(run_times), np.std(run_times)
-
     @staticmethod
     def check_dynamic(tensor_shape):
         """Check whether the tensor shape in the ONNX model is dynamic."""
         return not all(isinstance(dim, int) and dim >= 0 for dim in tensor_shape)
 
-    def profile_onnx_model(self, onnx_file: str, eps: float = 1e-3):
-        """Profile an ONNX model, measuring average inference time and standard deviation across multiple runs.
-
-        Args:
-            onnx_file (str): Path to the ONNX model file.
-            eps (float): Small epsilon value to prevent division by zero.
-
-        Returns:
-            mean_time (float): Mean inference time in milliseconds.
-            std_time (float): Standard deviation of inference time in milliseconds.
-        """
-        check_requirements([("onnxruntime", "onnxruntime-gpu")])  # either package meets requirements
-        import onnxruntime as ort
-
-        # Session with either 'TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider'
-        sess_options = ort.SessionOptions()
-        sess_options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        sess_options.intra_op_num_threads = 8  # Limit the number of threads
-        sess = ort.InferenceSession(onnx_file, sess_options, providers=["CPUExecutionProvider"])
-
-        input_data_dict = {}
-        for input_tensor in sess.get_inputs():
-            input_type = input_tensor.type
-            if self.check_dynamic(input_tensor.shape):
-                if len(input_tensor.shape) != 4 and self.check_dynamic(input_tensor.shape[1:]):
-                    raise ValueError(f"Unsupported dynamic shape {input_tensor.shape} of {input_tensor.name}")
-                input_shape = (
-                    (1, 3, self.imgsz, self.imgsz) if len(input_tensor.shape) == 4 else (1, *input_tensor.shape[1:])
-                )
-            else:
-                input_shape = input_tensor.shape
-
-            # Mapping ONNX datatype to numpy datatype
-            if "float16" in input_type:
-                input_dtype = np.float16
-            elif "float" in input_type:
-                input_dtype = np.float32
-            elif "double" in input_type:
-                input_dtype = np.float64
-            elif "int64" in input_type:
-                input_dtype = np.int64
-            elif "int32" in input_type:
-                input_dtype = np.int32
-            else:
-                raise ValueError(f"Unsupported ONNX datatype {input_type}")
-
-            input_data = np.random.rand(*input_shape).astype(input_dtype)
-            input_name = input_tensor.name
-            input_data_dict[input_name] = input_data
-
-        output_name = sess.get_outputs()[0].name
-
-        # Warmup runs
-        elapsed = 0.0
-        for _ in range(3):
-            start_time = time.time()
-            for _ in range(self.num_warmup_runs):
-                sess.run([output_name], input_data_dict)
-            elapsed = time.time() - start_time
-
-        # Compute number of runs as higher of min_time or num_timed_runs
-        num_runs = max(round(self.min_time / (elapsed + eps) * self.num_warmup_runs), self.num_timed_runs)
-
-        # Timed runs
-        run_times = []
-        for _ in TQDM(range(num_runs), desc=onnx_file):
-            start_time = time.time()
-            sess.run([output_name], input_data_dict)
-            run_times.append((time.time() - start_time) * 1000)  # Convert to milliseconds
-
-        run_times = self.iterative_sigma_clipping(np.array(run_times), sigma=2, max_iters=5)  # sigma clipping
-        return np.mean(run_times), np.std(run_times)
-
     def generate_table_row(
         self,
         model_name: str,
-        t_onnx: tuple[float, float],
-        t_engine: tuple[float, float],
+        format_name: str,
+        t_format: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
         model_info: tuple[float, float, float, float],
     ):
         """Generate a table row string with model performance metrics.
 
         Args:
             model_name (str): Name of the model.
-            t_onnx (tuple): ONNX model inference time statistics (mean, std).
-            t_engine (tuple): TensorRT engine inference time statistics (mean, std).
+            format_name (str): Name of the export format (e.g., 'onnx', 'engine', 'rknn').
+            t_format (tuple): Three tuples of (mean, std) for inference, preprocess, postprocess times.
             model_info (tuple): Model information (layers, params, gradients, flops).
 
         Returns:
             (str): Formatted table row string with model metrics.
         """
+        t_inference, t_preprocess, t_postprocess = t_format
         _layers, params, _gradients, flops = model_info
+        speed_str = f"{t_inference[0]:.2f}±{t_inference[1]:.2f}"
+        pre_str = f"{t_preprocess[0]:.2f}"
+        post_str = f"{t_postprocess[0]:.2f}"
         return (
-            f"| {model_name:18s} | {self.imgsz} | - | {t_onnx[0]:.1f}±{t_onnx[1]:.1f} ms | {t_engine[0]:.1f}±"
-            f"{t_engine[1]:.1f} ms | {params / 1e6:.1f} | {flops:.1f} |"
+            f"| {model_name:15s} | {format_name:10s} | {self.imgsz:^9} | {speed_str:^17} | "
+            f"{pre_str:^8} | {post_str:^9} | {params / 1e6:^10.1f} | {flops:^9.1f} |"
         )
 
     @staticmethod
     def generate_results_dict(
         model_name: str,
-        t_onnx: tuple[float, float],
-        t_engine: tuple[float, float],
+        format_name: str,
+        t_format: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
         model_info: tuple[float, float, float, float],
     ):
         """Generate a dictionary of profiling results.
 
         Args:
             model_name (str): Name of the model.
-            t_onnx (tuple): ONNX model inference time statistics (mean, std).
-            t_engine (tuple): TensorRT engine inference time statistics (mean, std).
+            format_name (str): Name of the export format (e.g., 'onnx', 'engine', 'rknn').
+            t_format (tuple): Three tuples of (mean, std) for inference, preprocess, postprocess times.
             model_info (tuple): Model information (layers, params, gradients, flops).
 
         Returns:
             (dict): Dictionary containing profiling results.
         """
+        t_inference, t_preprocess, t_postprocess = t_format
         _layers, params, _gradients, flops = model_info
         return {
             "model/name": model_name,
+            "model/format": format_name,
             "model/parameters": params,
             "model/GFLOPs": round(flops, 3),
-            "model/speed_ONNX(ms)": round(t_onnx[0], 3),
-            "model/speed_TensorRT(ms)": round(t_engine[0], 3),
+            f"model/speed_{format_name}(ms)": round(t_inference[0], 3),
+            f"model/speed_{format_name}_std(ms)": round(t_inference[1], 3),
+            f"model/preprocess_{format_name}(ms)": round(t_preprocess[0], 3),
+            f"model/postprocess_{format_name}(ms)": round(t_postprocess[0], 3),
         }
 
     @staticmethod
@@ -760,20 +678,24 @@ class ProfileModels:
         Args:
             table_rows (list[str]): List of formatted table row strings.
         """
-        gpu = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "GPU"
         headers = [
-            "Model",
-            "size<br><sup>(pixels)",
-            "mAP<sup>val<br>50-95",
-            f"Speed<br><sup>CPU ({get_cpu_info()}) ONNX<br>(ms)",
-            f"Speed<br><sup>{gpu} TensorRT<br>(ms)",
-            "params<br><sup>(M)",
-            "FLOPs<br><sup>(B)",
+            ("Model", 15),
+            ("Format", 10),
+            ("Size (px)", 9),
+            ("Inference (ms)", 17),
+            ("Pre (ms)", 8),
+            ("Post (ms)", 9),
+            ("Params (M)", 10),
+            ("FLOPs (B)", 9),
         ]
-        header = "|" + "|".join(f" {h} " for h in headers) + "|"
-        separator = "|" + "|".join("-" * (len(h) + 2) for h in headers) + "|"
+        header = "|" + "|".join(f" {h:^{w}} " for h, w in headers) + "|"
+        separator = "|" + "|".join("-" * (w + 2) for _, w in headers) + "|"
+        total_width = 1 + sum(w + 2 for _, w in headers) + len(headers)
+        border = "-" * total_width
 
-        LOGGER.info(f"\n\n{header}")
+        LOGGER.info(f"\n\n{border}")
+        LOGGER.info(header)
         LOGGER.info(separator)
         for row in table_rows:
             LOGGER.info(row)
+        LOGGER.info(border)

@@ -1460,7 +1460,7 @@ def guess_model_task(model):
 
     # Unable to determine task from model
     LOGGER.warning(
-        "WARNING ⚠️ Unable t automatically guess model task, assuming 'task=detect'. "
+        "WARNING ⚠️ Unable automatically guess model task, assuming 'task=detect'. "
         "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify','pose' or 'obb'."
     )
     return "detect"  # assume detect

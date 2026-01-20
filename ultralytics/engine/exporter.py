@@ -557,7 +557,7 @@ class Exporter:
         if imx:
             f[13] = self.export_imx()
         if rknn:
-            f[14] = self.export_rknn()
+            f[14], _ = self.export_rknn()
         if executorch:
             f[15] = self.export_executorch()
 
@@ -1483,7 +1483,7 @@ class Exporter:
             compress_weight=False,
             enable_flash_attention=False,
             remove_reshape=False,
-            single_core_mode=False,
+            single_core_mode=True,
             custom_string=self.pretty_name,
             dynamic_input=dynamic_input,
             **kwargs,
@@ -1506,10 +1506,16 @@ class Exporter:
             if ret != 0:
                 LOGGER.error(f'{prefix} Hybrid quantization step1 failed! Error code: {ret}')
                 return f, None
+            # Move generated files from CWD to export_path (hybrid_quantization_step1 outputs to CWD)
+            onnx_stem = Path(f).stem
+            for ext in [".model", ".data", ".quantization.cfg"]:
+                src = Path(onnx_stem + ext)
+                if src.exists():
+                    src.rename(export_path / src.name)
             ret = rknn.hybrid_quantization_step2(
-                model_input=f.replace(".onnx", ".model"),
-                data_input=f.replace(".onnx", ".data"),
-                model_quantization_cfg=f.replace(".onnx", ".quantization.cfg"),
+                model_input=str(export_path / f"{onnx_stem}.model"),
+                data_input=str(export_path / f"{onnx_stem}.data"),
+                model_quantization_cfg=str(export_path / f"{onnx_stem}.quantization.cfg"),
             )
             if ret != 0:
                 LOGGER.error(f'{prefix} Hybrid quantization step2 failed! Error code: {ret}')
@@ -1545,7 +1551,7 @@ class Exporter:
         if snapshot_path.exists():
             snapshot_path.rename(export_path / 'snapshot')
         YAML.save(export_path / "metadata.yaml", self.metadata)
-        return f, None
+        return str(export_path), None
 
     @try_export
     def export_ncnn(self, prefix=colorstr("NCNN:")):
