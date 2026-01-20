@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 
 from ultralytics import YOLO
-from ultralytics.utils import LOGGER, yaml_load
+from ultralytics.utils import LOGGER, YAML
 from ultralytics.utils.checks import check_imshow, check_requirements
 
 check_requirements("shapely>=2.0.0")
@@ -25,7 +25,7 @@ class BaseSolution:
         Child classes should call this with necessary parameters.
         """
         # Load config and update with args
-        self.CFG = yaml_load(DEFAULT_SOL_CFG_PATH)
+        self.CFG = YAML.load(DEFAULT_SOL_CFG_PATH)
         self.CFG.update(kwargs)
         LOGGER.info(f"Ultralytics Solutions: ✅ {self.CFG}")
 

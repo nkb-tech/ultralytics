@@ -7,7 +7,7 @@ import numpy as np
 import onnxruntime as ort
 import torch
 
-from ultralytics.utils import ASSETS, yaml_load
+from ultralytics.utils import ASSETS, YAML
 from ultralytics.utils.checks import check_requirements, check_yaml
 
 
@@ -30,7 +30,7 @@ class YOLOv8:
         self.iou_thres = iou_thres
 
         # Load the class names from the COCO dataset
-        self.classes = yaml_load(check_yaml("coco8.yaml"))["names"]
+        self.classes = YAML.load(check_yaml("coco8.yaml"))["names"]
 
         # Generate a color palette for the classes
         self.color_palette = np.random.uniform(0, 255, size=(len(self.classes), 3))
@@ -69,7 +69,11 @@ class YOLOv8:
 
         # Draw a filled rectangle as the background for the label text
         cv2.rectangle(
-            img, (label_x, label_y - label_height), (label_x + label_width, label_y + label_height), color, cv2.FILLED
+            img,
+            (label_x, label_y - label_height),
+            (label_x + label_width, label_y + label_height),
+            color,
+            cv2.FILLED,
         )
 
         # Draw the label text on the image

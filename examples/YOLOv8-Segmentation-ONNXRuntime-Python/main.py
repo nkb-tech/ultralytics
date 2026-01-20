@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-from ultralytics.utils import ASSETS, yaml_load
+from ultralytics.utils import ASSETS, YAML
 from ultralytics.utils.checks import check_yaml
 from ultralytics.utils.plotting import Colors
 
@@ -36,7 +36,7 @@ class YOLOv8Seg:
         self.model_height, self.model_width = [x.shape for x in self.session.get_inputs()][0][-2:]
 
         # Load COCO class names
-        self.classes = yaml_load(check_yaml("coco8.yaml"))["names"]
+        self.classes = YAML.load(check_yaml("coco8.yaml"))["names"]
 
         # Create color palette
         self.color_palette = Colors()

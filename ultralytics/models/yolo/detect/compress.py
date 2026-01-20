@@ -24,7 +24,7 @@ from ultralytics.data.utils import check_cls_dataset, check_det_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel, yaml_model_load
-from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK, TQDM, clean_url, colorstr, emojis, yaml_save, callbacks, __version__
+from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK, TQDM, clean_url, colorstr, emojis, YAML, callbacks, __version__
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import unwrap_model, torch_distributed_zero_first
 from ultralytics.utils.checks import check_imgsz, print_args, check_amp
@@ -334,7 +334,7 @@ class DetectionCompressor(BaseTrainer):
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
             (self.save_dir / 'visual').mkdir(parents=True, exist_ok=True)  # make dir
             self.args.save_dir = str(self.save_dir)
-            yaml_save(self.save_dir / 'args.yaml', vars(self.args))  # save run args
+            YAML.save(self.save_dir / 'args.yaml', vars(self.args))  # save run args
         self.last, self.best = self.wdir / 'last.pt', self.wdir / 'starnet_pruned.pt'  # checkpoint paths
         self.save_period = self.args.save_period
 
