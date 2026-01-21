@@ -411,9 +411,17 @@ class SegmentationModel(DetectionModel):
         """Initialize YOLOv8 segmentation model with given config and parameters."""
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self, weights=None):
+    def init_criterion(self, weights=None, clf_loss_weights=None, **kwargs):
         """Initialize the loss criterion for the SegmentationModel."""
-        return E2ESegmentLoss(self) if getattr(self, "end2end", False) else v8SegmentationLoss(self)
+        return E2ESegmentLoss(self) if getattr(self, "end2end", False) else v8SegmentationLoss(
+            self,
+            clf_loss_weights=clf_loss_weights,
+            clf_loss_fn=self.args.clf_loss_fn if hasattr(self.args, 'clf_loss_fn') else "bce",
+            iou_loss_fn=self.args.iou_loss_fn if hasattr(self.args, 'iou_loss_fn') else "ciou",
+            nwd_loss=self.args.nwd_loss if hasattr(self.args, 'nwd_loss') else False,
+            use_wiseiou=self.args.use_wiseiou if hasattr(self.args, 'use_wiseiou') else False,
+        )
+
 
 
 class PoseModel(DetectionModel):

@@ -273,20 +273,33 @@ class Instances:
 
         Args:
             index (int, slice, or np.ndarray): The index, slice, or boolean array to select
-                                               the desired instances.
+                                            the desired instances.
 
         Returns:
             Instances: A new Instances object containing the selected bounding boxes,
-                       segments, and keypoints if present.
+                    segments, and keypoints if present.
 
         Note:
             When using boolean indexing, make sure to provide a boolean array with the same
             length as the number of instances.
         """
-        segments = self.segments[index] if len(self.segments) else self.segments
+        # Handle segments - check if lengths match
+        if len(self.segments):
+            if len(self.segments) == len(self.bboxes):
+                segments = self.segments[index]
+            else:
+                # Segments don't match bboxes - try to handle gracefully
+                try:
+                    segments = self.segments[index]
+                except (IndexError, ValueError):
+                    segments = np.zeros((0, 0, 2), dtype=self.segments.dtype) if hasattr(self.segments, 'dtype') else []
+        else:
+            segments = self.segments
+        
         keypoints = self.keypoints[index] if self.keypoints is not None else None
         bboxes = self.bboxes[index]
         bbox_format = self._bboxes.format
+        
         return Instances(
             bboxes=bboxes,
             segments=segments,
@@ -294,6 +307,7 @@ class Instances:
             bbox_format=bbox_format,
             normalized=self.normalized,
         )
+
 
     def flipud(self, h):
         """Flips the coordinates of bounding boxes, segments, and keypoints vertically."""

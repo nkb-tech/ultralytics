@@ -25,11 +25,11 @@ from ultralytics.data.loaders import (
     SourceTypes,
     autocast_list,
 )
-from ultralytics.data.sahi_dataset import SAHIDataset
 from ultralytics.data.utils import IMG_FORMATS, PIN_MEMORY, VID_FORMATS
 from ultralytics.utils import LOGGER, RANK, colorstr
 from ultralytics.utils.checks import check_file
-
+from ultralytics.data.sahi_sampler import SAHIBatchSampler
+from ultralytics.data.sahi_dataset import SAHIDataset
 
 class InfiniteDataLoader(dataloader.DataLoader):
     """
@@ -104,23 +104,33 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
     else:
         dataset = YOLODataset
 
+    # SAHI-specific arguments
+    sahi_kwargs = {}
     if cfg.sahi:
-        cut_strategy = cfg.train_cut_strategy if mode == "train" else cfg.val_cut_strategy
-    else:
-        cut_strategy = None
-
+        sahi_kwargs = {
+            "cut_strategy": cfg.train_cut_strategy if mode == "train" else cfg.val_cut_strategy,
+            "crop_size": cfg.crop_size,
+            "overlap_ratio": cfg.overlap_ratio,
+            "sampling_rate": cfg.sampling_rate,
+            "crop_threshold": getattr(cfg, "crop_threshold", 1024),
+            "bg_crop_prob": getattr(cfg, "bg_crop_prob", 0.4),
+            "scale_range": getattr(cfg, "scale_range", (1, 1)),
+            "erosion_factor": getattr(cfg, "erosion_factor", 0.0),
+            "full_image_prob": getattr(cfg, "full_image_prob", 0.0),
+            "keep_sahi_images": getattr(cfg, "keep_sahi_images", False),
+            "min_object_coverage": getattr(cfg, "min_object_coverage", 0.3),
+            "object_crop_prob": getattr(cfg, "object_crop_prob", 0.7),
+            "buffer_size": getattr(cfg, "buffer_size", 50),
+            "crop_usage_threshold": getattr(cfg, "crop_usage_threshold", 0.8),
+        }
+    
     return dataset(
         img_path=img_path,
         imgsz=cfg.imgsz,
         batch_size=batch,
-        cut_strategy=cut_strategy,
-        sampling_rate=cfg.sampling_rate,
-        crop_size=cfg.crop_size,
-        overlap_ratio=cfg.overlap_ratio,
-        augment=mode == "train",  # augmentation
-        sahi=cfg.sahi,
-        hyp=cfg,  # TODO: probably add a get_hyps_from_cfg function
-        rect=(cfg.rect or rect) and not cfg.sahi,  # rectangular batches
+        augment=mode == "train",
+        hyp=cfg,
+        rect=cfg.rect or rect,
         cache=cfg.cache or None,
         single_cls=cfg.single_cls or False,
         stride=int(stride),
@@ -130,8 +140,8 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         classes=cfg.classes,
         data=data,
         fraction=cfg.fraction if mode == "train" else 1.0,
+        **sahi_kwargs,
     )
-
 
 def build_grounding(cfg, img_path, json_file, batch, mode="train", rect=False, stride=32):
     """Build YOLO Dataset."""
@@ -158,11 +168,42 @@ def build_grounding(cfg, img_path, json_file, batch, mode="train", rect=False, s
 def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, drop_last=False):
     """Return an InfiniteDataLoader or DataLoader for training or validation set."""
     batch = min(batch, len(dataset))
-    nd = torch.cuda.device_count()  # number of CUDA devices
-    nw = min(os.cpu_count() // max(nd, 1), workers)  # number of workers
-    sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
+    nd = torch.cuda.device_count()
+    nw = min(os.cpu_count() // max(nd, 1), workers)
+    
+    # Check if this is a SAHI dataset
+    is_sahi = isinstance(dataset, SAHIDataset)
+    
+    if is_sahi and shuffle:
+        # Use SAHI-optimized sampler for better buffer efficiency
+        if rank == -1:
+            # Single GPU - use batch sampler
+            sampler = None
+            batch_sampler = SAHIBatchSampler(
+                dataset.slice_indices,
+                batch_size=batch,
+                drop_last=drop_last and len(dataset) % batch != 0,
+                shuffle=shuffle,
+            )
+            
+            generator = torch.Generator()
+            generator.manual_seed(6148914691236517205 + RANK)
+            
+            return InfiniteDataLoader(
+                dataset=dataset,
+                batch_sampler=batch_sampler,
+                num_workers=nw,
+                pin_memory=PIN_MEMORY,
+                collate_fn=getattr(dataset, "collate_fn", None),
+                worker_init_fn=seed_worker,
+                generator=generator,
+            )
+    else:
+        # Standard sampler for non-SAHI or non-shuffle
+        sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
+    
     generator = torch.Generator()
-    generator.manual_seed(6148914691236517205 + RANK)
+    generator.manual_seed(6148914691236517205 + RANK)   
     return InfiniteDataLoader(
         dataset=dataset,
         batch_size=batch,
@@ -175,7 +216,6 @@ def build_dataloader(dataset, batch, workers, shuffle=True, rank=-1, drop_last=F
         generator=generator,
         drop_last=drop_last and len(dataset) % batch != 0,
     )
-
 
 def check_source(source):
     """Check source type and return corresponding flag values."""

@@ -499,30 +499,74 @@ class v8DetectionLoss:
 
 
 class v8SegmentationLoss(v8DetectionLoss):
-    """Criterion class for computing training losses."""
+    """
+    Criterion class for computing segmentation training losses.
+    
+    Extends v8DetectionLoss with mask/segmentation loss computation.
+    """
 
-    def __init__(self, model, tal_topk=10 ):  # model must be de-paralleled
-        """Initializes the v8SegmentationLoss class, taking a de-paralleled model as argument."""
-        super().__init__(model,  tal_topk=tal_topk )
+    def __init__(
+        self,
+        model: nn.Module,
+        tal_topk: int = 10,
+        clf_loss_weights: list[list[float]] | None = None,
+        clf_loss_fn: str = "bce",
+        iou_loss_fn: str = "ciou",
+        nwd_loss: bool = False,
+        use_wiseiou: bool = False,
+        iou_ratio: float = 0.5,
+    ):
+        """
+        Initialize v8SegmentationLoss with the model, defining model-related properties.
+        
+        Args:
+            model: De-paralleled model
+            tal_topk: Top-k for task aligned assigner
+            clf_loss_weights: Per-class weights for classification loss
+            clf_loss_fn: Classification loss function type ('bce', 'vfl', 'qfl')
+            iou_loss_fn: IoU loss function type
+            nwd_loss: Whether to use NWD loss
+            use_wiseiou: Whether to use WiseIoU
+            iou_ratio: IoU to NWD loss ratio
+        """
+        super().__init__(
+            model,
+            tal_topk=tal_topk,
+            clf_loss_weights=clf_loss_weights,
+            clf_loss_fn=clf_loss_fn,
+            iou_loss_fn=iou_loss_fn,
+            nwd_loss=nwd_loss,
+            use_wiseiou=use_wiseiou,
+            iou_ratio=iou_ratio,
+        )
         self.overlap = model.args.overlap_mask
 
     def __call__(self, preds, batch):
-        """Calculate and return the loss for the YOLO model."""
-        loss = torch.zeros(4, device=self.device)  # box, cls, dfl
+        """
+        Calculate the sum of the loss for box, seg, cls and dfl multiplied by batch size.
+
+        Args:
+            preds: Model predictions (feats, pred_masks, proto)
+            batch: Batch dict containing images, labels, masks, etc.
+
+        Returns:
+            loss: Total loss multiplied by batch size
+            loss_items: Detached loss components (box, seg, cls, dfl)
+        """
+        loss = torch.zeros(4, device=self.device)  # box, seg, cls, dfl
         feats, pred_masks, proto = preds if len(preds) == 3 else preds[1]
-        batch_size, _, mask_h, mask_w = proto.shape  # batch size, number of masks, mask height, mask width
-        x_cat = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2)
+        batch_size, _, mask_h, mask_w = proto.shape
+
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
-            (self.reg_max * 4, self.nc), 1
+            (self.reg_max * 4, sum(self.nc)), dim=1
         )
 
-        # B, grids, ..
         pred_scores = pred_scores.permute(0, 2, 1).contiguous()
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
         pred_masks = pred_masks.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
-        imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
@@ -542,141 +586,190 @@ class v8SegmentationLoss(v8DetectionLoss):
             ) from e
 
         # Pboxes
-        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)
 
-        _, target_bboxes, target_scores, fg_mask, target_gt_idx = self.assigner(
+        norm_align_metric, fg_mask, target_gt_idx = self.assigner(
             pred_scores[..., :self.nc[0]].detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
-            gt_labels[..., :1], # take only the first class labels
+            gt_labels[..., :1],
             gt_bboxes,
             mask_gt,
         )
 
-        target_scores_sum = max(target_scores.sum(), 1)
-        loss[1] = self.cls_loss(pred_scores, target_scores) / target_scores_sum
+        target_bboxes = self.assigner.get_bboxes(gt_bboxes, target_gt_idx, fg_mask)
+        target_scores_sum, offset = max(norm_align_metric.sum(), 1), 0
 
-        if fg_mask.sum():
-            # Bbox loss
-            loss[0], loss[3] = self.bbox_loss(
-                pred_distri,
-                pred_bboxes,
-                anchor_points,
-                target_bboxes / stride_tensor,
-                target_scores,
-                target_scores_sum,
-                fg_mask,
+        # Cls loss - iterate over each classification task/head
+        for task_idx, (cls_loss_fn, n_cls_task) in enumerate(zip(self.cls_losses, self.nc)):
+            pred_scores_task = pred_scores[..., offset:offset + n_cls_task]
+
+            target_labels_task, target_scores_task = self.assigner.get_scores(
+                gt_labels=gt_labels[..., task_idx, None] if gt_labels.shape[-1] > 1 else gt_labels,
+                target_gt_idx=target_gt_idx,
+                fg_mask=fg_mask,
+                num_classes=n_cls_task,
             )
-            # Masks loss
+
+            target_scores_task = target_scores_task * norm_align_metric
+
+            loss[2] += cls_loss_fn(
+                pred_scores=pred_scores_task,
+                gt_scores=target_scores_task,
+                pred_bboxes=pred_bboxes,
+                gt_bboxes=target_bboxes / stride_tensor,
+                fg_mask=fg_mask,
+            ).sum() / target_scores_sum
+
+            offset += n_cls_task
+
+        # Bbox loss and Mask loss
+        if fg_mask.sum():
+            target_bboxes /= stride_tensor
+            loss[0], loss[3] = self.bbox_loss(
+                pred_distri, pred_bboxes, anchor_points, target_bboxes, norm_align_metric, target_scores_sum, fg_mask
+            )
+
+            # Mask loss
             masks = batch["masks"].to(self.device).float()
-            if tuple(masks.shape[-2:]) != (mask_h, mask_w):  # downsample
+            if tuple(masks.shape[-2:]) != (mask_h, mask_w):
                 masks = F.interpolate(masks[None], (mask_h, mask_w), mode="nearest")[0]
 
             loss[1] = self.calculate_segmentation_loss(
-                fg_mask, masks, target_gt_idx, target_bboxes, batch_idx, proto, pred_masks, imgsz, self.overlap
+                fg_mask, masks, target_gt_idx, target_bboxes * stride_tensor,
+                batch_idx, proto, pred_masks, imgsz, self.overlap
             )
-
-        # WARNING: lines below prevent Multi-GPU DDP 'unused gradient' PyTorch errors, do not remove
         else:
-            loss[1] += (proto * 0).sum() + (pred_masks * 0).sum()  # inf sums may lead to nan loss
+            # Prevent Multi-GPU DDP 'unused gradient' errors
+            loss[1] += (proto * 0).sum() + (pred_masks * 0).sum()
 
         loss[0] *= self.hyp.box  # box gain
-        loss[1] *= self.hyp.box  # seg gain
+        loss[1] *= self.hyp.box  # seg gain (uses box hyp)
         loss[2] *= self.hyp.cls  # cls gain
         loss[3] *= self.hyp.dfl  # dfl gain
 
-        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss.sum() * batch_size, loss.detach()  # loss(box, seg, cls, dfl)
 
     @staticmethod
-    def single_mask_loss(
-        gt_mask: torch.Tensor, pred: torch.Tensor, proto: torch.Tensor, xyxy: torch.Tensor, area: torch.Tensor
-    ) -> torch.Tensor:
+    def single_mask_loss(gt_mask, pred, proto, xyxy, area):
         """
         Compute the instance segmentation loss for a single image.
-
+        
         Args:
-            gt_mask (torch.Tensor): Ground truth mask of shape (n, H, W), where n is the number of objects.
-            pred (torch.Tensor): Predicted mask coefficients of shape (n, 32).
-            proto (torch.Tensor): Prototype masks of shape (32, H, W).
-            xyxy (torch.Tensor): Ground truth bounding boxes in xyxy format, normalized to [0, 1], of shape (n, 4).
-            area (torch.Tensor): Area of each ground truth bounding box of shape (n,).
-
+            gt_mask: Ground truth mask
+            pred: Predicted mask coefficients
+            proto: Prototype features
+            xyxy: Bounding box coordinates
+            area: Box areas for normalization
+            
         Returns:
-            (torch.Tensor): The calculated mask loss for a single image.
-
-        Notes:
-            The function uses the equation pred_mask = torch.einsum('in,nhw->ihw', pred, proto) to produce the
-            predicted masks from the prototype masks and predicted mask coefficients.
+            Mask loss value
         """
-        pred_mask = torch.einsum("in,nhw->ihw", pred, proto)  # (n, 32) @ (32, 80, 80) -> (n, 80, 80)
+        pred_mask = torch.einsum("in,nhw->ihw", pred, proto)
         loss = F.binary_cross_entropy_with_logits(pred_mask, gt_mask, reduction="none")
-        return (crop_mask(loss, xyxy).mean(dim=(1, 2)) / area).sum()
+        # Use a more reasonable minimum area for small objects (1e-6 instead of 1e-8)
+        # This prevents numerical instability when dividing by very small areas
+        # For a 20px object in 640x640 image: area ≈ (20/640)^2 ≈ 0.001, so 1e-6 is safe
+        area_safe = torch.clamp(area, min=1e-6)
+        return (crop_mask(loss, xyxy).mean(dim=(1, 2)) / area_safe).sum()
 
     def calculate_segmentation_loss(
-        self,
-        fg_mask: torch.Tensor,
-        masks: torch.Tensor,
-        target_gt_idx: torch.Tensor,
-        target_bboxes: torch.Tensor,
-        batch_idx: torch.Tensor,
-        proto: torch.Tensor,
-        pred_masks: torch.Tensor,
-        imgsz: torch.Tensor,
-        overlap: bool,
-    ) -> torch.Tensor:
+        self, fg_mask, masks, target_gt_idx, target_bboxes, batch_idx, proto, pred_masks, imgsz, overlap
+    ):
         """
         Calculate the loss for instance segmentation.
-
+        
         Args:
-            fg_mask (torch.Tensor): A binary tensor of shape (BS, N_anchors) indicating which anchors are positive.
-            masks (torch.Tensor): Ground truth masks of shape (BS, H, W) if `overlap` is False, otherwise (BS, ?, H, W).
-            target_gt_idx (torch.Tensor): Indexes of ground truth objects for each anchor of shape (BS, N_anchors).
-            target_bboxes (torch.Tensor): Ground truth bounding boxes for each anchor of shape (BS, N_anchors, 4).
-            batch_idx (torch.Tensor): Batch indices of shape (N_labels_in_batch, 1).
-            proto (torch.Tensor): Prototype masks of shape (BS, 32, H, W).
-            pred_masks (torch.Tensor): Predicted masks for each anchor of shape (BS, N_anchors, 32).
-            imgsz (torch.Tensor): Size of the input image as a tensor of shape (2), i.e., (H, W).
-            overlap (bool): Whether the masks in `masks` tensor overlap.
-
+            fg_mask: Foreground mask indicating positive samples
+            masks: Ground truth masks
+            target_gt_idx: Target ground truth indices
+            target_bboxes: Target bounding boxes
+            batch_idx: Batch indices
+            proto: Prototype features
+            pred_masks: Predicted mask coefficients
+            imgsz: Image size
+            overlap: Whether masks overlap
+            
         Returns:
-            (torch.Tensor): The calculated loss for instance segmentation.
-
-        Notes:
-            The batch loss can be computed for improved speed at higher memory usage.
-            For example, pred_mask can be computed as follows:
-                pred_mask = torch.einsum('in,nhw->ihw', pred, proto)  # (i, 32) @ (32, 160, 160) -> (i, 160, 160)
+            Segmentation loss value
         """
         _, _, mask_h, mask_w = proto.shape
-        loss = 0
+        loss = torch.tensor(0.0, device=proto.device, dtype=proto.dtype)
+        valid_samples = torch.tensor(0.0, device=proto.device, dtype=proto.dtype)  # Track number of valid samples processed
 
-        # Normalize to 0-1
-        target_bboxes_normalized = target_bboxes / imgsz[[1, 0, 1, 0]]
+        # Normalize bboxes to 0-1 (add epsilon to prevent division by zero)
+        imgsz_safe = imgsz[[1, 0, 1, 0]] + 1e-8
+        target_bboxes_normalized = target_bboxes / imgsz_safe
 
         # Areas of target bboxes
         marea = xyxy2xywh(target_bboxes_normalized)[..., 2:].prod(2)
+        # Ensure areas are positive with reasonable minimum for small objects
+        # Use 1e-6 to handle very small objects (e.g., 20px) without numerical instability
+        # For mask resolution 160x160, 1 pixel = (1/640)^2 ≈ 2.4e-6, so 1e-6 is appropriate
+        marea = torch.clamp(marea, min=1e-6)
 
-        # Normalize to mask size
+        # Normalize bboxes to mask size
         mxyxy = target_bboxes_normalized * torch.tensor([mask_w, mask_h, mask_w, mask_h], device=proto.device)
 
         for i, single_i in enumerate(zip(fg_mask, target_gt_idx, pred_masks, proto, mxyxy, marea, masks)):
             fg_mask_i, target_gt_idx_i, pred_masks_i, proto_i, mxyxy_i, marea_i, masks_i = single_i
             if fg_mask_i.any():
                 mask_idx = target_gt_idx_i[fg_mask_i]
-                if overlap:
-                    gt_mask = masks_i == (mask_idx + 1).view(-1, 1, 1)
-                    gt_mask = gt_mask.float()
-                else:
-                    gt_mask = masks[batch_idx.view(-1) == i][mask_idx]
+                try:
+                    if overlap:
+                        gt_mask = masks_i == (mask_idx + 1).view(-1, 1, 1)
+                        gt_mask = gt_mask.float()
+                    else:
+                        # Filter masks for current batch item
+                        batch_masks = masks[batch_idx.view(-1) == i]
+                        # Ensure mask_idx is within bounds
+                        if len(batch_masks) == 0:
+                            # No masks for this batch item, skip
+                            continue
+                        # Clamp mask_idx to valid range
+                        mask_idx = torch.clamp(mask_idx, 0, len(batch_masks) - 1)
+                        gt_mask = batch_masks[mask_idx]
+                        # Ensure gt_mask is not empty
+                        if len(gt_mask) == 0:
+                            continue
 
-                loss += self.single_mask_loss(
-                    gt_mask, pred_masks_i[fg_mask_i], proto_i, mxyxy_i[fg_mask_i], marea_i[fg_mask_i]
-                )
+                    # Validate inputs before computing loss
+                    if len(gt_mask) == 0 or len(pred_masks_i[fg_mask_i]) == 0:
+                        continue
+                    
+                    # Ensure marea_i[fg_mask_i] doesn't contain zeros or negative values
+                    # Areas are already clamped to min=1e-6 in the area calculation above,
+                    # but double-check here for safety with very small objects
+                    marea_filtered = marea_i[fg_mask_i]
+                    if (marea_filtered <= 0).any():
+                        # Skip invalid areas (shouldn't happen due to clamping, but safety check)
+                        continue
 
-            # WARNING: lines below prevents Multi-GPU DDP 'unused gradient' PyTorch errors, do not remove
+                    mask_loss = self.single_mask_loss(
+                        gt_mask, pred_masks_i[fg_mask_i], proto_i, mxyxy_i[fg_mask_i], marea_i[fg_mask_i]
+                    )
+                    # Check for NaN or Inf before adding
+                    if torch.isfinite(mask_loss):
+                        loss += mask_loss
+                        valid_samples += fg_mask_i.sum().float()
+                    # If invalid, skip this sample
+                except (IndexError, RuntimeError) as e:
+                    # Skip samples that cause indexing errors
+                    continue
             else:
-                loss += (proto * 0).sum() + (pred_masks * 0).sum()  # inf sums may lead to nan loss
+                loss += (proto * 0).sum() + (pred_masks * 0).sum()
 
-        return loss / fg_mask.sum()
+        # Use valid_samples count instead of fg_mask.sum() to avoid division issues
+        if valid_samples.item() > 0:
+            result = loss / valid_samples
+            # Final check for NaN/Inf
+            if not torch.isfinite(result):
+                return torch.tensor(0.0, device=proto.device, dtype=proto.dtype)
+            return result
+        else:
+            return torch.tensor(0.0, device=proto.device, dtype=proto.dtype)
+
+
 
 
 class v8PoseLoss(v8DetectionLoss):

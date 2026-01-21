@@ -25,6 +25,7 @@ __all__ = (
     "YOLOWeightedDataset",
     "GroundingDataset",
     "SAHIDataset",
+    "SAHIBatchSampler", 
     "build_yolo_dataset",
     "build_grounding",
     "build_dataloader",

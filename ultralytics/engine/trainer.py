@@ -320,7 +320,11 @@ class BaseTrainer:
                 mode="val",
             )
             self.validator = self.get_validator()
-            metric_keys = self.validator.metrics[0].keys + self.label_loss_items(prefix="val")
+            metrics = self.validator.metrics
+            if isinstance(metrics, list):
+                metric_keys = metrics[0].keys + self.label_loss_items(prefix="val")
+            else:
+                metric_keys = metrics.keys + self.label_loss_items(prefix="val")
             self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
             self.ema = ModelEMA(self.model)
             if self.args.plots:
@@ -403,9 +407,8 @@ class BaseTrainer:
             # Auto-calculate weights if not provided or invalid
             if clf_loss_weights is None:
                 calculated_weights = self._calculate_class_weights(nc_list=nc_list)
-                if calculated_weights is not None: #FIXME
-                    clf_loss_weights = calculated_weights
-                    LOGGER.info(f'{colorstr("Auto-calculated class weights")}: {clf_loss_weights}')
+                clf_loss_weights = calculated_weights
+                LOGGER.info(f'{colorstr("Auto-calculated class weights")}: {clf_loss_weights}')
 
         # Initialize criterion
         if world_size > 1:
@@ -541,6 +544,16 @@ class BaseTrainer:
 
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
+             # SAHI: Regenerate random crops for next epoch
+            if hasattr(self.train_loader, 'dataset'):
+                dataset = self.train_loader.dataset
+                if hasattr(dataset, 'on_epoch_end'):
+                    dataset.on_epoch_end()
+                    
+            # SAHI: Update distributed sampler epoch
+            if hasattr(self.train_loader, 'batch_sampler') and hasattr(self.train_loader.batch_sampler, 'set_epoch'):
+                self.train_loader.batch_sampler.set_epoch(epoch + 1)
+                
             if RANK in {-1, 0}:
                 final_epoch = epoch + 1 >= self.epochs
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
