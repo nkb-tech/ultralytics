@@ -160,6 +160,7 @@ CFG_INT_KEYS = {  # integer-only arguments
     "albu_clip_limit",
     "min_bbox",
     "min_imgsz",
+    "max_plot_batches",
 }
 CFG_BOOL_KEYS = {  # boolean-only arguments
     "save",

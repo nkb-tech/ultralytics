@@ -143,6 +143,9 @@ class BaseValidator:
             # self.model = model
             self.device = model.device  # update device
             self.args.half = model.fp16  # update half
+            self.rknn = getattr(model, 'rknn', False)  # RKNN format flag
+            self.int8 = getattr(model, 'int8', False)  # INT8 quantization flag
+            self.nhwc = getattr(model, 'nhwc', False)  # NHWC format flag (for RKNN, TFLite, etc.)
             stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
             imgsz = check_imgsz(self.args.imgsz, stride=stride)
             if engine:
@@ -205,7 +208,8 @@ class BaseValidator:
                 preds = self.postprocess(preds)
 
             self.update_metrics(preds, batch)
-            if self.args.plots and batch_i < 3:
+            max_plot = getattr(self.args, 'max_plot_batches', 3)
+            if self.args.plots and (max_plot < 0 or batch_i < max_plot):
                 self.plot_val_samples(batch, batch_i)
                 self.plot_predictions(batch, preds, batch_i)
 

@@ -14,6 +14,7 @@ from tarfile import is_tarfile
 
 import cv2
 import numpy as np
+import torch
 from PIL import Image, ImageOps
 
 from ultralytics.nn.autobackend import check_class_names
@@ -37,7 +38,7 @@ from ultralytics.utils.ops import segments2boxes
 HELP_URL = "See https://docs.ultralytics.com/datasets for dataset formatting guidance."
 IMG_FORMATS = {"bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp", "pfm"}  # image suffixes
 VID_FORMATS = {"asf", "avi", "gif", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "wmv", "webm"}  # video suffixes
-PIN_MEMORY = str(os.getenv("PIN_MEMORY", True)).lower() == "true"  # global pin_memory for dataloaders
+PIN_MEMORY = str(os.getenv("PIN_MEMORY", True)).lower() == "true" and torch.cuda.is_available()  # global pin_memory for dataloaders
 FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
 
 

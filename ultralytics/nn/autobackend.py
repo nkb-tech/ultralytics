@@ -656,6 +656,9 @@ class AutoBackend(nn.Module):
             y = self.model(im)
 
         elif self.rknn: # nhwc only supported
+            # Transpose from NCHW to NHWC if needed
+            if im.ndim == 4 and im.shape[1] in (1, 3):  # NCHW format detected
+                im = im.permute(0, 2, 3, 1).contiguous()
             im = im.cpu().numpy()
             y = self.model.inference(
                 inputs=[im],

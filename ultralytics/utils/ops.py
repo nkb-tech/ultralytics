@@ -331,7 +331,8 @@ def non_max_suppression(
             i = nms_rotated(boxes, scores, iou_thres)
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
-            i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+            # torchvision NMS requires float32 on CPU
+            i = torchvision.ops.nms(boxes.float(), scores.float(), iou_thres)  # NMS
         i = i[:max_det]  # limit detections
 
         # # Experimental

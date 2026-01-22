@@ -1462,7 +1462,8 @@ class Exporter:
             kwargs = dict(
                 quantized_algorithm='mmse',
                 quantized_method='channel',
-                quantized_dtype="w8a8",
+                quantized_dtype='w8a8',
+                quant_img_RGB2BGR=False,
             )
         else:
             kwargs = dict(
