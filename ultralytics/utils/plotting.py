@@ -1026,6 +1026,7 @@ class ValidatorPlotter:
             return
 
         images_list, paths_list, all_targets, all_masks = [], [], [], []
+        batch_indices_for_masks = []  # Трекинг batch индексов для масок
         target_size = None
         has_masks = False
 
@@ -1048,33 +1049,36 @@ class ValidatorPlotter:
             paths_list.append(cache_data['im_file'])
 
             if plot_preds:
-                preds = cache_data['predictions'].clone()  # xyxy format
+                preds = cache_data['predictions'].clone() if cache_data['predictions'] is not None else torch.empty(0, 6)
                 if len(preds) > 0:
                     scale_x = target_size[0] / original_w
                     scale_y = target_size[1] / original_h
-                    preds[:, [0, 2]] *= scale_x  # x1, x2
-                    preds[:, [1, 3]] *= scale_y  # y1, y2
+                    preds[:, [0, 2]] *= scale_x
+                    preds[:, [1, 3]] *= scale_y
                 all_targets.append(preds)
                 
                 # Handle prediction masks for segmentation
                 pred_masks = cache_data.get('pred_masks')
                 if pred_masks is not None and len(pred_masks) > 0:
                     has_masks = True
-                    # Resize masks to target size
+                    # Resize masks to target size (H, W)
+                    if pred_masks.dim() == 2:
+                        pred_masks = pred_masks.unsqueeze(0)
                     masks_resized = F.interpolate(
                         pred_masks.float().unsqueeze(0),
-                        size=(target_size[1], target_size[0]),  # (H, W)
+                        size=(target_size[1], target_size[0]),
                         mode='nearest'
-                    )[0].to(torch.uint8)
-                    all_masks.append(masks_resized)
-                else:
-                    all_masks.append(None)
+                    )[0]
+                    # Добавляем каждую маску отдельно с её batch индексом
+                    for m in masks_resized:
+                        all_masks.append(m.cpu().numpy())
+                        batch_indices_for_masks.append(idx)
             else:
-                gt_cls = cache_data['gt_cls']
-                gt_bboxes = cache_data['gt_bboxes']  # normalized xywh
+                gt_cls = cache_data.get('gt_cls', torch.empty(0))
+                gt_bboxes = cache_data.get('gt_bboxes', torch.empty(0, 4))
+                
                 if len(gt_bboxes) > 0:
                     batch_idx_col = torch.full((len(gt_cls), 1), float(idx))
-                    # Ensure gt_cls is 2D for concatenation
                     if gt_cls.dim() == 1:
                         gt_cls = gt_cls.unsqueeze(1)
                     target = torch.cat([batch_idx_col, gt_cls, gt_bboxes], dim=1)
@@ -1086,15 +1090,16 @@ class ValidatorPlotter:
                 gt_masks = cache_data.get('gt_masks')
                 if gt_masks is not None and len(gt_masks) > 0:
                     has_masks = True
-                    # Resize masks to target size
+                    if gt_masks.dim() == 2:
+                        gt_masks = gt_masks.unsqueeze(0)
                     masks_resized = F.interpolate(
                         gt_masks.float().unsqueeze(0),
-                        size=(target_size[1], target_size[0]),  # (H, W)
+                        size=(target_size[1], target_size[0]),
                         mode='nearest'
-                    )[0].to(torch.uint8)
-                    all_masks.append(masks_resized)
-                else:
-                    all_masks.append(None)
+                    )[0]
+                    for m in masks_resized:
+                        all_masks.append(m.cpu().numpy())
+                        batch_indices_for_masks.append(idx)
 
         if not images_list:
             return
@@ -1103,28 +1108,69 @@ class ValidatorPlotter:
         fname = "val_batch0_pred.jpg" if plot_preds else "val_batch0_labels.jpg"
         
         # Prepare masks for plot_images if available
-        masks_for_plot = np.zeros(0, dtype=np.uint8)
-        if has_masks and any(m is not None for m in all_masks):
-            # Concatenate all masks, handling None entries
-            mask_list = []
-            for m in all_masks:
-                if m is not None:
-                    mask_list.append(m.numpy())
-            if mask_list:
-                masks_for_plot = np.concatenate(mask_list, axis=0)
+        masks_for_plot = None
+        if has_masks and all_masks:
+            try:
+                # Stack masks - все должны быть одинакового размера (target_size)
+                masks_for_plot = np.stack(all_masks, axis=0)
+            except ValueError as e:
+                LOGGER.warning(f"Could not stack masks for plotting: {e}. Skipping mask visualization.")
+                masks_for_plot = None
 
-        if plot_preds:
-            batch_idx, cls, bboxes, conf = output_to_target(all_targets, max_det=self.max_det)
-            plot_images(images, batch_idx, cls, bboxes, conf,
-                        masks=masks_for_plot,
-                        paths=paths_list, fname=self.save_dir / fname, names=self.names, on_plot=self.on_plot)
-        else:
-            targets = torch.cat(all_targets, dim=0).numpy()
-            plot_images(images, targets[:, 0], targets[:, 1:1 + len(self.nc)], targets[:, 1 + len(self.nc):],
-                        masks=masks_for_plot,
-                        paths=paths_list, fname=self.save_dir / fname, names=self.names, on_plot=self.on_plot)
+        try:
+            if plot_preds:
+                # Filter empty predictions
+                non_empty_targets = [t for t in all_targets if len(t) > 0]
+                if non_empty_targets:
+                    batch_idx, cls, bboxes, conf = output_to_target(non_empty_targets, max_det=self.max_det)
+                else:
+                    batch_idx = np.array([])
+                    cls = np.array([])
+                    bboxes = np.zeros((0, 4))
+                    conf = np.array([])
+                
+                plot_images(
+                    images, batch_idx, cls, bboxes, conf,
+                    masks=masks_for_plot if masks_for_plot is not None else np.zeros(0),
+                    paths=paths_list, 
+                    fname=self.save_dir / fname, 
+                    names=self.names, 
+                    on_plot=self.on_plot
+                )
+            else:
+                non_empty_targets = [t for t in all_targets if len(t) > 0]
+                if non_empty_targets:
+                    targets = torch.cat(non_empty_targets, dim=0).numpy()
+                    plot_images(
+                        images, 
+                        targets[:, 0], 
+                        targets[:, 1:1 + len(self.nc)], 
+                        targets[:, 1 + len(self.nc):],
+                        masks=masks_for_plot if masks_for_plot is not None else np.zeros(0),
+                        paths=paths_list, 
+                        fname=self.save_dir / fname, 
+                        names=self.names, 
+                        on_plot=self.on_plot
+                    )
+                else:
+                    # No targets, just plot images
+                    plot_images(
+                        images,
+                        np.array([]),
+                        np.array([]),
+                        np.zeros((0, 4)),
+                        masks=np.zeros(0),
+                        paths=paths_list,
+                        fname=self.save_dir / fname,
+                        names=self.names,
+                        on_plot=self.on_plot
+                    )
+                    
+        except Exception as e:
+            LOGGER.warning(f"Error plotting SAHI complete images: {e}")
 
         LOGGER.debug(f"Saved SAHI validation plot to {self.save_dir / fname}")
+
         
 
 #@TryExcept()  # known issue https://github.com/ultralytics/yolov5/issues/5395

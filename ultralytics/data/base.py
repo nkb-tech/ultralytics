@@ -16,7 +16,7 @@ from torch.utils.data import Dataset
 
 from ultralytics.data.utils import FORMATS_HELP_MSG, HELP_URL, IMG_FORMATS
 from ultralytics.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, TQDM
-
+from ultralytics.utils.patches import imread
 
 class BaseDataset(Dataset):
     """
@@ -176,7 +176,7 @@ class BaseDataset(Dataset):
             stored, (bytes, bytearray)
         ):  # low-ram: если в self.ims байтовый JPEG-буфер, то декодируем на лету
             arr = np.frombuffer(stored, dtype=np.uint8)
-            im = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            im = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
             if im is None:
                 raise RuntimeError(f"{self.prefix}Corrupt JPEG buffer for {f}")
             h0, w0 = im.shape[:2]
@@ -190,6 +190,10 @@ class BaseDataset(Dataset):
                 if len(self.buffer) >= self.max_buffer_length:
                     j = self.buffer.pop(0)
                     self.im_hw0[j], self.im_hw[j] = None, None
+                    
+            # Convert single-channel to 3-channel by duplicating (for 16-bit grayscale support)
+            if im.ndim == 2:
+                im = np.repeat(im[:, :, None], 3, axis=2)
             return im, (h0, w0), im.shape[:2]
 
         if stored is not None:  # ram
@@ -202,9 +206,9 @@ class BaseDataset(Dataset):
             except Exception as e:
                 LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
                 Path(fn).unlink(missing_ok=True)
-                im = cv2.imread(f)  # BGR
+                im = imread(f)  # BGR
         else:  # read image
-            im = cv2.imread(f)  # BGR
+            im = imread(f)  # BGR
         if im is None:
             raise FileNotFoundError(f"Image Not Found {f}")
 
@@ -222,7 +226,9 @@ class BaseDataset(Dataset):
                     self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
                 elif self.cache != "ram" and self.cache != "low-ram":
                     self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
-
+        # Convert single-channel to 3-channel by duplicating (for 16-bit grayscale support)
+        if im.ndim == 2:
+            im = np.repeat(im[:, :, None], 3, axis=2)
         return im, (h0, w0), im.shape[:2]
 
     def cache_images(self):
@@ -252,7 +258,7 @@ class BaseDataset(Dataset):
         """Saves an image as an *.npy file for faster loading."""
         f = self.npy_files[i]
         if not f.exists():
-            np.save(f.as_posix(), cv2.imread(self.im_files[i]), allow_pickle=False)
+            np.save(f.as_posix(), imread(self.im_files[i]), allow_pickle=False)
 
     def check_cache_disk(self, safety_margin=0.5):
         """Check image caching requirements vs available disk space."""
@@ -262,7 +268,7 @@ class BaseDataset(Dataset):
         n = min(self.ni, 30)  # extrapolate from 30 random images
         for _ in range(n):
             im_file = random.choice(self.im_files)
-            im = cv2.imread(im_file)
+            im = imread(im_file)
             if im is None:
                 continue
             b += im.nbytes
@@ -284,7 +290,7 @@ class BaseDataset(Dataset):
 
     def cache_images_to_buffer(self, i):
         """Saves an image as JPEG bytes for low-ram on-the-fly decoding."""
-        im = cv2.imread(self.im_files[i])  # BGR
+        im = imread(self.im_files[i])
         if im is None:
             raise FileNotFoundError(f"{self.prefix}Image Not Found {self.im_files[i]}")
         success, buf = cv2.imencode(".jpg", im, [int(cv2.IMWRITE_JPEG_QUALITY), 100])
@@ -299,7 +305,7 @@ class BaseDataset(Dataset):
         b, gb = 0, 1 << 30  # bytes of cached images, bytes per gigabytes
         n = min(self.ni, 30)  # extrapolate from 30 random images
         for _ in range(n):
-            im = cv2.imread(random.choice(self.im_files))  # sample image
+            im = imread(random.choice(self.im_files))  # sample image
             if im is None:
                 continue
             ratio = self.imgsz / max(im.shape[0], im.shape[1])  # max(h, w)  # ratio

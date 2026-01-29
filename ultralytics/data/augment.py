@@ -1624,17 +1624,30 @@ class RandomHSV:
         """
         img = labels["img"]
         if self.hgain or self.sgain or self.vgain:
-            r = np.random.uniform(-1, 1, 3) * [self.hgain, self.sgain, self.vgain] + 1  # random gains
-            hue, sat, val = cv2.split(cv2.cvtColor(img, cv2.COLOR_BGR2HSV))
-            dtype = img.dtype  # uint8
+            # Check if image is 16-bit (OpenCV doesn't support HSV conversion for 16-bit images)
+            is_16bit = img.dtype == np.uint16
+            
+            if is_16bit:
+                # For 16-bit images, only apply value (brightness) adjustment
+                # HSV augmentation doesn't make sense for grayscale/16-bit images
+                # Note: cv2.LUT doesn't support 16-bit images, so we use numpy operations
+                if self.vgain:
+                    r_val = np.random.uniform(-1, 1) * self.vgain + 1
+                    # Apply brightness adjustment directly using numpy (cv2.LUT doesn't support 16-bit)
+                    img[:] = np.clip(img.astype(np.float32) * r_val, 0, 65535).astype(np.uint16)
+            else:
+                # Normal HSV augmentation for 8-bit images
+                r = np.random.uniform(-1, 1, 3) * [self.hgain, self.sgain, self.vgain] + 1  # random gains
+                hue, sat, val = cv2.split(cv2.cvtColor(img, cv2.COLOR_BGR2HSV))
+                dtype = img.dtype  # uint8
 
-            x = np.arange(0, 256, dtype=r.dtype)
-            lut_hue = ((x * r[0]) % 180).astype(dtype)
-            lut_sat = np.clip(x * r[1], 0, 255).astype(dtype)
-            lut_val = np.clip(x * r[2], 0, 255).astype(dtype)
+                x = np.arange(0, 256, dtype=r.dtype)
+                lut_hue = ((x * r[0]) % 180).astype(dtype)
+                lut_sat = np.clip(x * r[1], 0, 255).astype(dtype)
+                lut_val = np.clip(x * r[2], 0, 255).astype(dtype)
 
-            im_hsv = cv2.merge((cv2.LUT(hue, lut_hue), cv2.LUT(sat, lut_sat), cv2.LUT(val, lut_val)))
-            cv2.cvtColor(im_hsv, cv2.COLOR_HSV2BGR, dst=img)  # no return needed
+                im_hsv = cv2.merge((cv2.LUT(hue, lut_hue), cv2.LUT(sat, lut_sat), cv2.LUT(val, lut_val)))
+                cv2.cvtColor(im_hsv, cv2.COLOR_HSV2BGR, dst=img)  # no return needed
         return labels
 
     def __repr__(self):
@@ -1843,8 +1856,18 @@ class RGB2TIR:
             image = np.asarray(labels)
             is_pil = True
 
+        # Check if image is 16-bit
+        is_16bit = image.dtype == np.uint16
+        
         # Step 1: Convert RGB image to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if is_16bit:
+            # For 16-bit images, convert to 8-bit first for processing
+            # Take first channel (all channels are identical for duplicated grayscale)
+            gray = image[:, :, 0] if image.ndim == 3 else image
+            # Scale 16-bit to 8-bit: divide by 256 (equivalent to >> 8)
+            gray = (gray >> 8).astype(np.uint8)
+        else:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         # Step 2: Apply CLAHE to enhance local contrast
         gray_clahe = self.clahe.apply(gray)
@@ -2683,7 +2706,7 @@ class Format:
         if len(img.shape) < 3:
             img = np.expand_dims(img, -1)
         img = img.transpose(2, 0, 1)
-        img = np.ascontiguousarray(img[::-1] if random.uniform(0, 1) > self.bgr else img)
+        img = np.ascontiguousarray(img[::-1] if random.uniform(0, 1) > self.bgr else img).astype(np.float32)
         img = torch.from_numpy(img)
         return img
 

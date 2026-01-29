@@ -886,8 +886,6 @@ class SAHIDataset(YOLODataset):
         
         if not self.use_slicing:
             self.slice_indices = self._precompute_slices()
-            if self.use_slicing:
-                self.slice_indices.sort(key=lambda x: x[0])
             LOGGER.info(f"{colorstr('SAHIDataset')}: Regenerated {len(self.slice_indices)} random crops for epoch {self._epoch}")
 
     def _log_config(self):

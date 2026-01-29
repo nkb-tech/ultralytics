@@ -14,7 +14,7 @@ from torch.nn.init import constant_, xavier_uniform_
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import disable_dynamo
 
-from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto, EfficientTRTNMS, ONNXNMS
+from .block import DFL, BNContrastiveHead, ContrastiveHead, Proto, Proto26, RealNVP, EfficientTRTNMS, ONNXNMS
 from .conv import Conv, DWConv
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
@@ -22,16 +22,19 @@ from .utils import bias_init_with_prob, linear_init
 __all__ = (
     "Detect",
     "Segment",
+    "Segment26",
     "Pose",
+    "Pose26",
     "Classify",
     "OBB",
+    "OBB26",
     "RTDETRDecoder",
     "v10Detect",
     "v10Pose",
     "v10Segment",
     "v11Detect",
     "PostDetectONNXNMS",
-    "PostDetectONNXNMS",
+    "PostDetectTRTNMS",
 )
 
 
@@ -180,8 +183,8 @@ class Detect(nn.Module):
             for b, nc_i in zip(m.cv3, m.nc):
                 b[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)
     
-        if self.end2end:
-            for i, (a, s) in zip(m.one2one_cv2, m.stride):  # from
+        if self.end2end and hasattr(self, 'one2one_cv2') and self.one2one_cv2 is not None:
+            for i, (a, s) in enumerate(zip(m.one2one_cv2, m.stride)):  # from
                 a[-1].bias.data[:] = 1.0  # box
                 for b, nc_i in zip(m.one2one_cv3, m.nc):
                     b[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)  # cls (.01 objects, nc_i classes, 640 img)
@@ -1017,4 +1020,124 @@ class PostDetectONNXNMS(PostDetectTRTNMS):
         selected_scores = max_score[X, Y, None]
         X = X.unsqueeze(1).float()
         return torch.cat([X, selected_boxes, selected_scores, selected_categories], 1)
-    
+
+
+class Segment26(Segment):
+    """YOLO26 Segment head for segmentation models with Proto26.
+
+    This class extends the Segment head to use Proto26 for mask generation with semantic segmentation support.
+    """
+
+    def __init__(self, nc: list[int] = [80], nm: int = 32, npr: int = 256, ch: tuple = ()):
+        """Initialize YOLO26 Segment head with Proto26.
+
+        Args:
+            nc (list[int]): Number of classes per head.
+            nm (int): Number of masks.
+            npr (int): Number of protos.
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+        """
+        super().__init__(nc, nm, npr, ch)
+        # Override proto with Proto26
+        self.proto = Proto26(ch, self.npr, self.nm, sum(nc) if isinstance(nc, list) else nc)
+
+    def forward(self, x):
+        """Return model outputs and mask coefficients if training, otherwise return outputs and mask coefficients."""
+        p = self.proto(x)  # mask protos with optional semantic segmentation
+        bs = x[0].shape[0]
+        mc = torch.cat([self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2)  # mask coefficients
+        x = Detect.forward(self, x)
+        if self.training:
+            return x, mc, p
+        # For inference, p is just the proto masks (not tuple)
+        proto = p[0] if isinstance(p, tuple) else p
+        return (torch.cat([x, mc], 1), proto) if self.export else (torch.cat([x[0], mc], 1), (x[1], mc, proto))
+
+    def fuse(self):
+        """Remove the proto semantic segmentation head for inference optimization."""
+        if hasattr(self.proto, "fuse"):
+            self.proto.fuse()
+
+
+class OBB26(OBB):
+    """YOLO26 OBB detection head with raw angle predictions.
+
+    This class extends the OBB head with modified angle processing that outputs
+    raw angle predictions without sigmoid transformation.
+    """
+
+    def forward(self, x):
+        """Concatenates and returns predicted bounding boxes, class probabilities, and raw angles."""
+        bs = x[0].shape[0]  # batch size
+        # Raw angle output without sigmoid transformation
+        angle = torch.cat([self.cv4[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
+        if not self.training:
+            self.angle = angle
+        x = Detect.forward(self, x)
+        if self.training:
+            return x, angle
+        return torch.cat([x, angle], 1) if self.export else (torch.cat([x[0], angle], 1), (x[1], angle))
+
+
+class Pose26(Pose):
+    """YOLO26 Pose head with RealNVP flow model for keypoint uncertainty.
+
+    This class extends the Pose head to include RealNVP flow model for keypoint
+    uncertainty estimation via RLE (Residual Log-likelihood Estimation) loss.
+    """
+
+    def __init__(self, nc: list[int] = [80], kpt_shape: tuple = (17, 3), ch: tuple = ()):
+        """Initialize YOLO26 Pose head with RealNVP flow model.
+
+        Args:
+            nc (list[int]): Number of classes per head.
+            kpt_shape (tuple): Number of keypoints and dimensions (2 for x,y or 3 for x,y,visible).
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+        """
+        super().__init__(nc, kpt_shape, ch)
+        self.flow_model = RealNVP()
+
+        c4 = max(ch[0] // 4, kpt_shape[0] * (kpt_shape[1] + 2))
+        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3)) for x in ch)
+
+        self.cv4_kpts = nn.ModuleList(nn.Conv2d(c4, self.nk, 1) for _ in ch)
+        self.nk_sigma = kpt_shape[0] * 2  # sigma_x, sigma_y for each keypoint
+        self.cv4_sigma = nn.ModuleList(nn.Conv2d(c4, self.nk_sigma, 1) for _ in ch)
+
+    def forward(self, x):
+        """Perform forward pass through YOLO model and return predictions."""
+        bs = x[0].shape[0]  # batch size
+        features = [self.cv4[i](x[i]) for i in range(self.nl)]
+        kpt = torch.cat([self.cv4_kpts[i](features[i]).view(bs, self.nk, -1) for i in range(self.nl)], -1)
+
+        kpt_sigma = None
+        if self.training:
+            kpt_sigma = torch.cat([self.cv4_sigma[i](features[i]).view(bs, self.nk_sigma, -1) for i in range(self.nl)], -1)
+
+        x = Detect.forward(self, x)
+        if self.training:
+            return x, kpt, kpt_sigma
+        pred_kpt = self.kpts_decode(bs, kpt)
+        return torch.cat([x, pred_kpt], 1) if self.export else (torch.cat([x[0], pred_kpt], 1), (x[1], kpt))
+
+    def kpts_decode(self, bs, kpts):
+        """Decode keypoints from predictions (YOLO26 version without offset)."""
+        ndim = self.kpt_shape[1]
+        if self.export:
+            y = kpts.view(bs, *self.kpt_shape, -1)
+            a = (y[:, :, :2] + self.anchors) * self.strides
+            if ndim == 3:
+                a = torch.cat((a, y[:, :, 2:3].sigmoid()), 2)
+            return a.view(bs, self.nk, -1)
+        else:
+            y = kpts.clone()
+            if ndim == 3:
+                y[:, 2::3] = y[:, 2::3].sigmoid()
+            y[:, 0::ndim] = (y[:, 0::ndim] + self.anchors[0]) * self.strides
+            y[:, 1::ndim] = (y[:, 1::ndim] + self.anchors[1]) * self.strides
+            return y
+
+    def fuse(self):
+        """Remove the flow model and sigma heads for inference optimization."""
+        self.cv4_sigma = None
+        self.flow_model = None

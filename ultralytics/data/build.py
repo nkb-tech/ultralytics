@@ -128,7 +128,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         img_path=img_path,
         imgsz=cfg.imgsz,
         batch_size=batch,
-        augment=mode == "train",
+        augment=getattr(cfg, "augment", mode == "train"),
         hyp=cfg,
         rect=cfg.rect or rect,
         cache=cfg.cache or None,
