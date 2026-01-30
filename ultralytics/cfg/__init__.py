@@ -27,8 +27,7 @@ from ultralytics.utils import (
     colorstr,
     deprecation_warn,
     vscode_msg,
-    yaml_load,
-    yaml_print,
+    YAML,
 )
 
 # Define valid tasks and modes
@@ -161,6 +160,7 @@ CFG_INT_KEYS = {  # integer-only arguments
     "albu_clip_limit",
     "min_bbox",
     "min_imgsz",
+    "max_plot_batches",
 }
 CFG_BOOL_KEYS = {  # boolean-only arguments
     "save",
@@ -233,7 +233,7 @@ def cfg2dict(cfg):
         - If cfg is already a dictionary, it's returned unchanged.
     """
     if isinstance(cfg, (str, Path)):
-        cfg = yaml_load(cfg)  # load dict
+        cfg = YAML.load(cfg)  # load dict
     elif isinstance(cfg, SimpleNamespace):
         cfg = vars(cfg)  # convert to dict
     return cfg
@@ -754,7 +754,7 @@ def entrypoint(debug=""):
                 k, v = parse_key_value_pair(a)
                 if k == "cfg" and v is not None:  # custom.yaml passed
                     LOGGER.info(f"Overriding {DEFAULT_CFG_PATH} with {v}")
-                    overrides = {k: val for k, val in yaml_load(checks.check_yaml(v)).items() if k != "cfg"}
+                    overrides = {k: val for k, val in YAML.load(checks.check_yaml(v)).items() if k != "cfg"}
                 else:
                     overrides[k] = v
             except (NameError, SyntaxError, ValueError, AssertionError) as e:

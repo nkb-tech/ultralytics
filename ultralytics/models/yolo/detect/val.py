@@ -195,8 +195,6 @@ class DetectionValidator(BaseValidator):
             max_det=self.args.max_det
         )
 
-    # ==================== Data Processing ====================
-
     def preprocess(self, batch):
         """
         Preprocess batch of images for YOLO validation.
@@ -204,7 +202,7 @@ class DetectionValidator(BaseValidator):
         Handles:
             - Moving images to device
             - Converting to half/float precision
-            - Normalizing to [0, 1]
+            - Normalizing to [0, 1] (skipped for models with built-in normalization)
             - Setting up hybrid labels if enabled
         
         Args:
@@ -213,22 +211,28 @@ class DetectionValidator(BaseValidator):
         Returns:
             Preprocessed batch dict
         """
-        # Normalize images based on bit depth from config
-        img = batch["img"].to(self.device, non_blocking=True)
-        bit_depth = getattr(self.args, 'image_bit_depth', 8)
-        if bit_depth == 16:
-            # 16-bit images (e.g., X-ray, medical imaging)
-            img = img / 65_535
-        else:
-            # 8-bit images (standard RGB, default)
-            img = img / 255
-        batch["img"] = (img.half() if self.args.half else img.float())
+        batch["img"] = batch["img"].to(self.device, non_blocking=True)
+        
+        # Get model format flags with safe defaults
+        is_rknn = getattr(self, 'rknn', False)
+        is_int8 = getattr(self, 'int8', False)
+        
+        batch["img"] = batch["img"].to(torch.uint8 if is_int8 else torch.float16 if self.args.half else torch.float32)
+        
+        # RKNN has his own normalization
+        if not is_rknn:
+            # Normalize images based on bit depth from config
+            bit_depth = getattr(self.args, 'image_bit_depth', 8)
+            batch["img"] /= 255.0 if if bit_depth == 8 else 65_535.0
+
+        # Store image dimensions (H, W) - batch is always BCHW from dataloader
+        self._img_hw = (int(batch["img"].shape[2]), int(batch["img"].shape[3]))
         
         for k in ["batch_idx", "cls", "bboxes"]:
             batch[k] = batch[k].to(self.device)
 
         if self.args.save_hybrid:
-            height, width = batch["img"].shape[2:]
+            height, width = self._img_hw  # Use stored NHWC-aware dimensions
             nb = len(batch["img"])
             bboxes = batch["bboxes"] * torch.tensor((width, height, width, height), device=self.device)
             self.lb = [
@@ -251,6 +255,15 @@ class DetectionValidator(BaseValidator):
         Returns:
             List of post-NMS predictions per image
         """
+        # Handle RKNN models - process raw DFL outputs first
+        if getattr(self, 'rknn', False):
+            img_hw = getattr(self, '_img_hw', (self.args.imgsz, self.args.imgsz))
+            preds = ops.process_rknn_dfl_results(
+                input_data=preds,
+                imgsz=img_hw,
+                conf_thres=self.args.conf,
+            )
+        
         if isinstance(preds, (list, tuple)):
             actual_preds = preds[0]
             raw_dict = preds[1] if len(preds) > 1 else None
@@ -380,7 +393,8 @@ class DetectionValidator(BaseValidator):
         else:
             ori_shape = batch["ori_shape"][si] if len(batch["ori_shape"]) > si else batch["ori_shape"][0]
         
-        imgsz = batch["img"].shape[2:]
+        # Get image size - batch is always BCHW from dataloader
+        imgsz = batch["img"].shape[2:]  # NCHW: (batch, C, H, W)
         
         # Get ratio_pad
         if isinstance(batch["ratio_pad"], list):

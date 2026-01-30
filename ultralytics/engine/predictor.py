@@ -112,27 +112,31 @@ class BasePredictor:
         self._lock = threading.Lock()  # for automatic thread-safe inference
         callbacks.add_integration_callbacks(self)
 
-    def preprocess(self, im):
+    def preprocess(self, ims):
         """
         Prepares input image before inference.
 
         Args:
-            im (torch.Tensor | List(np.ndarray)): BCHW for tensor, [(HWC) x B] for list.
+            ims (torch.Tensor | List(np.ndarray)): batch of images: BCHW for tensor, [(HWC) x B] for list.
         """
-        not_tensor = not isinstance(im, torch.Tensor)
+        not_tensor = not isinstance(ims, torch.Tensor)
         if not_tensor:
-            im = np.stack(self.pre_transform(im))
-            im = im[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW, (n, 3, h, w)
-            im = np.ascontiguousarray(im)  # contiguous
-            im = torch.from_numpy(im)
+            ims = np.stack(self.pre_transform(ims))
+            ims = ims[..., ::-1] # BGR to RGB
+            if not self.model.nhwc:
+                ims = ims.transpose((0, 3, 1, 2))  # BHWC to BCHW, (n, 3, h, w)
+            ims = np.ascontiguousarray(ims)
+            ims = torch.from_numpy(ims)
 
-        im = im.to(self.device)
-        im = im.half() if self.model.fp16 else im.float()  # uint8 to fp16/32
-        if not_tensor:
+        ims = ims.to(self.device)
+        ims = ims.to(torch.uint8 if self.model.int8 else torch.float16 if self.model.fp16 else torch.float32)
+        
+        if not self.model.rknn and not_tensor and not self.model.int8:
             # Normalize based on bit depth from config
             bit_depth = getattr(self.args, 'image_bit_depth', 8)
             im /= 65_535.0 if bit_depth == 16 else 255.0  # 0 - 255/65535 to 0.0 - 1.0
-        return im
+
+        return ims
 
     def inference(self, im, *args, **kwargs):
         """Runs inference on a given image using the specified model and arguments."""
@@ -233,7 +237,9 @@ class BasePredictor:
 
             # Warmup model
             if not self.done_warmup:
-                self.model.warmup(imgsz=(1 if self.model.pt or self.model.triton else self.dataset.bs, 3, *self.imgsz))
+                bs = 1 if self.model.pt or self.model.triton else self.dataset.bs
+                spatial = (*self.imgsz, 3) if self.model.nhwc else (3, *self.imgsz)
+                self.model.warmup(imgsz=(bs, *spatial))
                 self.done_warmup = True
 
             self.seen, self.windows, self.batch = 0, [], None
@@ -292,7 +298,7 @@ class BasePredictor:
             t = tuple(x.t / self.seen * 1e3 for x in profilers)  # speeds per image
             LOGGER.info(
                 f"Speed: %.1fms preprocess, %.1fms inference, %.1fms postprocess per image at shape "
-                f"{(min(self.args.batch, self.seen), 3, *im.shape[2:])}" % t
+                f"{(min(self.args.batch, self.seen), *im.shape[1:])}" % t
             )
         if self.args.save or self.args.save_txt or self.args.save_crop:
             nl = len(list(self.save_dir.glob("labels/*.txt")))  # number of labels
@@ -318,6 +324,11 @@ class BasePredictor:
         self.nms = self.model.nms if hasattr(self.model, "nms") else False
         self.engine = self.model.engine if hasattr(self.model, "engine") else False
         self.onnx = self.model.onnx if hasattr(self.model, "onnx") else False
+        self.rknn = self.model.rknn if hasattr(self.model, "rknn") else False
+        self.names = self.model.names if hasattr(self.model, "names") else None
+
+        self.is_multitask = len(self.names) > 1 if self.names else False
+        self.nc = [len(nc) for nc in self.names] if self.names else [1]
 
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half
@@ -337,7 +348,7 @@ class BasePredictor:
             frame = int(match[1]) if match else None  # 0 if frame undetermined
 
         self.txt_path = self.save_dir / "labels" / (p.stem + ("" if self.dataset.mode == "image" else f"_{frame}"))
-        string += "{:g}x{:g} ".format(*im.shape[2:])
+        string += "{:g}x{:g} ".format(*im.shape[1:3] if self.model.nhwc else im.shape[2:])
         result = self.results[i]
         result.save_dir = self.save_dir.__str__()  # used in other locations
         string += f"{result.verbose()}{result.speed['inference']:.1f}ms"
