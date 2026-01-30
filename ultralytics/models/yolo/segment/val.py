@@ -472,13 +472,18 @@ class SegmentationValidator(DetectionValidator):
         original_shape = self.sahi_aggregator.image_crops[img_key]['original_shape']
         img_idx = self.sahi_aggregator.image_crops[img_key]['original_img_idx']
         
+        # For single task: mask_start_col = 6 (after xyxy, conf, cls)
+        # NMS output format: [x1, y1, x2, y2, conf, cls, mask_coeffs...]
         mask_start_col = 4 + 2 * len(self.nc)
+        
+        # nc for NMS should be a list (the fork's NMS uses sum(nc))
+        nc_for_nms = [1] if self.args.single_cls else self.nc
         
         if len(aggregated_preds_raw) == 0:
             aggregated_preds = torch.empty((0, mask_start_col), device=self.device)
             nms_indices = torch.zeros(0, device=self.device, dtype=torch.long)
         else:
-            # Add tracking indices for NMS
+            # Add tracking indices for NMS - will be preserved as last column of extra data
             tracking_indices = torch.arange(len(aggregated_preds_raw), device=self.device, dtype=aggregated_preds_raw.dtype).unsqueeze(1)
             preds_with_tracking = torch.cat([aggregated_preds_raw, tracking_indices], dim=1)
             preds_for_nms = preds_with_tracking.unsqueeze(0).permute(0, 2, 1)
@@ -491,13 +496,26 @@ class SegmentationValidator(DetectionValidator):
                 multi_label=True,
                 agnostic=self.args.single_cls or self.args.agnostic_nms,
                 max_det=self.args.max_det,
-                nc=[1] if self.args.single_cls else self.nc,
+                nc=nc_for_nms,  # Pass as list (fork's NMS uses sum(nc))
             )
             
             if nms_results and len(nms_results[0]) > 0:
                 preds_with_ids = nms_results[0]
-                nms_indices = preds_with_ids[:, -1].long()
-                aggregated_preds = preds_with_ids[:, :-1]
+                
+                # NMS output format: [x1,y1,x2,y2, conf, cls, extra_data...]
+                # The tracking index should be the last column if mask data was preserved
+                # Expected columns: 4 + 2*len(nc) + 32 (mask) + 1 (tracking) = 39 for single task
+                expected_cols_with_tracking = mask_start_col + 32 + 1  # xyxy + conf/cls + mask + tracking
+                
+                if preds_with_ids.shape[1] >= expected_cols_with_tracking:
+                    # Tracking index was preserved as the last column
+                    nms_indices = preds_with_ids[:, -1].long()
+                    aggregated_preds = preds_with_ids[:, :-1]  # Remove tracking index
+                else:
+                    # NMS didn't preserve mask/tracking data - use sequential matching
+                    # This is normal when NMS strips extra columns
+                    nms_indices = torch.arange(len(preds_with_ids), device=self.device, dtype=torch.long)
+                    aggregated_preds = preds_with_ids
             else:
                 aggregated_preds = torch.empty((0, mask_start_col), device=self.device)
                 nms_indices = torch.zeros(0, device=self.device, dtype=torch.long)
@@ -527,10 +545,16 @@ class SegmentationValidator(DetectionValidator):
         
         # Store for plotting (keep gt_cls in 2D format for proper plotting)
         if self.args.plots and len(self.plotter._sahi_plot_cache) < 16:
-            if img_idx not in self.plotter._sahi_plot_cache:
+            has_gt = len(gt_cls) > 0 and len(gt_bboxes) > 0
+
+            if has_gt and img_idx not in self.plotter._sahi_plot_cache:
                 max_plot_items = 15
                 
-                preds_limited = aggregated_preds[:max_plot_items].clone().cpu() if len(aggregated_preds) else aggregated_preds.clone().cpu()
+                if len(aggregated_preds) > 0:
+                    preds_for_plot = aggregated_preds[:max_plot_items, :6].clone().cpu()
+                else:
+                    preds_for_plot = torch.empty((0, 6))
+                
                 pred_masks_plot = pred_masks[:max_plot_items].cpu().to(torch.uint8) if pred_masks is not None and len(pred_masks) > 0 else None
                 gt_cls_limited = gt_cls[:max_plot_items].clone().cpu() if len(gt_cls) > 0 else gt_cls.clone().cpu()
                 gt_bboxes_limited = gt_bboxes[:max_plot_items].clone().cpu() if len(gt_bboxes) > 0 else gt_bboxes.clone().cpu()
@@ -539,8 +563,8 @@ class SegmentationValidator(DetectionValidator):
                 self.plotter._sahi_plot_cache[img_idx] = {
                     'im_file': self.dataloader.dataset.im_files[img_idx],
                     'original_shape': original_shape,
-                    'predictions': preds_limited,
-                    'gt_cls': gt_cls_limited,  # 2D: (N, n_tasks)
+                    'predictions': preds_for_plot,
+                    'gt_cls': gt_cls_limited,
                     'gt_bboxes': gt_bboxes_limited,
                     'pred_masks': pred_masks_plot,
                     'gt_masks': gt_masks_plot,
@@ -556,7 +580,7 @@ class SegmentationValidator(DetectionValidator):
         Update metrics for a single SAHI-processed image.
                 
         Args:
-            aggregated_preds: NMS'd predictions
+            aggregated_preds: NMS'd predictions [M, cols] where cols = 4 + 2*num_tasks + 32
             gt_cls: Ground truth classes (2D: [N, n_tasks])
             gt_bboxes: Ground truth boxes (normalized xywh)
             gt_masks: Ground truth masks
@@ -566,6 +590,17 @@ class SegmentationValidator(DetectionValidator):
         self.seen += 1
         npr = len(aggregated_preds)
         nl = len(gt_cls)
+        
+        # Validate prediction tensor shape
+        # Expected format after NMS: [x1, y1, x2, y2, conf, cls, mask_coeffs...]
+        # For single task, minimum columns = 6 (4 box + 1 conf + 1 cls)
+        min_cols_required = 4 + 2 * self.num_tasks  # xyxy + (conf, cls) per task
+        
+        if npr > 0 and aggregated_preds.shape[1] < min_cols_required:
+            LOGGER.warning(f"SAHI: aggregated_preds has {aggregated_preds.shape[1]} columns, "
+                         f"expected at least {min_cols_required}. Skipping this image for metrics.")
+            # Still count as seen but don't update stats
+            return
         
         # Initialize statistics for all tasks
         stat = [
@@ -612,8 +647,16 @@ class SegmentationValidator(DetectionValidator):
             gt_cls_task = gt_cls[:, t] if gt_cls.shape[1] > t else gt_cls[:, 0]
             
             # Extract conf/cls for task t (format: [x1,y1,x2,y2, conf0,cls0, conf1,cls1, ..., mask_coeffs])
-            stat[t]["conf"] = aggregated_preds[..., 4 + 2 * t]
-            stat[t]["pred_cls"] = aggregated_preds[..., 5 + 2 * t]
+            conf_idx = 4 + 2 * t
+            cls_idx = 5 + 2 * t
+            
+            # Safety check for column indices
+            if cls_idx >= aggregated_preds.shape[1]:
+                LOGGER.warning(f"SAHI: Cannot access column {cls_idx} in tensor with {aggregated_preds.shape[1]} columns")
+                continue
+            
+            stat[t]["conf"] = aggregated_preds[..., conf_idx]
+            stat[t]["pred_cls"] = aggregated_preds[..., cls_idx]
             
             if nl > 0:
                 stat[t]["tp"] = self._process_batch(aggregated_preds, gt_bboxes_xyxy, gt_cls_task)
@@ -625,7 +668,7 @@ class SegmentationValidator(DetectionValidator):
                     )
                 
                 if self.args.plots:
-                    det = aggregated_preds[..., [0, 1, 2, 3, 4 + 2 * t, 5 + 2 * t]]
+                    det = aggregated_preds[..., [0, 1, 2, 3, conf_idx, cls_idx]]
                     self.confusion_matrices[t].process_batch(det, gt_bboxes_xyxy, gt_cls_task)
             
             for k in self.stats[t].keys():
@@ -747,6 +790,14 @@ class SegmentationValidator(DetectionValidator):
                 
                 if pred_mask is not None:
                     pred_masks[det_idx] = pred_mask
+                
+                # Clear intermediate tensors to free memory
+                del mask_lb, pred_mask
+            
+            # Clear batch tensors after processing each crop
+            del masks_lb, batch_boxes, batch_coeffs
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         
         return pred_masks
 
@@ -829,60 +880,164 @@ class SegmentationValidator(DetectionValidator):
             if gt_masks is None or pred_masks is None:
                 return torch.zeros(len(detections), self.niou, dtype=torch.bool, device=self.device)
             
-            pred_masks_f = pred_masks.float()
-            gt_masks_f = gt_masks.float()
             nl = len(gt_cls)
+            
+            # Process masks in batches to avoid OOM for large images
+            # Estimate memory usage: each mask is (H, W) and we need float copies
+            # Use batch processing if masks are too large
+            pred_shape = pred_masks.shape
+            gt_shape = gt_masks.shape
+            
+            # Calculate approximate memory needed (in elements)
+            # pred_masks: N * H * W (bool -> float = 4x memory)
+            # gt_masks: M * H * W (bool -> float = 4x memory)
+            # Total: (N + M) * H * W * 4 bytes
+            pred_mem = pred_shape[0] * pred_shape[1] * pred_shape[2] * 4
+            gt_mem = gt_shape[0] * gt_shape[1] * gt_shape[2] * 4
+            total_mem_estimate = (pred_mem + gt_mem) / (1024**3)  # GB
+            
+            # Use batch processing if estimated memory > 2GB
+            use_batch_processing = total_mem_estimate > 2.0
+            
+            if use_batch_processing:
+                LOGGER.debug(f"Using batch processing for masks (estimated memory: {total_mem_estimate:.2f} GB, "
+                           f"pred_shape: {pred_shape}, gt_shape: {gt_shape})")
+                # Process masks in smaller batches
+                batch_size = max(1, min(32, len(detections) // 4))  # Adaptive batch size
+                iou_parts = []
+                
+                # Prepare GT masks once (they're smaller)
+                gt_masks_f = gt_masks.float()
+                
+                # Decode merged GT mask if needed
+                if gt_masks_f.shape[0] == 1 and nl > 1:
+                    merged = gt_masks_f[0]
+                    decoded = []
+                    for cid in range(1, nl + 1):
+                        decoded.append((merged == cid).float())
+                    gt_masks_f = torch.stack(decoded, dim=0)
+                
+                # Handle overlap mode for GT
+                if overlap:
+                    if gt_masks_f.shape[0] == 1 and nl > 1:
+                        try:
+                            merged = gt_masks_f[0]
+                            decoded = torch.zeros((nl, *merged.shape), device=gt_masks_f.device, dtype=gt_masks_f.dtype)
+                            for idx in range(nl):
+                                decoded[idx] = (merged == (idx + 1)).float()
+                            gt_masks_f = decoded
+                            overlap = False
+                        except Exception:
+                            overlap = False
+                    else:
+                        overlap = False
 
-            # Decode merged GT mask if needed
-            if gt_masks_f.shape[0] == 1 and nl > 1:
-                merged = gt_masks_f[0]
-                decoded = []
-                for cid in range(1, nl + 1):
-                    decoded.append((merged == cid).float())
-                gt_masks_f = torch.stack(decoded, dim=0)
-
-            # Choose target shape and resize if needed
-            if gt_masks_f.numel() and pred_masks_f.numel():
-                target_shape = gt_masks_f.shape[1:]
-            elif pred_masks_f.numel():
-                target_shape = pred_masks_f.shape[1:]
-            else:
-                target_shape = None
-
-            if target_shape is not None:
-                if pred_masks_f.shape[1:] != target_shape:
-                    pred_masks_f = F.interpolate(
-                        pred_masks_f[None], target_shape, mode="bilinear", align_corners=False
-                    )[0]
+                    if overlap:
+                        index = torch.arange(nl, device=gt_masks_f.device).view(nl, 1, 1) + 1
+                        gt_masks_f = gt_masks_f.repeat(nl, 1, 1)
+                        gt_masks_f = torch.where(gt_masks_f == index, 1.0, 0.0)
+                
+                # Choose target shape
+                target_shape = gt_masks_f.shape[1:] if gt_masks_f.numel() else pred_masks.shape[1:]
+                
+                # Resize GT masks if needed
                 if gt_masks_f.shape[1:] != target_shape:
                     gt_masks_f = F.interpolate(
                         gt_masks_f[None], target_shape, mode="bilinear", align_corners=False
                     )[0]
+                
+                gt_masks_flat = gt_masks_f.view(gt_masks_f.shape[0], -1)
+                
+                # Process pred masks in batches
+                for i in range(0, len(detections), batch_size):
+                    end_idx = min(i + batch_size, len(detections))
+                    pred_batch = pred_masks[i:end_idx]
+                    
+                    # Convert to float only for this batch
+                    pred_batch_f = pred_batch.float()
+                    
+                    # Resize if needed
+                    if pred_batch_f.shape[1:] != target_shape:
+                        pred_batch_f = F.interpolate(
+                            pred_batch_f[None], target_shape, mode="bilinear", align_corners=False
+                        )[0]
+                    
+                    pred_batch_flat = pred_batch_f.view(pred_batch_f.shape[0], -1)
+                    
+                    # Compute IoU for this batch
+                    # mask_iou returns (nl, batch_size) where nl is number of GT masks
+                    iou_batch = mask_iou(gt_masks_flat, pred_batch_flat)
+                    iou_parts.append(iou_batch)
+                    
+                    # Clear batch tensors
+                    del pred_batch_f, pred_batch_flat
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                
+                # Concatenate all IoU results
+                # mask_iou returns (nl, npr), so concatenate along dim=1 (predictions)
+                # Result shape: (nl, len(detections)) - correct for match_predictions
+                iou = torch.cat(iou_parts, dim=1)
+                
+                # Clean up
+                del gt_masks_f, gt_masks_flat, iou_parts
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            else:
+                # Original processing for smaller masks
+                pred_masks_f = pred_masks.float()
+                gt_masks_f = gt_masks.float()
 
-            # Handle overlap mode
-            if overlap:
+                # Decode merged GT mask if needed
                 if gt_masks_f.shape[0] == 1 and nl > 1:
-                    try:
-                        merged = gt_masks_f[0]
-                        decoded = torch.zeros((nl, *merged.shape), device=gt_masks_f.device, dtype=gt_masks_f.dtype)
-                        for idx in range(nl):
-                            decoded[idx] = (merged == (idx + 1)).float()
-                        gt_masks_f = decoded
-                        overlap = False
-                    except Exception:
-                        overlap = False
+                    merged = gt_masks_f[0]
+                    decoded = []
+                    for cid in range(1, nl + 1):
+                        decoded.append((merged == cid).float())
+                    gt_masks_f = torch.stack(decoded, dim=0)
+
+                # Choose target shape and resize if needed
+                if gt_masks_f.numel() and pred_masks_f.numel():
+                    target_shape = gt_masks_f.shape[1:]
+                elif pred_masks_f.numel():
+                    target_shape = pred_masks_f.shape[1:]
                 else:
-                    overlap = False
+                    target_shape = None
 
+                if target_shape is not None:
+                    if pred_masks_f.shape[1:] != target_shape:
+                        pred_masks_f = F.interpolate(
+                            pred_masks_f[None], target_shape, mode="bilinear", align_corners=False
+                        )[0]
+                    if gt_masks_f.shape[1:] != target_shape:
+                        gt_masks_f = F.interpolate(
+                            gt_masks_f[None], target_shape, mode="bilinear", align_corners=False
+                        )[0]
+
+                # Handle overlap mode
                 if overlap:
-                    index = torch.arange(nl, device=gt_masks_f.device).view(nl, 1, 1) + 1
-                    gt_masks_f = gt_masks_f.repeat(nl, 1, 1)
-                    gt_masks_f = torch.where(gt_masks_f == index, 1.0, 0.0)
+                    if gt_masks_f.shape[0] == 1 and nl > 1:
+                        try:
+                            merged = gt_masks_f[0]
+                            decoded = torch.zeros((nl, *merged.shape), device=gt_masks_f.device, dtype=gt_masks_f.dtype)
+                            for idx in range(nl):
+                                decoded[idx] = (merged == (idx + 1)).float()
+                            gt_masks_f = decoded
+                            overlap = False
+                        except Exception:
+                            overlap = False
+                    else:
+                        overlap = False
 
-            iou = mask_iou(
-                gt_masks_f.view(gt_masks_f.shape[0], -1),
-                pred_masks_f.view(pred_masks_f.shape[0], -1),
-            )
+                    if overlap:
+                        index = torch.arange(nl, device=gt_masks_f.device).view(nl, 1, 1) + 1
+                        gt_masks_f = gt_masks_f.repeat(nl, 1, 1)
+                        gt_masks_f = torch.where(gt_masks_f == index, 1.0, 0.0)
+
+                iou = mask_iou(
+                    gt_masks_f.view(gt_masks_f.shape[0], -1),
+                    pred_masks_f.view(pred_masks_f.shape[0], -1),
+                )
         else:
             iou = box_iou(gt_bboxes, detections[:, :4])
 

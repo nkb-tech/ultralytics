@@ -17,6 +17,10 @@ OKS_SIGMA = (
     / 10.0
 )
 
+# RLE (Residual Log-likelihood Estimation) weights for keypoint importance in YOLO26 pose estimation
+RLE_WEIGHT = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.2, 1.2, 1.5, 1.5, 1.0, 1.0, 1.2, 1.2, 1.5, 1.5])
+
+
 class WiseIoULoss(torch.nn.Module):
     momentum = 1e-2
     alpha = 1.7

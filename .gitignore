@@ -181,3 +181,6 @@ timm/
 
 # IDE and notebooks
 *.ipynb
+
+# Test scripts and results
+test_*.py

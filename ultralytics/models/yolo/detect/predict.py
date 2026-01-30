@@ -204,8 +204,11 @@ class DetectionPredictor(BasePredictor):
 
             if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
                 orig_img = self._sahi_orig_imgs[i]
+                # Normalize based on bit depth from config
+                bit_depth = getattr(self.args, 'image_bit_depth', 8)
+                norm_divisor = 65_535.0 if bit_depth == 16 else 255.0
                 orig_tensor = torch.from_numpy(orig_img).permute(2, 0, 1)\
-                    .unsqueeze(0).float().to(self.device) / 255.0
+                    .unsqueeze(0).float().to(self.device) / norm_divisor
 
                 s[i] += self.write_results(i, Path(paths[i]), orig_tensor, s)
 
@@ -267,6 +270,14 @@ class DetectionPredictor(BasePredictor):
 
         results = []
         for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0]):
+            # Handle 16-bit single-channel images (e.g., X-ray images)
+            # Convert 16-bit to 8-bit and triple single channel to 3 channels
+            if orig_img.dtype == np.uint16:
+                orig_img = (orig_img >> 8).astype(np.uint8)
+            if orig_img.ndim == 2:
+                orig_img = orig_img[..., None]
+            if orig_img.shape[2] == 1:
+                orig_img = np.repeat(orig_img, 3, axis=2)
             pred[:, :4] = ops.scale_boxes(img_hw, pred[:, :4], orig_img.shape)
             results.append(Results(orig_img, path=img_path, names=self.model.names, boxes=pred))
         return results

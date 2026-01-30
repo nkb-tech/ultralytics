@@ -20,6 +20,7 @@ from ultralytics.utils.loss import (
     E2EDetectLoss,
     E2EPoseLoss,
     E2ESegmentLoss,
+    PoseLoss26,
     v8ClassificationLoss,
     v8DetectionLoss,
     v8OBBLoss,
@@ -244,7 +245,7 @@ class BaseModel(nn.Module):
         m = self.model[-1]  # Detect()
         if isinstance(m,(Detect, v11Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
                     Detect_Efficient, DetectAux, Detect_SEAM, Detect_MultiSEAM, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_DyHead_Prune,
-                    Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Detect_LADH, Segment_LADH, Detect_LSCSBD, Segment_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
+                    Detect_LSCD, Detect_TADDH, Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Detect_LADH, Segment_LADH, Detect_LSCSBD, Segment_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
             m.stride = fn(m.stride)
             m.anchors = fn(m.anchors)
             m.strides = fn(m.strides)
@@ -317,7 +318,7 @@ class DetectionModel(BaseModel):
         m = self.model[-1]  # Detect()
         if isinstance(m, (Detect, v11Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
                 Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM, Detect_DyHead_Prune, 
-                Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Pose, Pose_LSCD, Pose_TADDH, OBB, OBB_LSCD, OBB_TADDH,
+                Detect_LSCD, Detect_TADDH, Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Pose, Pose26, Pose_LSCD, Pose_TADDH, OBB, OBB26, OBB_LSCD, OBB_TADDH,
                 Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH, Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetec
             s = 256  # 2x min stride
             m.inplace = self.inplace
@@ -327,7 +328,7 @@ class DetectionModel(BaseModel):
                 if self.end2end:
                     y = self.forward(x)["one2many"]
                     return y[0] if isinstance(m, (v10Pose, v10Segment)) else y
-                return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
+                return self.forward(x)[0] if isinstance(m, (Segment, Segment26, Pose, Pose26, OBB, OBB26)) else self.forward(x)
 
             m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
@@ -438,7 +439,14 @@ class PoseModel(DetectionModel):
 
     def init_criterion(self, weights=None):
         """Initialize the loss criterion for the PoseModel."""
-        return E2EPoseLoss(self) if getattr(self, "end2end", False) else v8PoseLoss(self)
+        # Check if using Pose26 head (has RealNVP flow model)
+        has_pose26 = hasattr(self.model[-1], "flow_model") and self.model[-1].flow_model is not None
+        if getattr(self, "end2end", False):
+            return E2EPoseLoss(self)
+        elif has_pose26:
+            return PoseLoss26(self)
+        else:
+            return v8PoseLoss(self)
 
 
 
@@ -1168,11 +1176,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = sum(ch[x] for x in f)
         elif m in (Detect, v11Detect, WorldDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom,
                    Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM,
-                   Detect_DyHead_Prune, Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH,
-                   Pose, Pose_LSCD, Pose_TADDH, OBB, OBB_LSCD, OBB_TADDH, Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH,
-                   Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect,v10Pose, v10Segment):
+                   Detect_DyHead_Prune, Detect_LSCD, Detect_TADDH, Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH,
+                   Pose, Pose26, Pose_LSCD, Pose_TADDH, OBB, OBB26, OBB_LSCD, OBB_TADDH, Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH,
+                   Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect, v10Pose, v10Segment):
             args.append([ch[x] for x in f])
-            if m is(Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Segment_LADH, Segment_LSCSBD):
+            if m in (Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Segment_LADH, Segment_LSCSBD):
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
                 if m in (Segment_LSCD, Segment_TADDH, Segment_LSCSBD):
                     args[3] = make_divisible(min(args[3], max_channels) * width, 8)
@@ -1180,6 +1188,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args[1] = make_divisible(min(args[1], max_channels) * width, 8)
             if m in (Pose_LSCD, Pose_TADDH, Pose_LSCSBD, OBB_LSCD, OBB_TADDH, OBB_LSCSBD):
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
+            # Store end2end flag from config for setting after module creation
+            _end2end_from_config = d.get("end2end", False)
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
             
@@ -1338,6 +1348,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         else:
             m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
             t = str(m)[8:-2].replace("__main__.", "")  # module type
+            
+            # Set end2end attribute from config for Detect heads (YOLO26 support)
+            if '_end2end_from_config' in dir() and _end2end_from_config and hasattr(m_, 'end2end'):
+                m_.end2end = _end2end_from_config
+                # Initialize one2one heads for end2end mode
+                if _end2end_from_config and not hasattr(m_, 'one2one_cv2'):
+                    import copy
+                    m_.one2one_cv2 = copy.deepcopy(m_.cv2)
+                    m_.one2one_cv3 = copy.deepcopy(m_.cv3)
+                    
         np = sum(x.numel() for x in m_.parameters())  # number params
         m_.i, m_.f, m_.type, m_.np = i + 4 if is_backbone else i, f, t, np  # attach index, 'from' index, type, number params
         if verbose:
@@ -1374,6 +1394,8 @@ def yaml_model_load(path):
     nc = d.get("nc", None)
     if isinstance(nc, int):
         d["nc"] = [nc]
+    elif isinstance(nc, list):
+        d["nc"] = nc  # Already a list (multihead format)
     else:
         raise SyntaxError(emojis(f"{yaml_file} key missing ❌. either 'names' or 'nc' are required in all model YAMLs."))
     return d
@@ -1419,11 +1441,11 @@ def guess_model_task(model):
             return "classify"
         if "detect" in m:
             return "detect"
-        if m == "segment":
+        if "segment" in m:  # matches segment, segment26
             return "segment"
-        if m == "pose":
+        if "pose" in m:  # matches pose, pose26
             return "pose"
-        if m == "obb":
+        if "obb" in m:  # matches obb, obb26
             return "obb"
 
     # Guess from model cfg
@@ -1441,13 +1463,13 @@ def guess_model_task(model):
                 return cfg2task(eval(x))
 
         for m in model.modules():
-            if isinstance(m, (Segment, v10Segment)):
+            if isinstance(m, (Segment, Segment26, v10Segment)):
                 return "segment"
             elif isinstance(m, Classify):
                 return "classify"
-            elif isinstance(m, (Pose, v10Pose)):
+            elif isinstance(m, (Pose, Pose26, v10Pose)):
                 return "pose"
-            elif isinstance(m, OBB):
+            elif isinstance(m, (OBB, OBB26)):
                 return "obb"
             elif isinstance(m, (Detect, WorldDetect, v10Detect, v11Detect)):
                 return "detect"

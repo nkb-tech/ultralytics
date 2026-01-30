@@ -12,6 +12,7 @@ time: # (float, optional) number of hours to train for, overrides epochs if supp
 patience: 100 # (int) epochs to wait for no observable improvement for early stopping of training
 batch: 16 # (int) number of images per batch (-1 for AutoBatch)
 imgsz: 640 # (int | list) input images size as int for train and val modes, or list[h,w] for predict and export modes
+image_bit_depth: 8 # (int) image bit depth for normalization: 8 (0-255) or 16 (0-65535, e.g. X-ray)
 min_bbox: 20 # (int) min size of original bbox for detect task
 min_imgsz: 25 # (int) min size of original image
 save: True # (bool) save train checkpoints and predict results

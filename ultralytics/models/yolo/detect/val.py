@@ -119,6 +119,9 @@ class DetectionValidator(BaseValidator):
         Args:
             model: YOLO model being validated
         """
+        # Store model reference for SAHI raw prediction extraction
+        self.model = model
+        
         val = self.data.get(self.args.split, "")
         
         # Detect COCO/LVIS datasets
@@ -214,12 +217,13 @@ class DetectionValidator(BaseValidator):
         is_rknn = getattr(self, 'rknn', False)
         is_int8 = getattr(self, 'int8', False)
         
-        if is_rknn:
-            # RKNN: use specific dtype, no normalization (handled by model's mean/std)
-            batch["img"] = batch["img"].to(torch.uint8 if is_int8 else torch.float16 if self.args.half else torch.float32)
-        else:
-            # Standard models: use half/float and normalize
-            batch["img"] = (batch["img"].half() if self.args.half else batch["img"].float()) / 255
+        batch["img"] = batch["img"].to(torch.uint8 if is_int8 else torch.float16 if self.args.half else torch.float32)
+        
+        # RKNN has his own normalization
+        if not is_rknn:
+            # Normalize images based on bit depth from config
+            bit_depth = getattr(self.args, 'image_bit_depth', 8)
+            batch["img"] /= 255.0 if if bit_depth == 8 else 65_535.0
 
         # Store image dimensions (H, W) - batch is always BCHW from dataloader
         self._img_hw = (int(batch["img"].shape[2]), int(batch["img"].shape[3]))
@@ -243,6 +247,7 @@ class DetectionValidator(BaseValidator):
         Apply Non-maximum suppression to predictions.
         
         For SAHI mode, also stores raw predictions for aggregation.
+        For end2end models (YOLO26/v10), extracts raw predictions before postprocess.
         
         Args:
             preds: Model predictions
@@ -261,8 +266,10 @@ class DetectionValidator(BaseValidator):
         
         if isinstance(preds, (list, tuple)):
             actual_preds = preds[0]
+            raw_dict = preds[1] if len(preds) > 1 else None
         else:
             actual_preds = preds
+            raw_dict = None
         
         if not isinstance(actual_preds, torch.Tensor):
             LOGGER.error(f"Error in postprocess: 'actual_preds' is not a tensor, but {type(actual_preds)}")
@@ -270,7 +277,17 @@ class DetectionValidator(BaseValidator):
 
         # Store raw predictions for SAHI aggregation
         if self.sahi_enabled:
-            self._last_raw_preds = actual_preds.clone()
+            # For end2end models, we need to reconstruct raw predictions
+            # because actual_preds is already postprocessed to [batch, max_det, 6]
+            if raw_dict is not None and isinstance(raw_dict, dict) and 'one2one' in raw_dict:
+                raw_preds = self._get_raw_preds_from_end2end(raw_dict['one2one'])
+                if raw_preds is not None:
+                    self._last_raw_preds = raw_preds
+                else:
+                    # Fallback to actual_preds if extraction failed
+                    self._last_raw_preds = actual_preds.clone()
+            else:
+                self._last_raw_preds = actual_preds.clone()
             
         return ops.non_max_suppression(
             actual_preds,
@@ -281,6 +298,67 @@ class DetectionValidator(BaseValidator):
             max_det=self.args.max_det,
             nc=[1] if self.args.single_cls else self.nc,
         )
+    
+    def _get_raw_preds_from_end2end(self, one2one_feats):
+        """
+        Reconstruct raw predictions from end2end one2one features.
+        
+        For SAHI, we need predictions in format [batch, 4+nc, anchors] before
+        the end2end postprocess() converts them to [batch, max_det, 6].
+        
+        Args:
+            one2one_feats: List of feature maps from one2one head [BCHW, ...]
+        
+        Returns:
+            Raw predictions tensor [batch, 4+nc, anchors]
+        """
+        from ultralytics.utils.tal import make_anchors
+        
+        if not isinstance(one2one_feats, list) or len(one2one_feats) == 0:
+            return None
+        
+        # Get model's detection head for decoding
+        detect_head = None
+        # self.model is already unwrapped (DetectionModel), so iterate directly
+        model_to_search = self.model.model if hasattr(self.model, 'model') else self.model
+        for m in model_to_search.modules():
+            if hasattr(m, 'decode_bboxes') and hasattr(m, 'dfl'):
+                detect_head = m
+                break
+        
+        if detect_head is None:
+            LOGGER.warning("Could not find detection head for end2end raw prediction extraction")
+            return None
+        
+        try:
+            # Concatenate features from all scales
+            shape = one2one_feats[0].shape  # BCHW
+            no = detect_head.no if hasattr(detect_head, 'no') else one2one_feats[0].shape[1]
+            x_cat = torch.cat([xi.view(shape[0], no, -1) for xi in one2one_feats], 2)
+            
+            # Decode boxes (same as _inference() but returns full raw format)
+            reg_max = detect_head.reg_max if hasattr(detect_head, 'reg_max') else 16
+            box = x_cat[:, : reg_max * 4]
+            cls = x_cat[:, reg_max * 4 :]
+            
+            # Make anchors if needed
+            if not hasattr(detect_head, 'anchors') or detect_head.anchors.numel() == 0:
+                detect_head.anchors, detect_head.strides = (
+                    x.transpose(0, 1) for x in make_anchors(one2one_feats, detect_head.stride, 0.5)
+                )
+            
+            dbox = detect_head.decode_bboxes(
+                detect_head.dfl(box), 
+                detect_head.anchors.unsqueeze(0)
+            ) * detect_head.strides
+            
+            # Return concatenated [dbox, cls.sigmoid()] - same format as _inference()
+            # Shape: [batch, 4+nc, anchors]
+            return torch.cat((dbox, cls.sigmoid()), 1)
+            
+        except Exception as e:
+            LOGGER.warning(f"Error extracting raw predictions for SAHI: {e}")
+            return None
 
     def _prepare_batch(self, si, batch):
         """
@@ -503,8 +581,13 @@ class DetectionValidator(BaseValidator):
         # Get aggregated predictions
         aggregated_preds_raw = self.sahi_aggregator.get_aggregated_predictions(img_key)
         
+        # nc for NMS should be a list (the fork's NMS uses sum(nc))
+        nc_for_nms = [1] if self.args.single_cls else self.nc
+        
+        min_cols = 4 + 2 * len(self.nc)  # xyxy + (conf, cls) per task
+        
         if len(aggregated_preds_raw) == 0:
-            aggregated_preds = torch.empty((0, 4 + 2 * len(self.nc)), device=self.device)
+            aggregated_preds = torch.empty((0, min_cols), device=self.device)
         else:
             # Apply NMS
             preds_for_nms = aggregated_preds_raw.unsqueeze(0).permute(0, 2, 1)
@@ -516,9 +599,9 @@ class DetectionValidator(BaseValidator):
                 labels=[],
                 agnostic=self.args.single_cls or self.args.agnostic_nms,
                 max_det=self.args.max_det,
-                nc=[1] if self.args.single_cls else self.nc,
+                nc=nc_for_nms,  # Pass as list (fork's NMS uses sum(nc))
             )
-            aggregated_preds = nms_results[0] if nms_results else torch.empty((0, 4 + 2 * len(self.nc)), device=self.device)
+            aggregated_preds = nms_results[0] if nms_results else torch.empty((0, min_cols), device=self.device)
         
         # Get ground truth
         img_idx = self.sahi_aggregator.image_crops[img_key]['original_img_idx']
@@ -571,6 +654,14 @@ class DetectionValidator(BaseValidator):
         self.seen += 1
         npr = len(preds)
         
+        # Validate prediction tensor shape
+        min_cols_required = 4 + 2 * self.num_tasks  # xyxy + (conf, cls) per task
+        
+        if npr > 0 and preds.shape[1] < min_cols_required:
+            LOGGER.warning(f"SAHI: preds has {preds.shape[1]} columns, "
+                         f"expected at least {min_cols_required}. Skipping this image for metrics.")
+            return
+        
         stat = [
             dict(
                 conf=torch.zeros(0, device=self.device),
@@ -614,13 +705,22 @@ class DetectionValidator(BaseValidator):
         
         for t in range(self.num_tasks):
             gt_cls = cls[:, t] if cls.dim() > 1 else cls
-            stat[t]["conf"] = preds[..., 4 + 2 * t]
-            stat[t]["pred_cls"] = preds[..., 5 + 2 * t]
+            
+            # Safety check for column indices
+            conf_idx = 4 + 2 * t
+            cls_idx = 5 + 2 * t
+            
+            if cls_idx >= preds.shape[1]:
+                LOGGER.warning(f"SAHI: Cannot access column {cls_idx} in tensor with {preds.shape[1]} columns")
+                continue
+            
+            stat[t]["conf"] = preds[..., conf_idx]
+            stat[t]["pred_cls"] = preds[..., cls_idx]
             
             if nl:
                 stat[t]["tp"] = self._process_batch(preds, gt_bboxes_xyxy, gt_cls, task=t)
                 if self.args.plots:
-                    det = preds[..., [0, 1, 2, 3, 4 + 2 * t, 5 + 2 * t]]
+                    det = preds[..., [0, 1, 2, 3, conf_idx, cls_idx]]
                     self.confusion_matrices[t].process_batch(det, gt_bboxes_xyxy, gt_cls)
             
             for k in self.stats[t].keys():

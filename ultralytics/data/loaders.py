@@ -18,6 +18,7 @@ from PIL import Image
 from ultralytics.data.utils import FORMATS_HELP_MSG, IMG_FORMATS, VID_FORMATS
 from ultralytics.utils import IS_COLAB, IS_KAGGLE, LOGGER, ops
 from ultralytics.utils.checks import check_requirements
+from ultralytics.utils.patches import imread
 
 
 @dataclass
@@ -360,7 +361,7 @@ class LoadImagesAndVideos:
                         self._new_video(self.files[self.count])
             else:
                 self.mode = "image"
-                im0 = cv2.imread(path)  # BGR
+                im0 = imread(path)
                 if im0 is None:
                     LOGGER.warning(f"WARNING ⚠️ Image Read Error {path}")
                 else:
@@ -481,11 +482,20 @@ class LoadTensor:
         if im.shape[2] % stride or im.shape[3] % stride:
             raise ValueError(s)
         if im.max() > 1.0 + torch.finfo(im.dtype).eps:  # torch.float32 eps is 1.2e-07
-            LOGGER.warning(
-                f"WARNING ⚠️ torch.Tensor inputs should be normalized 0.0-1.0 but max value is {im.max()}. "
-                f"Dividing input by 255."
-            )
-            im = im.float() / 255.0
+            # Determine if image is 8-bit (max <= 255) or 16-bit (max > 255)
+            max_val = im.max().item()
+            if max_val > 255:
+                LOGGER.warning(
+                    f"WARNING ⚠️ torch.Tensor inputs should be normalized 0.0-1.0 but max value is {max_val}. "
+                    f"Dividing input by 65535 (16-bit image)."
+                )
+                im = im.float() / 65_535.0
+            else:
+                LOGGER.warning(
+                    f"WARNING ⚠️ torch.Tensor inputs should be normalized 0.0-1.0 but max value is {max_val}. "
+                    f"Dividing input by 255 (8-bit image)."
+                )
+                im = im.float() / 255.0
 
         return im
 
