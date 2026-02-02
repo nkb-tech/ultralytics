@@ -243,7 +243,7 @@ class BaseModel(nn.Module):
         """
         self = super()._apply(fn)
         m = self.model[-1]  # Detect()
-        if isinstance(m,(Detect, v11Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
+        if isinstance(m,(Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
                     Detect_Efficient, DetectAux, Detect_SEAM, Detect_MultiSEAM, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_DyHead_Prune,
                     Detect_LSCD, Detect_TADDH, Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Detect_LADH, Segment_LADH, Detect_LSCSBD, Segment_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
             m.stride = fn(m.stride)
@@ -316,7 +316,7 @@ class DetectionModel(BaseModel):
 
         # Build strides
         m = self.model[-1]  # Detect()
-        if isinstance(m, (Detect, v11Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
+        if isinstance(m, (Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
                 Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM, Detect_DyHead_Prune, 
                 Detect_LSCD, Detect_TADDH, Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Pose, Pose26, Pose_LSCD, Pose_TADDH, OBB, OBB26, OBB_LSCD, OBB_TADDH,
                 Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH, Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetec
@@ -326,9 +326,19 @@ class DetectionModel(BaseModel):
             def _forward(x):
                 """Performs a forward pass through the model, handling different Detect subclass types accordingly."""
                 if self.end2end:
-                    y = self.forward(x)["one2many"]
+                    raw = self.forward(x)
+                    y = raw["one2many"]
+                    # Extract feats from dict if returned by forward_head
+                    if isinstance(y, dict) and "feats" in y:
+                        y = y["feats"]
                     return y[0] if isinstance(m, (v10Pose, v10Segment)) else y
-                return self.forward(x)[0] if isinstance(m, (Segment, Segment26, Pose, Pose26, OBB, OBB26)) else self.forward(x)
+                result = self.forward(x)
+                # Handle tuple return (inference mode) or dict return (training mode)
+                if isinstance(result, tuple):
+                    result = result[0] if isinstance(m, (Segment, Segment26, Pose, Pose26, OBB, OBB26)) else result[1]
+                if isinstance(result, dict) and "feats" in result:
+                    result = result["feats"]
+                return result
 
             m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
@@ -989,6 +999,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
 def install_cv3_compat_hook(model: nn.Module):
     """
     Attach a load_state_dict pre-hook that:
+      - Converts legacy=True/False to head_mode="legacy"/"efficient"
       - Wraps model.cv3 into ModuleList([cv3]) if it's not already a nested ModuleList
       - Transforms old-style state_dict keys '...cv3.i.j.*' into '...cv3.0.i.j.*'
     Call this once, before model.load_state_dict(...).
@@ -1003,6 +1014,10 @@ def install_cv3_compat_hook(model: nn.Module):
                          unexpected_keys: list,
                          error_msgs: list):
 
+        # ---- 0) Convert legacy attribute to head_mode if present
+        if hasattr(module, "legacy") and not hasattr(module, "head_mode"):
+            module.head_mode = "legacy" if module.legacy else "efficient"
+        
         # ---- 1) Ensure model side is nested: ModuleList[ModuleList[Sequential]]
         cv3 = getattr(module, "cv3", None)
         if isinstance(cv3, nn.ModuleList):
@@ -1010,6 +1025,10 @@ def install_cv3_compat_hook(model: nn.Module):
             if needs_wrap:
                 # Wrap to represent a single classification task
                 module.cv3 = nn.ModuleList([cv3])
+                # Also wrap one2one_cv3 if present
+                if hasattr(module, "one2one_cv3") and isinstance(module.one2one_cv3, nn.ModuleList):
+                    if len(module.one2one_cv3) == 0 or not isinstance(module.one2one_cv3[0], nn.ModuleList):
+                        module.one2one_cv3 = nn.ModuleList([module.one2one_cv3])
                 # If you keep `nc` as a scalar in older code, normalize it to a list of one.
                 if hasattr(module, "nc") and isinstance(module.nc, int):
                     module.nc = [module.nc]
@@ -1035,6 +1054,17 @@ def install_cv3_compat_hook(model: nn.Module):
                     # Move tensor to new key
                     state_dict[new_k] = state_dict[k]
                     del state_dict[k]
+        
+        # ---- 3) Also handle one2one_cv3 keys
+        one2one_keys = [k for k in list(state_dict.keys()) if k.startswith(prefix + "one2one_cv3.")]
+        if one2one_keys and any(_is_old(k.replace("one2one_cv3", "cv3")) for k in one2one_keys):
+            for k in one2one_keys:
+                m = re.match(rf"^{re.escape(prefix)}one2one_cv3\.(\d+)\.(\d+)\.(.+)$", k)
+                if m:
+                    i, j, rest = m.groups()
+                    new_k = f"{prefix}one2one_cv3.0.{i}.{j}.{rest}"
+                    state_dict[new_k] = state_dict[k]
+                    del state_dict[k]
 
     # Register with a signature that includes 'module' when available
     try:
@@ -1053,7 +1083,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
     # Args
     max_channels = float("inf")
+    legacy = d.get("legacy", False)  # backward compatibility for v3/v5/v8/v9 models
     nc, act, scales = (d.get(x) for x in ("nc", "activation", "scales"))
+    end2end = d.get("end2end", False)  # default to False for models without end2end config
+    reg_max = d.get("reg_max", 16)
     depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
     if scales:
         scale = d.get("scale")
@@ -1174,12 +1207,13 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in (Detect, v11Detect, WorldDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom,
+        elif m in (Detect, WorldDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom,
                    Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM,
                    Detect_DyHead_Prune, Detect_LSCD, Detect_TADDH, Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH,
                    Pose, Pose26, Pose_LSCD, Pose_TADDH, OBB, OBB26, OBB_LSCD, OBB_TADDH, Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH,
                    Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect, v10Pose, v10Segment):
-            args.append([ch[x] for x in f])
+            args.extend([reg_max, end2end, [ch[x] for x in f]])
+            m.legacy = legacy
             if m in (Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Segment_LADH, Segment_LSCSBD):
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
                 if m in (Segment_LSCD, Segment_TADDH, Segment_LSCSBD):
@@ -1188,8 +1222,6 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args[1] = make_divisible(min(args[1], max_channels) * width, 8)
             if m in (Pose_LSCD, Pose_TADDH, Pose_LSCSBD, OBB_LSCD, OBB_TADDH, OBB_LSCSBD):
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            # Store end2end flag from config for setting after module creation
-            _end2end_from_config = d.get("end2end", False)
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
             
@@ -1471,7 +1503,7 @@ def guess_model_task(model):
                 return "pose"
             elif isinstance(m, (OBB, OBB26)):
                 return "obb"
-            elif isinstance(m, (Detect, WorldDetect, v10Detect, v11Detect)):
+            elif isinstance(m, (Detect, WorldDetect, v10Detect)):
                 return "detect"
 
     # Guess from model filename

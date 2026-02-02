@@ -239,6 +239,7 @@ class DetectionPredictor(BasePredictor):
         """Post-processes predictions and returns a list of Results objects."""
 
         nhwc = getattr(self.model, "nhwc", False)
+        end2end = getattr(self.model, "end2end", False)
         img_hw = tuple(int(i) for i in (img.shape[1:3] if nhwc else img.shape[2:4]))
 
         if self.nms: # nms inside the graph
@@ -248,11 +249,19 @@ class DetectionPredictor(BasePredictor):
                 preds = ops.process_nms_onnx_results(preds)
         else:
             if self.rknn:
-                preds = ops.process_rknn_dfl_results(
-                    input_data=preds,
-                    imgsz=img_hw,
-                    conf_thres=self.args.conf,
-                )
+                if not end2end:
+                    preds = ops.process_rknn_dfl_results(
+                        input_data=preds,
+                        imgsz=img_hw,
+                        conf_thres=self.args.conf,
+                    )
+                else:
+                    preds = ops.process_rknn_end2end_results(
+                        input_data=preds,
+                        imgsz=img_hw,
+                        conf_thres=self.args.conf,
+                        nc=self.nc,
+                    )
 
             agnostic = self.args.agnostic_nms or self.is_multitask
             preds = ops.non_max_suppression(
@@ -263,6 +272,8 @@ class DetectionPredictor(BasePredictor):
                 nc=self.nc,
                 max_det=self.args.max_det,
                 classes=self.args.classes,
+                end2end=getattr(self.model, "end2end", False),
+                rotated=self.args.task == "obb",
             )
 
         if not isinstance(orig_imgs, list):

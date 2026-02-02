@@ -442,12 +442,16 @@ class Exporter:
         model.eval()
         model.float()
         model = model.fuse()
+        head_mode = 'legacy'
+        end2end = False
         for m in model.modules():
             if isinstance(m, (Detect, RTDETRDecoder)):  # includes all Detect subclasses like Segment, Pose, OBB
                 m.dynamic = self.args.dynamic
                 m.export = True
                 m.format = self.args.format
                 m.max_det = self.args.max_det
+                head_mode = getattr(m, "head_mode", "legacy")
+                end2end = getattr(m, "end2end", False)
                 if self.args.nms and m.end2end:
                     LOGGER.warning(
                         "WARNING ⚠️ Your model is already end2end, no need to include nms inside the graph."
@@ -499,7 +503,7 @@ class Exporter:
         )
         self.pretty_name = Path(self.model.yaml.get("yaml_file", self.file)).stem.replace("yolo", "YOLO")
         data = model.args["data"] if hasattr(model, "args") and isinstance(model.args, dict) else ""
-        description = f'NKBTech {self.pretty_name} model {f"trained on {data}" if data else ""}'
+        description = f'NKBTech {self.pretty_name} model{f" trained on {data}" if data else ""}'
         self.metadata = {
             "description": description,
             "author": "NKBTech LLC",
@@ -517,6 +521,8 @@ class Exporter:
             "conf": self.args.conf,
             "max_det": self.args.max_det,
             "dtype": "uint8" if self.args.int8 else "float16" if self.args.half else "float32",
+            "head_mode": head_mode,
+            "end2end": end2end,
         }  # model metadata
         if model.task == "pose":
             self.metadata["kpt_shape"] = model.model[-1].kpt_shape
@@ -702,6 +708,7 @@ class Exporter:
             output_names=output_names,
             dynamic_axes=dynamic or None,
             operator_export_type=torch.onnx.OperatorExportTypes.ONNX_ATEN_FALLBACK,
+            dynamo=False,
         )
 
         # Checks
@@ -1470,7 +1477,7 @@ class Exporter:
                 float_dtype="float16",
             )
 
-        dynamic_input = [[self.args.batch, 3, *self.imgsz]] if self.args.dynamic else None
+        dynamic_input = [[[self.args.batch, 3, *self.imgsz]]] if self.args.dynamic else None
 
         rknn = RKNN(
             verbose=self.args.verbose,

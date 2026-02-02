@@ -105,7 +105,6 @@ from .head import (
     v10Detect,
     v10Pose,
     v10Segment,
-    v11Detect,
     PostDetectTRTNMS,
     PostDetectONNXNMS,
 )
@@ -188,7 +187,6 @@ __all__ = (
     "v10Detect",
     "v10Pose",
     "v10Segment",
-    "v11Detect",
     "PostDetectTRTNMS",
     "PostDetectONNXNMS",
     "ImagePoolingAttn",

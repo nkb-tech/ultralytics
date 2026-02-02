@@ -504,7 +504,8 @@ class AutoBackend(nn.Module):
             batch = metadata["batch"]
             imgsz = metadata["imgsz"]
             names = metadata["names"]
-            nms = metadata["nms"]
+            nms = self.str2bool(metadata["nms"])
+            end2end = self.str2bool(metadata["end2end"])
             conf = metadata["conf"]
             max_det = metadata["max_det"]
             kpt_shape = metadata.get("kpt_shape", None)
@@ -533,6 +534,17 @@ class AutoBackend(nn.Module):
                 p.requires_grad = False
 
         self.__dict__.update(locals())  # assign all variables to self
+
+    @staticmethod
+    def str2bool(data: str) -> bool:
+        if data is None:
+            return False
+        elif isinstance(data, str):
+            return data.strip().lower() in {"1", "true", "yes", "y", "on"}
+        elif isinstance(data, bool):
+            return data
+        else:
+            raise NotImplementedError(type(data))
 
     def forward(self, im, augment=False, visualize=False, embed=None):
         """

@@ -223,7 +223,7 @@ class DetectionValidator(BaseValidator):
         if not is_rknn:
             # Normalize images based on bit depth from config
             bit_depth = getattr(self.args, 'image_bit_depth', 8)
-            batch["img"] /= 255.0 if if bit_depth == 8 else 65_535.0
+            batch["img"] /= 255.0 if bit_depth == 8 else 65_535.0
 
         # Store image dimensions (H, W) - batch is always BCHW from dataloader
         self._img_hw = (int(batch["img"].shape[2]), int(batch["img"].shape[3]))

@@ -182,6 +182,7 @@ def non_max_suppression(
     max_wh=7680,
     in_place=True,
     rotated=False,
+    end2end=False,
 ):
     """
     Perform non-maximum suppression (NMS) on a set of boxes, with support for masks and multiple labels per box.
@@ -225,7 +226,7 @@ def non_max_suppression(
     if classes is not None:
         classes = torch.tensor(classes, device=prediction.device)
 
-    if prediction.shape[-1] == 6 or prediction.shape[-2] == max_det:  # end-to-end model (BNC, i.e. 1,300,6)
+    if prediction.shape[-1] == 6 or prediction.shape[-2] == max_det or end2end:  # end-to-end model (BNC, i.e. 1,300,6)
         output = [pred[pred[:, 4] > conf_thres] for pred in prediction]
         if classes is not None:
             output = [pred[(pred[:, 5:6] == classes).any(1)] for pred in output]
@@ -769,100 +770,88 @@ def process_rknn_dfl_results(
 
     return torch.cat((boxes, classes_conf), dim=1)
 
+def process_rknn_end2end_results(
+    input_data: List[Tensor],
+    imgsz: tuple[int, int] = (640, 640),
+    conf_thres: float = 0.01,
+    nc: list[int] = [80],
+    strides: tuple[int, ...] = (8, 16, 32),
+) -> Tensor:
+    """Process RKNN end2end model outputs into predictions format for NMS.
 
-# def process_rknn_dfl_results(
-#     preds: list[Tensor],
-#     imgsz: tuple[int, int] = (640, 640),
-#     nc: list[int] = [80],
-# ) -> Tensor:
-#     """
-#     Decode RKNN Detect head outputs (pre-DFL) into YOLO-style predictions using pure torch ops.
+    This function takes raw outputs from an RKNN-exported YOLO model (with end2end=True)
+    and converts them to the standard prediction format expected by non_max_suppression.
 
-#     Args:
-#         preds (list[torch.Tensor]): Outputs collected in `Detect.pre_forward` when
-#             `self.export` and `self.format == "rknn"`. The layout per detection branch is
-#             [box_dist_level_0, cls_head_0_level_0, cls_sum_0_level_0, box_dist_level_1, cls_head_1_level_1, cls_sum_1_level_1, ...].
-#         imgsz (int | tuple[int, int]): Input resolution used during export/inference.
-#         nc (Sequence[int] | int): Number of classes per head (matches `Detect.nc` ordering).
+    Args:
+        input_data: List of tensors from RKNN model in format [reg0, cls0, reg1, cls1, ...]
+                   where reg shape is (bs, 4, h, w) and cls shape is (bs, nc, h, w).
+                   For multitask models: [reg0, cls0_task0, cls0_task1, ..., reg1, ...]
+        imgsz: Model input size (height, width) used during export.
+        conf_thres: Confidence threshold for early filtering (optional optimization).
+        nc: Number of classes. Can be int for single task or list for multitask.
+        strides: Feature map strides for each detection layer.
 
-#     Returns:
-#         torch.Tensor: Tensor shaped (batch, 4 + sum(num_classes), num_boxes) ready for NMS.
-#     """
+    Returns:
+        Tensor: Predictions with shape (batch_size, num_anchors, 4 + sum(nc))
+                Box format is xyxy coordinates, scores are after sigmoid.
 
-#     if not preds:
-#         return torch.empty(0)
+    Examples:
+        >>> outputs = model(img)  # RKNN model outputs
+        >>> preds = process_rknn_end2end_results(outputs, imgsz=(640, 640), nc=80)
+        >>> results = non_max_suppression(preds, conf_thres=0.25, iou_thres=0.45)
+    """
+    from ultralytics.utils.tal import dist2bbox, make_anchors
 
-#     device = preds[0].device
-#     dtype = preds[0].dtype
-#     bs = preds[0].shape[0]
+    num_tasks = len(nc)
+    total_nc = sum(nc)
 
-#     img_h, img_w = imgsz
+    # Determine number of detection layers
+    # Format: [reg0, cls0_t0, cls0_t1, ..., reg1, cls1_t0, ...]
+    # Each scale has 1 reg + num_tasks cls outputs
+    outputs_per_scale = 1 + num_tasks
+    nl = len(input_data) // outputs_per_scale
 
-#     grid_cache, stride_cache, proj_cache = {}, {}, {}
+    bs = input_data[0].shape[0]
 
-#     def _get_grid(h, w):
-#         key = (h, w)
-#         if key not in grid_cache:
-#             y = torch.arange(h, device=device, dtype=dtype)
-#             x = torch.arange(w, device=device, dtype=dtype)
-#             grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
-#             grid_cache[key] = torch.stack((grid_x, grid_y), 0).unsqueeze(0)
-#         return grid_cache[key]
+    regs, clss, feats = [], [], []
 
-#     def _get_stride(h, w):
-#         key = (h, w)
-#         if key not in stride_cache:
-#             stride = torch.tensor([img_w / w, img_h / h], device=device, dtype=dtype).view(1, 2, 1, 1)
-#             stride_cache[key] = stride
-#         return stride_cache[key]
+    for i in range(nl):
+        base_idx = i * outputs_per_scale
+        reg = input_data[base_idx]  # (bs, 4, h, w)
+        h, w = reg.shape[2], reg.shape[3]
 
-#     def _get_proj(reg_max):
-#         if reg_max not in proj_cache:
-#             proj_cache[reg_max] = torch.arange(reg_max, device=device, dtype=dtype).view(1, 1, reg_max, 1, 1)
-#         return proj_cache[reg_max]
+        regs.append(reg.view(bs, 4, -1))  # (bs, 4, h*w)
+        feats.append(reg)
 
-#     boxes_per_branch, cls_per_branch = [], []
-#     idx, n = 0, len(preds)
-#     while idx < n:
-#         box_dist = preds[idx]
-#         idx += 1
-#         h, w = box_dist.shape[2:]
+        # Collect all task cls outputs for this scale
+        scale_cls = []
+        for t in range(num_tasks):
+            cls = input_data[base_idx + 1 + t]  # (bs, nc[t], h, w)
+            scale_cls.append(cls.view(bs, nc[t], -1))  # (bs, nc[t], h*w)
+        clss.append(torch.cat(scale_cls, dim=1))  # (bs, total_nc, h*w)
 
-#         cls_candidates = []
-#         while idx < n and preds[idx].shape[2:] == (h, w):
-#             cls_candidates.append(preds[idx])
-#             idx += 1
+    # Concatenate across scales
+    boxes = torch.cat(regs, dim=-1)  # (bs, 4, total_anchors)
+    scores = torch.cat(clss, dim=-1)  # (bs, total_nc, total_anchors)
 
-#         available = cls_candidates.copy()
-#         cls_heads = []
-#         for nc_i in nc:
-#             candidate_idx = next((j for j, t in enumerate(available) if t.shape[1] == nc_i), None)
-#             if candidate_idx is None:
-#                 candidate_idx = next((j for j, t in enumerate(available) if t.shape[1] == 1), None)
-#             if candidate_idx is None:
-#                 raise RuntimeError(f"RKNN branch missing classification tensor with {nc_i} channels at {h}x{w}.")
-#             cls_heads.append(available.pop(candidate_idx))
+    # Generate anchors and strides
+    stride_tensor = torch.tensor(
+        strides[:nl],
+        device=input_data[0].device,
+        dtype=input_data[0].dtype,
+    )
+    anchors, strides_out = make_anchors(feats, stride_tensor, 0.5)
+    anchors = anchors.transpose(0, 1)  # (2, total_anchors)
+    strides_out = strides_out.transpose(0, 1)  # (1, total_anchors)
 
-#         reg_max = box_dist.shape[1] // 4
-#         proj = _get_proj(reg_max)
-#         dist = box_dist.view(bs, 4, reg_max, h, w).softmax(2)
-#         dist = (dist * proj).sum(2)  # (bs, 4, h, w)
+    # Decode boxes: boxes contains [left, top, right, bottom] distances from anchor
+    # dist2bbox converts ltrb distances to xyxy coordinates
+    dbox = dist2bbox(boxes, anchors.unsqueeze(0), xywh=False, dim=1) * strides_out
 
-#         grid = _get_grid(h, w)
-#         stride = _get_stride(h, w)
-#         center = grid + 0.5
-#         lt = center - dist[:, 0:2]
-#         rb = center + dist[:, 2:4]
-#         xyxy = torch.cat((lt * stride, rb * stride), dim=1)
+    # Apply sigmoid to class scores
+    scores = scores.sigmoid()
 
-#         cxy = (xyxy[:, 0:2] + xyxy[:, 2:4]) * 0.5
-#         wh = xyxy[:, 2:4] - xyxy[:, 0:2]
-#         boxes_per_branch.append(torch.cat((cxy, wh), dim=1).view(bs, 4, -1))
+    # Combine and transpose: (bs, 4+nc, anchors) -> (bs, anchors, 4+nc)
+    preds = torch.cat([dbox, scores], dim=1).permute(0, 2, 1)
 
-#         cls_flat = [head.reshape(bs, head.shape[1], -1) for head in cls_heads]
-#         cls_per_branch.append(torch.cat(cls_flat, dim=1))
-
-#     boxes = torch.cat(boxes_per_branch, dim=2)
-#     scores = torch.cat(cls_per_branch, dim=2)
-
-#     return torch.cat((boxes, scores), dim=1)
+    return preds

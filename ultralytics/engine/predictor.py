@@ -131,10 +131,11 @@ class BasePredictor:
         ims = ims.to(self.device)
         ims = ims.to(torch.uint8 if self.model.int8 else torch.float16 if self.model.fp16 else torch.float32)
         
+        # RKNN has his own normalization
         if not self.model.rknn and not_tensor and not self.model.int8:
             # Normalize based on bit depth from config
             bit_depth = getattr(self.args, 'image_bit_depth', 8)
-            im /= 65_535.0 if bit_depth == 16 else 255.0  # 0 - 255/65535 to 0.0 - 1.0
+            ims /= 65_535.0 if bit_depth == 16 else 255.0  # 0 - 255/65535 to 0.0 - 1.0
 
         return ims
 
