@@ -104,7 +104,6 @@ class QualityFocalLoss(nn.Module):
         """Computes quality focal loss."""
         cls_iou_targets, targets_onehot_pos = self.preprocess(pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask)
         
-        # negatives are supervised by 0 quality score
         pred_sigmoid = pred_scores.float().sigmoid()
         scale_factor = pred_sigmoid
         zerolabel = torch.zeros_like(pred_scores)
@@ -118,12 +117,278 @@ class QualityFocalLoss(nn.Module):
             ) * scale_factor.pow(beta)
         scale_factor = cls_iou_targets[targets_onehot_pos] - pred_sigmoid[targets_onehot_pos]
         with autocast(enabled=False):
-            # print(loss.dtype, pred_scores.dtype, cls_iou_targets.dtype, scale_factor.dtype)
             loss[targets_onehot_pos] = F.binary_cross_entropy_with_logits(
                 pred_scores[targets_onehot_pos],
                 cls_iou_targets[targets_onehot_pos],
                 reduction='none',
             ) * scale_factor.abs().pow(beta)
+        return loss
+
+
+def get_detection_weight(n):
+    """Compute detection weight for ECM Loss."""
+    a = (n.sum() - n) / n
+    w = a * ((1 + a) / a).log()
+    return w[None] 
+
+
+class EffectiveClassMarginLoss(nn.Module):
+    """
+    Effective Class Margin Loss for long-tail object detection.
+    
+    Paper: https://arxiv.org/abs/2104.00466
+    Adapted for Ultralytics YOLO from MMDetection.
+    """
+    
+    def __init__(self, 
+                 num_classes=6,
+                 fg_bg_ratio=6.3313,
+                 loss_weight=1.0,
+                 reduction='none',
+                 weight=None,
+                 **kwargs):
+        super().__init__()
+        self.loss_weight = loss_weight 
+        self.num_classes = num_classes 
+        self.fg_bg_ratio = fg_bg_ratio
+        self.reduction = reduction
+        self.class_weight = weight
+
+        if num_classes == 6:
+            n = torch.tensor([3097.0, 5756.0, 1355.0, 6835.0, 5822.0, 2295.0])
+            LOGGER.info(f"{colorstr('ECM Loss')}: Using hardcoded frequencies for 6-class dataset")
+        else:
+            LOGGER.warning(f"{colorstr('ECM Loss')}: Unexpected num_classes={num_classes}, using uniform distribution")
+            n = torch.ones(num_classes)
+        
+        n = torch.cat([n, n.sum().unsqueeze(0) * fg_bg_ratio])
+        
+        total_samples = n[:-1].sum().item()
+        bg_samples = n[-1].item()
+        LOGGER.info(f"{colorstr('ECM Loss')}: Total FG samples: {total_samples:.0f}, BG samples: {bg_samples:.0f}")
+
+        self.register_buffer('sample_n', n)
+        self.register_buffer('detection_cls_weight', get_detection_weight(n))
+        
+        weights = self.detection_cls_weight.squeeze().tolist()
+        LOGGER.info(f"{colorstr('ECM Loss')}: Class weights: {[f'{w:.3f}' for w in weights[:num_classes]]}")
+
+    def compute_weight(self, cls_score):
+        """Compute margin weights for positive and negative samples."""
+        B, C = cls_score.shape
+        
+        n_pos = self.sample_n 
+        n_neg = self.sample_n.sum() - self.sample_n
+        
+        eps = 1e-9
+        pos_w = (n_neg.pow(1/4) / (n_pos.pow(1/4) + n_neg.pow(1/4) + eps)).pow(-1).log()
+        neg_w = (n_pos.pow(1/4) / (n_pos.pow(1/4) + n_neg.pow(1/4) + eps)).pow(-1).log()
+        
+        pos_w = pos_w.view(1, -1).expand(B, C)
+        neg_w = neg_w.view(1, -1).expand(B, C)
+        
+        return pos_w, neg_w
+
+    def forward(self, pred_scores, gt_scores, pred_bboxes=None, gt_bboxes=None, fg_mask=None, **kwargs):
+        """Forward pass for ECM Loss."""
+        original_shape = pred_scores.shape
+        
+        if pred_scores.dim() == 3:
+            B, N, C = pred_scores.shape
+            pred_scores = pred_scores.reshape(B * N, C)
+            gt_scores = gt_scores.reshape(B * N, C)
+        else:
+            B = pred_scores.shape[0]
+            N = 1
+            C = pred_scores.shape[1]
+        
+        bg_logit = -torch.logsumexp(pred_scores, dim=1, keepdim=True)
+        cls_score = torch.cat([pred_scores, bg_logit], dim=1)
+        
+        is_background = (gt_scores.sum(dim=1, keepdim=True) == 0).float()
+        target = torch.cat([gt_scores, is_background], dim=1)
+        
+        pos_w, neg_w = self.compute_weight(cls_score)
+        
+        score_exp_pos = (cls_score + pos_w).exp()
+        score_exp_neg = (-cls_score + neg_w).exp()
+        pred_pos = score_exp_pos / (score_exp_pos + score_exp_neg + 1e-9)
+        pred_neg = score_exp_neg / (score_exp_pos + score_exp_neg + 1e-9)
+        
+        loss_cls = -(
+            (pred_pos + 1e-9).log() * target + 
+            (pred_neg + 1e-9).log() * (1 - target)
+        )
+        
+        cls_weight = self.detection_cls_weight.to(loss_cls.device)
+        loss_cls = loss_cls * cls_weight
+        
+        if self.class_weight is not None:
+            additional_weight = torch.cat([
+                self.class_weight.to(loss_cls.device),
+                torch.ones(1, device=loss_cls.device)
+            ])
+            loss_cls = loss_cls * additional_weight.view(1, -1)
+        
+        loss_cls = loss_cls[:, :-1]
+        
+        if len(original_shape) == 3:
+            loss_cls = loss_cls.reshape(B, N, C)
+        
+        if self.reduction == 'mean':
+            loss_cls = loss_cls.mean()
+        elif self.reduction == 'sum':
+            loss_cls = loss_cls.sum()
+        elif self.reduction == 'none':
+            pass
+        else:
+            loss_cls = loss_cls.sum() / B
+        
+        return loss_cls * self.loss_weight
+
+    
+class PPLoss(nn.Module):
+    """
+    PP-Loss: Size-Aware Prioritization Loss for object detection.
+    """
+    
+    def __init__(self, num_levels=3, strides=None, reduction='none', weight=None, **kwargs):
+        super().__init__()
+        self.num_levels = num_levels
+        self.strides = strides if strides is not None else [8, 16, 32]
+        self.reduction = reduction
+        self.class_weight = weight
+        
+        self.register_buffer('mu', torch.tensor([32.0, 64.0, 128.0]))
+        self.register_buffer('sigma', torch.tensor([16.0, 32.0, 64.0]))
+        
+        LOGGER.info(f"{colorstr('PP Loss')}: Initialized with {num_levels} FPN levels")
+        LOGGER.info(f"{colorstr('PP Loss')}: Strides: {self.strides}, Mu: {self.mu.tolist()}, Sigma: {self.sigma.tolist()}")
+    
+    def compute_ppf(self, object_sizes, level_idx):
+        """Compute Prediction Probability Function (PPF) for objects."""
+        mu_l = self.mu[level_idx]
+        sigma_l = self.sigma[level_idx]
+        ppf = torch.exp(-((object_sizes - mu_l) ** 2) / (2 * sigma_l ** 2))
+        return ppf
+    
+    def compute_weights(self, object_sizes, level_idx, num_levels=3):
+        """Compute weights W(s, l) for each object."""
+        ppf_current = self.compute_ppf(object_sizes, level_idx)
+        
+        ppf_sum = torch.zeros_like(ppf_current)
+        for i in range(num_levels):
+            level_i = torch.full_like(level_idx, i)
+            ppf_sum += self.compute_ppf(object_sizes, level_i)
+        
+        weights = num_levels * ppf_current / (ppf_sum + 1e-8)
+        return weights
+    
+    def forward(self, pred_scores, gt_scores, pred_bboxes=None, gt_bboxes=None, fg_mask=None,
+                anchor_points=None, stride_tensor=None, **kwargs):
+        """Forward pass for PP Loss."""
+        with autocast(enabled=False):
+            loss = F.binary_cross_entropy_with_logits(
+                pred_scores.float(),
+                gt_scores.float(),
+                reduction='none',
+                weight=self.class_weight
+            )
+        
+        if gt_bboxes is None or stride_tensor is None or fg_mask is None:
+            LOGGER.warning(f"{colorstr('PP Loss')}: Missing bbox/stride info, using standard BCE")
+            if self.reduction == 'mean':
+                return loss.mean()
+            elif self.reduction == 'sum':
+                return loss.sum()
+            return loss
+        
+        if fg_mask.sum() > 0:
+            gt_w = gt_bboxes[..., 2] - gt_bboxes[..., 0]
+            gt_h = gt_bboxes[..., 3] - gt_bboxes[..., 1]
+            object_sizes = torch.sqrt(gt_w * gt_h + 1e-8)
+            
+            if stride_tensor.dim() == 2:
+                stride_tensor = stride_tensor.unsqueeze(0).expand(pred_scores.shape[0], -1, -1)
+            
+            stride_vals = stride_tensor.squeeze(-1)
+            
+            level_idx = torch.zeros_like(stride_vals, dtype=torch.long)
+            for i, stride in enumerate(self.strides):
+                level_idx[stride_vals == stride] = i
+            
+            object_sizes_fg = object_sizes[fg_mask]
+            level_idx_fg = level_idx[fg_mask]
+            
+            pp_weights = self.compute_weights(object_sizes_fg, level_idx_fg, num_levels=self.num_levels)
+            
+            weights_tensor = torch.ones_like(loss)
+            weights_tensor[fg_mask] = pp_weights.unsqueeze(-1).expand(-1, loss.shape[-1])
+            loss = loss * weights_tensor
+        
+        if self.reduction == 'mean':
+            if fg_mask is not None and fg_mask.sum() > 0:
+                loss = loss.sum() / fg_mask.sum()
+            else:
+                loss = loss.mean()
+        elif self.reduction == 'sum':
+            loss = loss.sum()
+        
+        return loss
+
+
+class PPQualityFocalLoss(QualityFocalLoss):
+    """Combination of PP-Loss and Quality Focal Loss."""
+    
+    def __init__(self, num_levels=3, strides=None, weight=None, *args, **kwargs):
+        super().__init__(weight=weight, *args, **kwargs)
+        self.pp_loss = PPLoss(num_levels=num_levels, strides=strides, reduction='none', weight=weight)
+    
+    def forward(self, pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask,
+                anchor_points=None, stride_tensor=None, beta=2.0, *args, **kwargs):
+        """Computes PP-weighted Quality Focal Loss."""
+        cls_iou_targets, targets_onehot_pos = self.preprocess(pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask)
+        
+        pred_sigmoid = pred_scores.float().sigmoid()
+        scale_factor = pred_sigmoid
+        zerolabel = torch.zeros_like(pred_scores)
+        
+        with autocast(enabled=False):
+            loss = F.binary_cross_entropy_with_logits(
+                pred_scores, zerolabel, reduction='none', weight=self.weight
+            ) * scale_factor.pow(beta)
+        
+        scale_factor = cls_iou_targets[targets_onehot_pos] - pred_sigmoid[targets_onehot_pos]
+        with autocast(enabled=False):
+            loss[targets_onehot_pos] = F.binary_cross_entropy_with_logits(
+                pred_scores[targets_onehot_pos],
+                cls_iou_targets[targets_onehot_pos],
+                reduction='none',
+            ) * scale_factor.abs().pow(beta)
+        
+        if anchor_points is not None and stride_tensor is not None and gt_bboxes is not None:
+            gt_w = gt_bboxes[..., 2] - gt_bboxes[..., 0]
+            gt_h = gt_bboxes[..., 3] - gt_bboxes[..., 1]
+            object_sizes = torch.sqrt(gt_w * gt_h + 1e-8)
+            
+            if stride_tensor.dim() == 2:
+                stride_tensor = stride_tensor.unsqueeze(0).expand(pred_scores.shape[0], -1, -1)
+            stride_vals = stride_tensor.squeeze(-1)
+            
+            level_idx = torch.zeros_like(stride_vals, dtype=torch.long)
+            for i, stride in enumerate(self.pp_loss.strides):
+                level_idx[stride_vals == stride] = i
+            
+            if fg_mask.sum() > 0:
+                object_sizes_fg = object_sizes[fg_mask]
+                level_idx_fg = level_idx[fg_mask]
+                
+                pp_weights = self.pp_loss.compute_weights(object_sizes_fg, level_idx_fg, num_levels=self.pp_loss.num_levels)
+                
+                weights_tensor = torch.ones_like(loss)
+                weights_tensor[fg_mask] = pp_weights.unsqueeze(-1).expand(-1, loss.shape[-1])
+                loss = loss * weights_tensor
+        
         return loss
 
 
@@ -141,7 +406,6 @@ class VarifocalLoss(nn.Module):
 
     def forward(self, pred_scores, gt_scores, gt_target_pos_mask=None, alpha=0.75, gamma=2.0, *args, **kwargs):
         """Computes Varifocal loss."""
-        
         weight = alpha * (pred_scores.sigmoid() - gt_scores).abs().pow(gamma) * (gt_scores <= 0.0) + gt_scores * (gt_scores > 0.0)
         with autocast(enabled=False):
             return F.binary_cross_entropy_with_logits(pred_scores, gt_scores, reduction='none', weight=self.weight) * weight
@@ -191,7 +455,6 @@ class DFLoss(nn.Module):
     def __call__(self, pred_dist, target):
         """
         Return sum of left and right DFL losses.
-
         Distribution Focal Loss (DFL) proposed in Generalized Focal Loss
         https://ieeexplore.ieee.org/document/9792391
         """
@@ -228,8 +491,6 @@ class BboxLoss(nn.Module):
         """
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
-        self.iou_loss_fn = iou_loss_fn
-        self.nwd_loss = nwd_loss
         self.iou_loss_fn = iou_loss_fn.lower()
         self.iou_ratio = iou_ratio
         assert self.iou_loss_fn in ('wiou', 'eiou', 'giou', 'diou', 'ciou', 'siou', 'shapeiou', 'piouv1', 'piouv2', 'interpiou'), \
@@ -264,7 +525,6 @@ class BboxLoss(nn.Module):
             nwd_loss = ((1.0 - nwd) * weight).sum() / target_scores_sum
             loss_iou = self.iou_ratio * loss_iou + (1 - self.iou_ratio) * nwd_loss
 
-        # DFL loss
         if self.dfl_loss:
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
             loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
@@ -288,7 +548,6 @@ class RotatedBboxLoss(BboxLoss):
         iou = probiou(pred_bboxes[fg_mask], target_bboxes[fg_mask])
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
 
-        # DFL loss
         if self.dfl_loss:
             target_ltrb = bbox2dist(anchor_points, xywh2xyxy(target_bboxes[..., :4]), self.dfl_loss.reg_max - 1)
             loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
@@ -353,6 +612,35 @@ class v8DetectionLoss:
                 cls_loss_fn = VarifocalLoss
             elif clf_loss_fn == "qfl":
                 cls_loss_fn = QualityFocalLoss
+            elif clf_loss_fn == "ecm":
+                cls_loss_fn = EffectiveClassMarginLoss
+                cls_losses.append(cls_loss_fn(
+                    num_classes=self.nc[i],
+                    reduction='none',
+                    weight=self.clf_loss_weights[i]
+                ))
+                continue
+            elif clf_loss_fn == "pp":
+                cls_loss_fn = PPLoss
+                cls_losses.append(cls_loss_fn(
+                    num_levels=len(m.stride),
+                    strides=m.stride.tolist(),
+                    reduction='none',
+                    weight=self.clf_loss_weights[i]
+                ))
+                continue
+            elif clf_loss_fn == "ppqfl":
+                cls_loss_fn = PPQualityFocalLoss
+                cls_losses.append(cls_loss_fn(
+                    num_levels=len(m.stride),
+                    strides=m.stride.tolist(),
+                    weight=self.clf_loss_weights[i]
+                ))
+                continue
+            elif clf_loss_fn == "focal":
+                cls_loss_fn = FocalLoss
+                cls_losses.append(cls_loss_fn())
+                continue
             cls_losses.append(cls_loss_fn(reduction="none", weight=self.clf_loss_weights[i]))
         self.cls_losses = nn.ModuleList(cls_losses)
 
