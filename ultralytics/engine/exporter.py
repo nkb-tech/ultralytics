@@ -1440,18 +1440,18 @@ class Exporter:
         """Export YOLO model to RKNN format."""
         LOGGER.info(f"\n{prefix} starting export with rknn-toolkit2...")
 
-        check_requirements("rknn-toolkit2")
         if IS_COLAB:
             # Prevent 'exit' from closing the notebook https://github.com/airockchip/rknn-toolkit2/issues/259
             import builtins
 
             builtins.exit = lambda: None
 
-        from rknn.api import RKNN
         int8 = self.args.int8
         half = self.args.half
         self.args.int8 = False # disable int8 for onnx export
         f, _ = self.export_onnx()
+        check_requirements("rknn-toolkit2") if not torch.cuda.is_available() else LOGGER.warning(f'{}')
+        from rknn.api import RKNN
         self.args.int8 = int8 # enable int8 for rknn export
         export_path = Path(f"{Path(f).stem}_rknn_model")
         export_path.mkdir(exist_ok=True)
