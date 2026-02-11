@@ -28,11 +28,13 @@ def calculate_slice_coordinates(
         overlap_ratio: Overlap ratio between adjacent crops (0 to 1)
     
     Returns:
-        List of (x1, y1, x2, y2) coordinates for each crop
+        List of (x1, y1, x2, y2) coordinates for each crop, where coordinates are in the original image space.
     """
+    # Early return for images smaller than crop size
     if img_h <= crop_size and img_w <= crop_size:
         return [(0, 0, img_w, img_h)]
     
+    # Calculate overlap in pixels and step size (non-overlapping portion)
     overlap = int(overlap_ratio * crop_size)
     step = crop_size - overlap
     
@@ -76,6 +78,7 @@ def slice_image(im: np.ndarray, crop_size: int, overlap_ratio: float = 0.2) -> L
     h, w = im.shape[:2]
     coords = calculate_slice_coordinates(h, w, crop_size, overlap_ratio)
     
+    # Extract actual image crops using the calculated coordinates
     crops = []
     for x1, y1, x2, y2 in coords:
         crop = im[y1:y2, x1:x2]
@@ -97,78 +100,81 @@ class SAHIPredictAggregator:
         """
         self.crop_size = crop_size
         self.overlap_ratio = overlap_ratio
+        # Dictionary mapping image keys to lists of (predictions, crop_coords) tuples
         self.image_predictions = defaultdict(list)  # {img_key: [(preds, coords), ...]}
+        self.device = None
         
     def reset(self):
         """Reset aggregator for new inference run."""
         self.image_predictions.clear()
+        self.device = None
     
     def add_crop_predictions(self, img_key: str, preds: torch.Tensor, crop_coords: Tuple[int, int, int, int]):
         """
-        Add predictions from a crop.
+        Add predictions from a single crop and transform coordinates to full image space.
+        
+        This method takes predictions made on a crop (in crop-local coordinates) and
+        transforms them to the coordinate system of the original full image by adding
+        the crop's offset.
         
         Args:
             img_key: Unique identifier for the original image
-            preds: Predictions tensor (N, 6) where columns are [x, y, w, h, conf, cls]
+            preds: Predictions tensor
             crop_coords: (x1, y1, x2, y2) coordinates of the crop in original image
         """
-        # Transform boxes from crop coordinates to original image coordinates
-        x_min, y_min, _, _ = crop_coords
-        
-        # Copy predictions to avoid modifying original
+        # Extract crop offset in the original image
+        x_min, y_min = crop_coords[0], crop_coords[1]
+        # Clone to avoid modifying the original predictions tensor
         transformed_preds = preds.clone()
+        transformed_preds[:, 0] += x_min  # x1
+        transformed_preds[:, 2] += x_min  # x2
+        transformed_preds[:, 1] += y_min  # y1
+        transformed_preds[:, 3] += y_min  # y2
         
-        # Transform boxes from crop space to original image space
-        # preds format: [x_center, y_center, width, height, conf, cls]
-        transformed_preds[:, 0] = transformed_preds[:, 0] + x_min  # x_center
-        transformed_preds[:, 1] = transformed_preds[:, 1] + y_min  # y_center
+        if self.device is None:
+            self.device = transformed_preds.device
         
+        # Store transformed predictions with their crop coordinates for later aggregation
         self.image_predictions[img_key].append((transformed_preds, crop_coords))
     
-    def aggregate_predictions(self, img_key: str, orig_shape: Tuple[int, int], conf_threshold: float = 0.001) -> torch.Tensor:
+    def aggregate_predictions(self, img_key: str, orig_shape: Tuple[int, int], conf_threshold: float = 0.1) -> torch.Tensor:
         """
         Aggregate predictions from all crops for a complete image.
         
         Args:
             img_key: Unique identifier for the original image
             orig_shape: (height, width) of the original image
-            conf_threshold: Confidence threshold for filtering predictions
         
         Returns:
-            Aggregated predictions tensor (N, 6) in original image coordinates
+            Aggregated predictions tensor in original image coordinates (xyxy)
         """
+        # Check if we have any predictions for this image
         if img_key not in self.image_predictions or not self.image_predictions[img_key]:
-            # Return empty tensor with correct shape
-            return torch.empty((0, 6), dtype=torch.float32)
+            device = self.device or torch.device("cpu")
+            return torch.empty((0, 6), dtype=torch.float32, device=device)
         
-        # Collect all predictions
-        all_preds = []
-        for preds, _ in self.image_predictions[img_key]:
-            # Filter by confidence
-            if conf_threshold > 0:
-                mask = preds[:, 4] >= conf_threshold
-                preds = preds[mask]
-            
-            if len(preds) > 0:
-                all_preds.append(preds)
+        # Collect all predictions from crops
+        all_preds = [preds for preds, _ in self.image_predictions[img_key]]
         
+        # Clean up to prevent memory accumulation (remove predictions after processing)
+        self.image_predictions.pop(img_key, None)
+        
+        # Return empty tensor if no predictions
         if not all_preds:
-            return torch.empty((0, 6), dtype=torch.float32)
+            device = self.device or torch.device("cpu")
+            return torch.empty((0, 6), dtype=torch.float32, device=device)
         
         # Concatenate all predictions
         aggregated = torch.cat(all_preds, dim=0)
         
-        # Clip boxes to image boundaries
+        # Clip boxes to image boundaries (in-place for efficiency)
         h, w = orig_shape
-        aggregated[:, 0] = torch.clamp(aggregated[:, 0], 0, w)  # x_center
-        aggregated[:, 1] = torch.clamp(aggregated[:, 1], 0, h)  # y_center
-        aggregated[:, 2] = torch.clamp(aggregated[:, 2], 0, w)  # width
-        aggregated[:, 3] = torch.clamp(aggregated[:, 3], 0, h)  # height
-        
+        aggregated[:, 0].clamp_(0, w)  # x1
+        aggregated[:, 2].clamp_(0, w)  # x2
+        aggregated[:, 1].clamp_(0, h)  # y1
+        aggregated[:, 3].clamp_(0, h)  # y2
+
         return aggregated
     
-    def is_image_complete(self, img_key: str, expected_crops: int) -> bool:
-        """Check if all crops for an image have been processed."""
-        return len(self.image_predictions.get(img_key, [])) >= expected_crops
 
 
