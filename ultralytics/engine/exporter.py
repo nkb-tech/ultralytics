@@ -1450,7 +1450,7 @@ class Exporter:
         half = self.args.half
         self.args.int8 = False # disable int8 for onnx export
         f, _ = self.export_onnx()
-        check_requirements("rknn-toolkit2") if not torch.cuda.is_available() else LOGGER.warning(f'{}')
+        check_requirements("rknn-toolkit2") if not torch.cuda.is_available() else LOGGER.warning(f'{prefix} CUDA is not compatible with rknn toolkit.')
         from rknn.api import RKNN
         self.args.int8 = int8 # enable int8 for rknn export
         export_path = Path(f"{Path(f).stem}_rknn_model")
