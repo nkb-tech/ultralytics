@@ -215,12 +215,13 @@ class DetectionValidator(BaseValidator):
         
         # Get model format flags with safe defaults
         is_rknn = getattr(self, 'rknn', False)
+        is_hef = getattr(self, 'hef', False)
         is_int8 = getattr(self, 'int8', False)
         
         batch["img"] = batch["img"].to(torch.uint8 if is_int8 else torch.float16 if self.args.half else torch.float32)
         
-        # RKNN has his own normalization
-        if not is_rknn:
+        # RKNN and Hailo have their own normalization
+        if not is_rknn and not is_hef:
             # Normalize images based on bit depth from config
             bit_depth = getattr(self.args, 'image_bit_depth', 8)
             batch["img"] /= 255.0 if bit_depth == 8 else 65_535.0
@@ -258,11 +259,45 @@ class DetectionValidator(BaseValidator):
         # Handle RKNN models - process raw DFL outputs first
         if getattr(self, 'rknn', False):
             img_hw = getattr(self, '_img_hw', (self.args.imgsz, self.args.imgsz))
-            preds = ops.process_rknn_dfl_results(
-                input_data=preds,
-                imgsz=img_hw,
-                conf_thres=self.args.conf,
-            )
+            end2end = getattr(self, 'end2end', False)
+            if not end2end:
+                preds = ops.process_rknn_dfl_results(
+                    input_data=preds,
+                    imgsz=img_hw,
+                    conf_thres=self.args.conf,
+                )
+            else:
+                preds = ops.process_rknn_end2end_results(
+                    input_data=preds,
+                    imgsz=img_hw,
+                    conf_thres=self.args.conf,
+                    nc=self.nc,
+                )
+        
+        # Handle Hailo models - process raw outputs first
+        elif getattr(self, 'hef', False):
+            img_hw = getattr(self, '_img_hw', (self.args.imgsz, self.args.imgsz))
+            # Check if NMS is in the graph (from metadata)
+            nms = getattr(self, 'nms', False)
+            if nms:
+                # NMS already applied in model graph
+                preds = ops.process_nms_hef_results(preds, img_hw=img_hw)
+            else:
+                # No NMS in graph - process DFL/end2end outputs
+                end2end = getattr(self, 'end2end', False)
+                if not end2end:
+                    preds = ops.process_hef_dfl_results(
+                        input_data=preds,
+                        imgsz=img_hw,
+                        conf_thres=self.args.conf,
+                    )
+                else:
+                    preds = ops.process_hef_end2end_results(
+                        input_data=preds,
+                        imgsz=img_hw,
+                        conf_thres=self.args.conf,
+                        nc=self.nc,
+                    )
         
         if isinstance(preds, (list, tuple)):
             actual_preds = preds[0]
