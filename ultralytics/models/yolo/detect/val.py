@@ -299,22 +299,21 @@ class DetectionValidator(BaseValidator):
             nc=[1] if self.args.single_cls else self.nc,
         )
     
-    def _get_raw_preds_from_end2end(self, one2one_feats):
+    def _get_raw_preds_from_end2end(self, one2one_preds):
         """
-        Reconstruct raw predictions from end2end one2one features.
+        Reconstruct raw predictions from end2end one2one head output.
         
         For SAHI, we need predictions in format [batch, 4+nc, anchors] before
         the end2end postprocess() converts them to [batch, max_det, 6].
         
         Args:
-            one2one_feats: List of feature maps from one2one head [BCHW, ...]
+            one2one_preds: Dict with boxes/scores/feats from one2one head.
         
         Returns:
             Raw predictions tensor [batch, 4+nc, anchors]
         """
-        from ultralytics.utils.tal import make_anchors
-        
-        if not isinstance(one2one_feats, list) or len(one2one_feats) == 0:
+        required_keys = {"boxes", "scores", "feats"}
+        if not isinstance(one2one_preds, dict) or not required_keys.issubset(one2one_preds):
             return None
         
         # Get model's detection head for decoding
@@ -331,30 +330,14 @@ class DetectionValidator(BaseValidator):
             return None
         
         try:
-            # Concatenate features from all scales
-            shape = one2one_feats[0].shape  # BCHW
-            no = detect_head.no if hasattr(detect_head, 'no') else one2one_feats[0].shape[1]
-            x_cat = torch.cat([xi.view(shape[0], no, -1) for xi in one2one_feats], 2)
-            
-            # Decode boxes (same as _inference() but returns full raw format)
-            reg_max = detect_head.reg_max if hasattr(detect_head, 'reg_max') else 16
-            box = x_cat[:, : reg_max * 4]
-            cls = x_cat[:, reg_max * 4 :]
-            
-            # Make anchors if needed
-            if not hasattr(detect_head, 'anchors') or detect_head.anchors.numel() == 0:
-                detect_head.anchors, detect_head.strides = (
-                    x.transpose(0, 1) for x in make_anchors(one2one_feats, detect_head.stride, 0.5)
-                )
-            
-            dbox = detect_head.decode_bboxes(
-                detect_head.dfl(box), 
-                detect_head.anchors.unsqueeze(0)
-            ) * detect_head.strides
-            
-            # Return concatenated [dbox, cls.sigmoid()] - same format as _inference()
-            # Shape: [batch, 4+nc, anchors]
-            return torch.cat((dbox, cls.sigmoid()), 1)
+            raw_preds = detect_head._inference(one2one_preds)
+
+            # SAHI aggregators expect xywh in first 4 channels.
+            if getattr(detect_head, "end2end", False):
+                boxes_xyxy = raw_preds[:, :4, :].permute(0, 2, 1).contiguous()
+                boxes_xywh = ops.xyxy2xywh(boxes_xyxy)
+                raw_preds = torch.cat((boxes_xywh.permute(0, 2, 1), raw_preds[:, 4:, :]), dim=1)
+            return raw_preds
             
         except Exception as e:
             LOGGER.warning(f"Error extracting raw predictions for SAHI: {e}")

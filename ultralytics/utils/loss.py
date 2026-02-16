@@ -324,8 +324,8 @@ class v8DetectionLoss:
         model: nn.Module,
         tal_topk=10,
         clf_loss_weights: list[list[float]] | None = None,
-        clf_loss_fn: str = "qfl",
-        iou_loss_fn: str = "ciou",
+        clf_loss_fn: str | None = None,
+        iou_loss_fn: str | None = None,
         nwd_loss: bool = False,
         use_wiseiou: bool = False,
         iou_ratio: float = 0.5,
@@ -333,6 +333,10 @@ class v8DetectionLoss:
         """Initializes v8DetectionLoss with the model, defining model-related properties."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
+        clf_loss_fn = (clf_loss_fn or getattr(h, "clf_loss_fn", "bce")).lower()
+        iou_loss_fn = (iou_loss_fn or getattr(h, "iou_loss_fn", "ciou")).lower()
+        if clf_loss_weights is None:
+            clf_loss_weights = getattr(h, "clf_loss_weights", None)
 
         m = model.model[-1]  # Detect() module
         self.nc: list[int] = m.nc
@@ -353,6 +357,8 @@ class v8DetectionLoss:
                 cls_loss_fn = VarifocalLoss
             elif clf_loss_fn == "qfl":
                 cls_loss_fn = QualityFocalLoss
+            else:
+                raise ValueError(f"Unsupported clf_loss_fn='{clf_loss_fn}'. Expected one of: bce, vfl, qfl.")
             cls_losses.append(cls_loss_fn(reduction="none", weight=self.clf_loss_weights[i]))
         self.cls_losses = nn.ModuleList(cls_losses)
 
@@ -409,26 +415,33 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
-    def __call__(self, preds, batch):
-        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size.
+    def _parse_output(self, preds):
+        """Parse model outputs and strip inference tuple wrapper if present."""
+        return preds[1] if isinstance(preds, tuple) else preds
 
-        Args:
-            preds: list of tensors, each tensor is a feature map. (B, C, reg_max * 4 + sum(1 + nc_i))
-            batch: dict, containing batch information.
+    def _preds_to_components(self, preds):
+        """Convert supported prediction formats to (pred_distri, pred_scores, feats)."""
+        # YOLO26/modern path: dict from head.forward_head()
+        if isinstance(preds, dict):
+            pred_distri = preds["boxes"].permute(0, 2, 1).contiguous()
+            pred_scores = preds["scores"].permute(0, 2, 1).contiguous()
+            feats = preds["feats"]
+            return pred_distri, pred_scores, feats
 
-        Returns:
-            loss: tensor, the sum of the loss for box, cls and dfl multiplied by batch size
-        
-        """
-        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
-        feats = preds[1] if isinstance(preds, tuple) else preds
-
+        # Legacy path: list of per-level tensors
+        feats = preds
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
-            (self.reg_max * 4, sum(self.nc)), dim=1,
+            (self.reg_max * 4, sum(self.nc)), dim=1
         )
-
         pred_scores = pred_scores.permute(0, 2, 1).contiguous()
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+        return pred_distri, pred_scores, feats
+
+    def __call__(self, preds, batch):
+        """Calculate the sum of box/cls/dfl losses multiplied by batch size."""
+        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        preds = self._parse_output(preds)
+        pred_distri, pred_scores, feats = self._preds_to_components(preds)
 
         dtype = pred_scores.dtype
         batch_size = pred_scores.shape[0]
@@ -510,8 +523,8 @@ class v8SegmentationLoss(v8DetectionLoss):
         model: nn.Module,
         tal_topk: int = 10,
         clf_loss_weights: list[list[float]] | None = None,
-        clf_loss_fn: str = "bce",
-        iou_loss_fn: str = "ciou",
+        clf_loss_fn: str | None = None,
+        iou_loss_fn: str | None = None,
         nwd_loss: bool = False,
         use_wiseiou: bool = False,
         iou_ratio: float = 0.5,
@@ -554,16 +567,28 @@ class v8SegmentationLoss(v8DetectionLoss):
             loss_items: Detached loss components (box, seg, cls, dfl)
         """
         loss = torch.zeros(4, device=self.device)  # box, seg, cls, dfl
-        feats, pred_masks, proto = preds if len(preds) == 3 else preds[1]
+        preds = self._parse_output(preds)
+
+        if isinstance(preds, dict):
+            pred_distri = preds["boxes"].permute(0, 2, 1).contiguous()
+            pred_scores = preds["scores"].permute(0, 2, 1).contiguous()
+            pred_masks = preds["mask_coefficient"].permute(0, 2, 1).contiguous()
+            feats = preds["feats"]
+            proto = preds["proto"]
+        else:
+            feats, pred_masks, proto = preds if len(preds) == 3 else preds[1]
+            pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+                (self.reg_max * 4, sum(self.nc)),
+                dim=1,
+            )
+            pred_scores = pred_scores.permute(0, 2, 1).contiguous()
+            pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+            pred_masks = pred_masks.permute(0, 2, 1).contiguous()
+
+        if isinstance(proto, tuple):
+            proto = proto[0]
+
         batch_size, _, mask_h, mask_w = proto.shape
-
-        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
-            (self.reg_max * 4, sum(self.nc)), dim=1
-        )
-
-        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
-        pred_distri = pred_distri.permute(0, 2, 1).contiguous()
-        pred_masks = pred_masks.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
         imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]
@@ -572,9 +597,12 @@ class v8SegmentationLoss(v8DetectionLoss):
         # Targets
         try:
             batch_idx = batch["batch_idx"].view(-1, 1)
-            targets = torch.cat((batch_idx, batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+            cls_targets = batch["cls"]
+            if cls_targets.ndim == 1:
+                cls_targets = cls_targets.unsqueeze(-1)
+            targets = torch.cat((batch_idx, cls_targets, batch["bboxes"]), 1)
             targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
-            gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+            gt_labels, gt_bboxes = targets.split((self.n_tasks, 4), 2)  # cls, xyxy
             mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
         except RuntimeError as e:
             raise TypeError(
@@ -592,7 +620,7 @@ class v8SegmentationLoss(v8DetectionLoss):
             pred_scores[..., :self.nc[0]].detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
-            gt_labels[..., :1],
+            gt_labels[..., 0, None],
             gt_bboxes,
             mask_gt,
         )
@@ -605,7 +633,7 @@ class v8SegmentationLoss(v8DetectionLoss):
             pred_scores_task = pred_scores[..., offset:offset + n_cls_task]
 
             target_labels_task, target_scores_task = self.assigner.get_scores(
-                gt_labels=gt_labels[..., task_idx, None] if gt_labels.shape[-1] > 1 else gt_labels,
+                gt_labels=gt_labels[..., task_idx, None],
                 target_gt_idx=target_gt_idx,
                 fg_mask=fg_mask,
                 num_classes=n_cls_task,
@@ -1055,7 +1083,13 @@ class E2EDetectLoss:
     def __init__(self, model):
         """Initialize E2EDetectLoss with one-to-many and one-to-one detection losses using the provided model."""
         self.one2many = v8DetectionLoss(model, tal_topk=10)
-        self.one2one = v8DetectionLoss(model, tal_topk=1)
+        self.one2one = v8DetectionLoss(model, tal_topk=7)
+        self.updates = 0
+        self.total = 1.0
+        self.o2m = 0.8
+        self.o2o = self.total - self.o2m
+        self.o2m_copy = self.o2m
+        self.final_o2m = 0.1
 
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
@@ -1064,7 +1098,17 @@ class E2EDetectLoss:
         loss_one2many = self.one2many(one2many, batch)
         one2one = preds["one2one"]
         loss_one2one = self.one2one(one2one, batch)
-        return loss_one2many[0] + loss_one2one[0], loss_one2many[1] + loss_one2one[1]
+        return loss_one2many[0] * self.o2m + loss_one2one[0] * self.o2o, loss_one2one[1]
+
+    def update(self):
+        """Update one2many/one2one weights by epoch."""
+        self.updates += 1
+        self.o2m = self.decay(self.updates)
+        self.o2o = max(self.total - self.o2m, 0)
+
+    def decay(self, x):
+        """Linear decay for one2many contribution."""
+        return max(1 - x / max(self.one2one.hyp.epochs - 1, 1), 0) * (self.o2m_copy - self.final_o2m) + self.final_o2m
 
 
 class E2EPoseLoss:
@@ -1091,7 +1135,13 @@ class E2ESegmentLoss:
         
         """Initialize E2ESegmentLoss with one-to-many and one-to-one detection losses using the provided model."""
         self.one2many = v8SegmentationLoss(model, tal_topk=10)
-        self.one2one = v8SegmentationLoss(model, tal_topk=1)
+        self.one2one = v8SegmentationLoss(model, tal_topk=7)
+        self.updates = 0
+        self.total = 1.0
+        self.o2m = 0.8
+        self.o2o = self.total - self.o2m
+        self.o2m_copy = self.o2m
+        self.final_o2m = 0.1
 
     def __call__(self, preds, batch):
         """"""
@@ -1100,7 +1150,17 @@ class E2ESegmentLoss:
         loss_one2many = self.one2many(one2many, batch)
         one2one = preds["one2one"]
         loss_one2one = self.one2one(one2one, batch)
-        return loss_one2many[0] + loss_one2one[0], loss_one2many[1] + loss_one2one[1]
+        return loss_one2many[0] * self.o2m + loss_one2one[0] * self.o2o, loss_one2one[1]
+
+    def update(self):
+        """Update one2many/one2one weights by epoch."""
+        self.updates += 1
+        self.o2m = self.decay(self.updates)
+        self.o2o = max(self.total - self.o2m, 0)
+
+    def decay(self, x):
+        """Linear decay for one2many contribution."""
+        return max(1 - x / max(self.one2one.hyp.epochs - 1, 1), 0) * (self.o2m_copy - self.final_o2m) + self.final_o2m
 
 
 class RLELoss(nn.Module):

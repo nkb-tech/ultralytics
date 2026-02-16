@@ -219,15 +219,35 @@ class SegmentationValidator(DetectionValidator):
         Returns:
             Tuple of (post-NMS detections, proto tensor)
         """
-        sahi_enabled = getattr(self, 'sahi_enabled', False)
-        
-        # Clone raw predictions BEFORE NMS modifies them in-place
+        sahi_enabled = getattr(self, "sahi_enabled", False)
+
+        raw_dict = None
+        actual_preds = preds
+        proto = None
+
+        # Segment forward (non-export) for end2end returns: ((y, proto), raw_dict)
+        if isinstance(preds, (list, tuple)):
+            if len(preds) >= 2 and isinstance(preds[0], (list, tuple)) and len(preds[0]) >= 2:
+                actual_preds, proto = preds[0][0], preds[0][1]
+                raw_dict = preds[1] if isinstance(preds[1], dict) else None
+            else:
+                actual_preds = preds[0]
+                proto = preds[1] if len(preds) > 1 else None
+
+        if isinstance(proto, tuple):
+            proto = proto[0]
+
         if sahi_enabled:
-            self._last_raw_preds = preds[0].clone()
-        
+            if raw_dict is not None and isinstance(raw_dict, dict) and "one2one" in raw_dict:
+                raw_preds = self._get_raw_preds_from_end2end(raw_dict["one2one"])
+                self._last_raw_preds = raw_preds if raw_preds is not None else actual_preds.clone()
+            else:
+                self._last_raw_preds = actual_preds.clone() if isinstance(actual_preds, torch.Tensor) else None
+            self._last_proto = proto
+
         # Apply NMS
         p = ops.non_max_suppression(
-            preds[0],
+            actual_preds,
             self.args.conf,
             self.args.iou,
             labels=self.lb,
@@ -236,14 +256,36 @@ class SegmentationValidator(DetectionValidator):
             max_det=self.args.max_det,
             nc=self.nc,
         )
-        
-        # Extract proto features
-        proto = preds[1][-1] if isinstance(preds[1], (list, tuple)) and len(preds[1]) == 3 else preds[1]
-        
-        if sahi_enabled:
-            self._last_proto = proto
-        
         return p, proto
+
+    def _get_raw_preds_from_end2end(self, one2one_preds):
+        """Build pre-NMS raw predictions for SAHI from one2one dict output."""
+        required_keys = {"boxes", "scores", "feats", "mask_coefficient"}
+        if not isinstance(one2one_preds, dict) or not required_keys.issubset(one2one_preds):
+            return None
+
+        segment_head = None
+        model_to_search = self.model.model if hasattr(self.model, "model") else self.model
+        for m in model_to_search.modules():
+            if hasattr(m, "_inference") and hasattr(m, "nm") and hasattr(m, "decode_bboxes"):
+                segment_head = m
+                break
+
+        if segment_head is None:
+            LOGGER.warning("Could not find segment head for end2end raw prediction extraction")
+            return None
+
+        try:
+            raw_preds = segment_head._inference(one2one_preds)
+            # SAHI aggregators expect xywh in first 4 channels.
+            if getattr(segment_head, "end2end", False):
+                boxes_xyxy = raw_preds[:, :4, :].permute(0, 2, 1).contiguous()
+                boxes_xywh = ops.xyxy2xywh(boxes_xyxy)
+                raw_preds = torch.cat((boxes_xywh.permute(0, 2, 1), raw_preds[:, 4:, :]), dim=1)
+            return raw_preds
+        except Exception as e:
+            LOGGER.warning(f"Error extracting segmentation raw predictions for SAHI: {e}")
+            return None
 
     def _prepare_batch(self, si, batch):
         """
@@ -294,7 +336,7 @@ class SegmentationValidator(DetectionValidator):
         # Handle proto shape
         proto_in = proto
         if isinstance(proto, (list, tuple)):
-            proto_in = proto[-1]
+            proto_in = proto[0]
         if isinstance(proto_in, torch.Tensor) and proto_in.dim() == 4:
             proto_in = proto_in[pbatch.get("batch_idx_single", 0)]
         

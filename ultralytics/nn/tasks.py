@@ -261,7 +261,26 @@ class BaseModel(nn.Module):
         """
         model = weights["model"] if isinstance(weights, dict) else weights  # torchvision models are not dicts
         csd = model.float().state_dict()  # checkpoint state_dict as FP32
-        csd = intersect_dicts(csd, self.state_dict())  # intersect
+        msd = self.state_dict()
+
+        # Compat: support both flat single-task (cv3.i.j.*) and nested (cv3.0.i.j.*) layouts.
+        remapped = dict(csd)
+        for k, v in list(csd.items()):
+            for head_name in ("cv3", "one2one_cv3"):
+                # flat -> nested (task0)
+                m_flat = re.match(rf"^(.*\.{head_name})\.(\d+)\.(.+)$", k)
+                if m_flat:
+                    nk = f"{m_flat.group(1)}.0.{m_flat.group(2)}.{m_flat.group(3)}"
+                    if nk in msd and nk not in remapped:
+                        remapped[nk] = v
+                # nested task0 -> flat
+                m_nested = re.match(rf"^(.*\.{head_name})\.0\.(\d+)\.(.+)$", k)
+                if m_nested:
+                    nk = f"{m_nested.group(1)}.{m_nested.group(2)}.{m_nested.group(3)}"
+                    if nk in msd and nk not in remapped:
+                        remapped[nk] = v
+
+        csd = intersect_dicts(remapped, msd)  # intersect
         self.load_state_dict(csd, strict=False)  # load
         if verbose:
             LOGGER.info(f"Transferred {len(csd)}/{len(self.model.state_dict())} items from pretrained weights")
@@ -973,8 +992,6 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
 
     args = {**DEFAULT_CFG_DICT, **(ckpt.get("train_args", {}))}  # combine model and default args, preferring model args
     model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
-    if patch_model_inplace(model):
-        LOGGER.info("Old-style model detected. Patched model in place.")
 
     # Model compatibility updates
     model.args = {k: v for k, v in args.items() if k in DEFAULT_CFG_KEYS}  # attach args to model
@@ -1184,7 +1201,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                      C2fPSA, C2PSA, C3k2, C2fCIB, C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2, A2C2f, DSC3k2):
                 args.insert(2, n)  # number of repeats
                 n = 1
-            if m is {C3k2, DSC3k2}:  # for M/L/X sizes
+            if m in {C3k2, DSC3k2}:  # for M/L/X sizes
                 legacy = False
                 if scale in "mlx":
                     args[3] = True
@@ -1229,7 +1246,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args[0] = d[args[0]]
             c1, c2 = [ch[x] for x in f], (sum([ch[x] for x in f]) if args[0] == 'concat' else ch[f[0]])
             args = [c1, args[0]]
-        elif m is {CBLinear, TorchVision, Index}:
+        elif m in {CBLinear, TorchVision, Index}:
             c2 = args[0]
             c1 = ch[f]
             args = [c1, c2, *args[1:]]

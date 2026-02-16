@@ -306,17 +306,21 @@ def check_det_dataset(dataset, autodownload=True):
             data["val"] = data.pop("validation")  # replace 'validation' key with 'val' key
     if "names" not in data and "nc" not in data:
         raise SyntaxError(emojis(f"{dataset} key missing ❌.\n either 'names' or 'nc' are required in all data YAMLs."))
-    if "names" in data and "nc" in data and \
-        (len(data["names"]) != len(data["nc"]) or \
-        not all(len(names) == len(nci) for names, nci in zip(data["names"], data["nc"]))):
-        raise SyntaxError(emojis(f"{dataset} 'names' length {data['names']} and 'nc: {data['nc']}' must match."))
+    if "names" in data and "nc" in data:
+        nc_list = data["nc"]
+        names_list = data["names"]
+        if len(names_list) != len(nc_list):
+            raise SyntaxError(emojis(f"{dataset} 'names' length {names_list} and 'nc: {nc_list}' must match."))
+        if not all(len(names) == int(nci) for names, nci in zip(names_list, nc_list)):
+            raise SyntaxError(emojis(f"{dataset} 'names' length {names_list} and 'nc: {nc_list}' must match."))
     if "names" in data:
         raw_names = data.get("names")
         if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
-            data["names"] = [check_class_names(n) for n in raw_names]
+            # check_class_names already returns list[dict] for multi-task input
+            data["names"] = check_class_names(raw_names)
         elif isinstance(raw_names, (dict, list)):
-            names_list = check_class_names(raw_names)
-            data["names"] = [names_list]
+            # check_class_names always normalizes to list[dict]
+            data["names"] = check_class_names(raw_names)
         else:
             raise SyntaxError(emojis(f"{dataset} 'names' must be a list of lists, a list, or a dictionary."))
         data["nc"] = [len(names) for names in data["names"]]

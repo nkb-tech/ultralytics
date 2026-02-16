@@ -83,7 +83,7 @@ class Detect(nn.Module):
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
     # Head mode: "legacy" (Conv), "efficient" (DWConv), "accurate" (Conv2)
-    head_mode = "legacy"
+    head_mode = "efficient"
 
     def __init__(
         self,
@@ -101,6 +101,8 @@ class Detect(nn.Module):
             ch (tuple): Tuple of channel sizes from backbone feature maps.
         """
         super().__init__()
+        # Parse-time sets class attr `legacy`; map it to concrete head mode.
+        self.head_mode = "legacy" if getattr(self, "legacy", False) else "efficient"
         self.nc = list(nc)  # list of class counts per task
         self.nl = len(ch)  # number of detection layers
         self.reg_max = reg_max  # DFL channels
@@ -110,16 +112,35 @@ class Detect(nn.Module):
 
         # Channel dimensions
         c2 = max((16, ch[0] // 4, self.reg_max * 4))
-        c3 = [max(ch[0], min(nc_i, 100)) for nc_i in nc]
+        self.multihead = len(self.nc) > 1
 
-        # Build box regression head (cv2)
-        self.cv2 = nn.ModuleList(self._make_head(self.head_mode, x, c2, 4 * self.reg_max) for x in ch)
-
-        # Build classification heads (cv3) - nested: outer=tasks, inner=scales
-        self.cv3 = nn.ModuleList(
-            nn.ModuleList(self._make_head(self.head_mode, x, c3[i], nc[i]) for x in ch)
-            for i in range(len(nc))
+        # Keep upstream YOLO26 box head layout for pretrained compatibility.
+        self.cv2 = nn.ModuleList(
+            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
         )
+
+        # Single-task path mirrors upstream YOLO26 (flat cv3 for full pretrained transfer).
+        if self.multihead:
+            c3 = [max(ch[0], min(nc_i, 100)) for nc_i in nc]
+            self.cv3 = nn.ModuleList(
+                nn.ModuleList(self._make_head(self.head_mode, x, c3[i], nc[i]) for x in ch)
+                for i in range(len(nc))
+            )
+        else:
+            c3 = max(ch[0], min(self.nc[0], 100))
+            if self.head_mode == "legacy":
+                self.cv3 = nn.ModuleList(
+                    nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc[0], 1)) for x in ch
+                )
+            else:
+                self.cv3 = nn.ModuleList(
+                    nn.Sequential(
+                        nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
+                        nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+                        nn.Conv2d(c3, self.nc[0], 1),
+                    )
+                    for x in ch
+                )
 
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
@@ -150,6 +171,11 @@ class Detect(nn.Module):
                 nn.Sequential(DWConv(c_mid, c_mid, 3), Conv(c_mid, c_mid, 1)),
                 nn.Conv2d(c_mid, c_out, 1),
             )
+
+    @staticmethod
+    def _is_nested_cls_head(cls_head: nn.ModuleList) -> bool:
+        """Return True when cls head is task-nested ModuleList[ModuleList[...]]."""
+        return bool(cls_head) and isinstance(cls_head[0], nn.ModuleList)
 
     @property
     def end2end(self) -> bool:
@@ -197,15 +223,25 @@ class Detect(nn.Module):
         # RKNN export: return raw outputs per scale/task
         if self.export and self.format == "rknn":
             y = []
+            nested_cls = self._is_nested_cls_head(cls_head)
             for i in range(self.nl):
                 y.append(box_head[i](x[i]))
-                for task_head in cls_head:
+                if nested_cls:
+                    for task_head in cls_head:
+                        if self.end2end:
+                            # end2end: raw cls outputs (no sigmoid, no cls_sum)
+                            y.append(task_head[i](x[i]))
+                        else:
+                            # non-end2end: cls with sigmoid + cls_sum for objectness
+                            cls = task_head[i](x[i]).sigmoid_()
+                            cls_sum = cls.sum(dim=1, keepdim=True).clamp_(0, 1)
+                            y.append(cls)
+                            y.append(cls_sum)
+                else:
                     if self.end2end:
-                        # end2end: raw cls outputs (no sigmoid, no cls_sum)
-                        y.append(task_head[i](x[i]))
+                        y.append(cls_head[i](x[i]))
                     else:
-                        # non-end2end: cls with sigmoid + cls_sum for objectness
-                        cls = task_head[i](x[i]).sigmoid_()
+                        cls = cls_head[i](x[i]).sigmoid_()
                         cls_sum = cls.sum(dim=1, keepdim=True).clamp_(0, 1)
                         y.append(cls)
                         y.append(cls_sum)
@@ -216,10 +252,16 @@ class Detect(nn.Module):
 
         # Concatenate all task scores
         scores_list = []
-        for task_head in cls_head:  # iterate over tasks
-            task_scores = torch.cat([task_head[i](x[i]).view(bs, -1, x[i].shape[-2] * x[i].shape[-1]) 
-                                     for i in range(self.nl)], dim=-1)
-            scores_list.append(task_scores)
+        if self._is_nested_cls_head(cls_head):
+            for task_head in cls_head:  # iterate over tasks
+                task_scores = torch.cat(
+                    [task_head[i](x[i]).view(bs, -1, x[i].shape[-2] * x[i].shape[-1]) for i in range(self.nl)], dim=-1
+                )
+                scores_list.append(task_scores)
+        else:
+            scores_list.append(
+                torch.cat([cls_head[i](x[i]).view(bs, -1, x[i].shape[-2] * x[i].shape[-1]) for i in range(self.nl)], dim=-1)
+            )
         scores = torch.cat(scores_list, dim=1)  # (bs, sum(nc), num_anchors)
 
         return dict(boxes=boxes, scores=scores, feats=x)
@@ -289,55 +331,49 @@ class Detect(nn.Module):
     def bias_init(self):
         """Initialize Detect() biases, WARNING: requires stride availability."""
         for i, (a, s) in enumerate(zip(self.cv2, self.stride)):
-            a[-1].bias.data[:] = 1.0  # box
-            for task_head, nc_i in zip(self.cv3, self.nc):
-                task_head[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)
+            a[-1].bias.data[:] = 2.0  # box
+            if self._is_nested_cls_head(self.cv3):
+                for task_head, nc_i in zip(self.cv3, self.nc):
+                    task_head[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)
+            else:
+                self.cv3[i][-1].bias.data[:] = math.log(5 / self.nc[0] / (640 / s) ** 2)
 
         if self.end2end and hasattr(self, "one2one_cv2") and self.one2one_cv2 is not None:
             for i, (a, s) in enumerate(zip(self.one2one_cv2, self.stride)):
-                a[-1].bias.data[:] = 1.0
-                for task_head, nc_i in zip(self.one2one_cv3, self.nc):
-                    task_head[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)
+                a[-1].bias.data[:] = 2.0
+                if self._is_nested_cls_head(self.one2one_cv3):
+                    for task_head, nc_i in zip(self.one2one_cv3, self.nc):
+                        task_head[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)
+                else:
+                    self.one2one_cv3[i][-1].bias.data[:] = math.log(5 / self.nc[0] / (640 / s) ** 2)
 
     @staticmethod
     def postprocess(preds: Tensor, max_det: int, nc: list[int]) -> Tensor:
-        """Post-process predictions with multitask classification support.
-
-        Args:
-            preds (Tensor): Predictions with shape (batch_size, num_anchors, 4 + sum(nc)).
-            max_det (int): Maximum number of detections.
-            nc (list[int]): List of class counts per task.
-
-        Returns:
-            (Tensor): Post-processed predictions (batch_size, max_det, 6).
-        """
+        """Post-process end2end predictions to per-task `[conf, cls]` layout."""
         total_classes = sum(nc)
         assert 4 + total_classes == preds.shape[-1]
 
         boxes, scores = preds.split([4, total_classes], dim=-1)
-
-        # Split scores by task and use first task for ranking
+        task_conf, task_cls = [], []
         start_idx = 0
-        task_scores = []
         for num_classes in nc:
             end_idx = start_idx + num_classes
-            task_scores.append(scores[:, :, start_idx:end_idx])
+            task_scores = scores[:, :, start_idx:end_idx]
+            conf_i, cls_i = task_scores.max(dim=-1, keepdim=True)
+            task_conf.append(conf_i)
+            task_cls.append(cls_i.to(boxes.dtype))
             start_idx = end_idx
 
-        primary_scores = task_scores[0]
-        max_scores = primary_scores.amax(dim=-1)
-        max_scores, index = torch.topk(max_scores, min(max_det, max_scores.shape[1]), dim=-1)
-        index = index.unsqueeze(-1)
+        # Keep anchors by first task confidence (same convention as NMS path).
+        k = min(max_det, boxes.shape[1])
+        topk_idx = task_conf[0].squeeze(-1).topk(k, dim=-1)[1].unsqueeze(-1)
+        boxes = boxes.gather(dim=1, index=topk_idx.repeat(1, 1, 4))
 
-        boxes = torch.gather(boxes, dim=1, index=index.repeat(1, 1, boxes.shape[-1]))
-        scores = torch.gather(scores, dim=1, index=index.repeat(1, 1, scores.shape[-1]))
-
-        scores, index = torch.topk(scores.flatten(1), max_det, dim=-1)
-        labels = index % total_classes
-        index = index // total_classes
-        boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
-
-        return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).to(boxes.dtype)], dim=-1)
+        out = [boxes]
+        for conf_i, cls_i in zip(task_conf, task_cls):
+            out.append(conf_i.gather(dim=1, index=topk_idx))
+            out.append(cls_i.gather(dim=1, index=topk_idx))
+        return torch.cat(out, dim=-1)
 
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
@@ -434,32 +470,29 @@ class Segment(Detect):
         return torch.cat([preds, x["mask_coefficient"]], dim=1)
 
     def postprocess(self, preds: Tensor, max_det: int, nc: list[int]) -> Tensor:
-        """Post-process with mask coefficients."""
+        """Post-process with mask coefficients and per-task `[conf, cls]` layout."""
         boxes, scores, mask_coef = preds.split([4, sum(nc), self.nm], dim=-1)
-
+        task_conf, task_cls = [], []
         start_idx = 0
-        task_scores = []
         for num_classes in nc:
             end_idx = start_idx + num_classes
-            task_scores.append(scores[:, :, start_idx:end_idx])
+            task_scores = scores[:, :, start_idx:end_idx]
+            conf_i, cls_i = task_scores.max(dim=-1, keepdim=True)
+            task_conf.append(conf_i)
+            task_cls.append(cls_i.to(boxes.dtype))
             start_idx = end_idx
 
-        primary_scores = task_scores[0]
-        max_scores = primary_scores.amax(dim=-1)
-        max_scores, index = torch.topk(max_scores, min(max_det, max_scores.shape[1]), dim=-1)
-        index = index.unsqueeze(-1)
+        k = min(max_det, boxes.shape[1])
+        topk_idx = task_conf[0].squeeze(-1).topk(k, dim=-1)[1].unsqueeze(-1)
+        boxes = boxes.gather(dim=1, index=topk_idx.repeat(1, 1, 4))
+        mask_coef = mask_coef.gather(dim=1, index=topk_idx.repeat(1, 1, self.nm))
 
-        boxes = boxes.gather(dim=1, index=index.repeat(1, 1, 4))
-        scores = scores.gather(dim=1, index=index.repeat(1, 1, sum(nc)))
-        mask_coef = mask_coef.gather(dim=1, index=index.repeat(1, 1, self.nm))
-
-        scores, idx = scores.flatten(1).topk(max_det, dim=-1)
-        labels = idx % sum(nc)
-        idx = idx // sum(nc)
-        boxes = boxes.gather(dim=1, index=idx.unsqueeze(-1).repeat(1, 1, 4))
-        mask_coef = mask_coef.gather(dim=1, index=idx.unsqueeze(-1).repeat(1, 1, self.nm))
-
-        return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).float(), mask_coef], dim=-1)
+        out = [boxes]
+        for conf_i, cls_i in zip(task_conf, task_cls):
+            out.append(conf_i.gather(dim=1, index=topk_idx))
+            out.append(cls_i.gather(dim=1, index=topk_idx))
+        out.append(mask_coef)
+        return torch.cat(out, dim=-1)
 
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
@@ -572,32 +605,29 @@ class OBB(Detect):
         return dist2rbox(bboxes, self.angle, anchors, dim=1)
 
     def postprocess(self, preds: Tensor, max_det: int, nc: list[int]) -> Tensor:
-        """Post-process with angle."""
+        """Post-process with angle and per-task `[conf, cls]` layout."""
         boxes, scores, angle = preds.split([4, sum(nc), self.ne], dim=-1)
-
+        task_conf, task_cls = [], []
         start_idx = 0
-        task_scores = []
         for num_classes in nc:
             end_idx = start_idx + num_classes
-            task_scores.append(scores[:, :, start_idx:end_idx])
+            task_scores = scores[:, :, start_idx:end_idx]
+            conf_i, cls_i = task_scores.max(dim=-1, keepdim=True)
+            task_conf.append(conf_i)
+            task_cls.append(cls_i.to(boxes.dtype))
             start_idx = end_idx
 
-        primary_scores = task_scores[0]
-        max_scores = primary_scores.amax(dim=-1)
-        max_scores, index = torch.topk(max_scores, min(max_det, max_scores.shape[1]), dim=-1)
-        index = index.unsqueeze(-1)
+        k = min(max_det, boxes.shape[1])
+        topk_idx = task_conf[0].squeeze(-1).topk(k, dim=-1)[1].unsqueeze(-1)
+        boxes = boxes.gather(dim=1, index=topk_idx.repeat(1, 1, 4))
+        angle = angle.gather(dim=1, index=topk_idx.repeat(1, 1, self.ne))
 
-        boxes = boxes.gather(dim=1, index=index.repeat(1, 1, 4))
-        scores = scores.gather(dim=1, index=index.repeat(1, 1, sum(nc)))
-        angle = angle.gather(dim=1, index=index.repeat(1, 1, self.ne))
-
-        scores, idx = scores.flatten(1).topk(max_det, dim=-1)
-        labels = idx % sum(nc)
-        idx = idx // sum(nc)
-        boxes = boxes.gather(dim=1, index=idx.unsqueeze(-1).repeat(1, 1, 4))
-        angle = angle.gather(dim=1, index=idx.unsqueeze(-1).repeat(1, 1, self.ne))
-
-        return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).float(), angle], dim=-1)
+        out = [boxes]
+        for conf_i, cls_i in zip(task_conf, task_cls):
+            out.append(conf_i.gather(dim=1, index=topk_idx))
+            out.append(cls_i.gather(dim=1, index=topk_idx))
+        out.append(angle)
+        return torch.cat(out, dim=-1)
 
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
