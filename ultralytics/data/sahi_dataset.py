@@ -452,9 +452,19 @@ class SAHIDataset(YOLODataset):
         
         self.image_shapes: Dict[int, Tuple[int, int]] = {}
 
-        super().__init__(img_path=img_path, *args, **kwargs)
+        # sahi=True MUST be passed to super() so load_image() does NOT resize
+        # during cache_images() — we need original resolution for cropping
+        kwargs["sahi"] = True
 
-        self.sahi = True
+        # Warn about RAM usage: SAHI caches full-resolution images
+        cache_val = kwargs.get("cache", None)
+        if cache_val == "ram" or cache_val is True:
+            LOGGER.warning(
+                "WARNING ⚠️ SAHI + cache='ram' stores full-resolution images in RAM. "
+                "Consider cache='low-ram' for SAHI to save memory."
+            )
+
+        super().__init__(img_path=img_path, *args, **kwargs)
         self._cache_image_shapes()
         self.slice_indices = self._precompute_slices()
         

@@ -188,6 +188,10 @@ class SAHICropAggregator:
             LOGGER.warning("SAHI metadata missing in batch, skipping aggregation")
             return False
 
+        if not ratio_pads:
+            LOGGER.warning("SAHI: ratio_pad missing from batch (augment may be enabled for val). Skipping.")
+            return False
+
         imgsz = batch['img'].shape[2:]  # Model input size (h, w)
 
         # Handle tuple output from model
@@ -201,8 +205,16 @@ class SAHICropAggregator:
             LOGGER.debug(f"Unexpected preds_before_nms shape: {preds_before_nms.shape}")
             return False
 
-        # Process each crop in batch
-        batch_size = min(len(original_img_idx), preds_before_nms.shape[0])
+        # Process each crop in batch — use min of all metadata lengths to avoid IndexError
+        batch_size = min(
+            len(original_img_idx),
+            preds_before_nms.shape[0],
+            len(slice_idx),
+            len(slice_coords),
+            len(ori_shapes),
+            len(resized_shapes),
+            len(ratio_pads),
+        )
 
         for i in range(batch_size):
             self._process_single_crop(
