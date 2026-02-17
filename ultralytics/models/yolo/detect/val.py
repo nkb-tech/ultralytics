@@ -280,10 +280,10 @@ class DetectionValidator(BaseValidator):
             # Check if NMS is in the graph (from metadata)
             nms = getattr(self, 'nms', False)
             if nms:
-                # NMS already applied in model graph
-                preds = ops.process_nms_hef_results(preds, img_hw=img_hw)
+                # NMS already applied in model graph — results are final List[Tensor(N, 6)]
+                return ops.process_nms_hef_results(preds, img_hw=img_hw)
             else:
-                # No NMS in graph - process DFL/end2end outputs
+                # No NMS in graph - process DFL/end2end outputs, then fall through to NMS below
                 end2end = getattr(self, 'end2end', False)
                 if not end2end:
                     preds = ops.process_hef_dfl_results(

@@ -150,6 +150,12 @@ class BaseValidator:
             self.end2end = getattr(model, 'end2end', False)  # End2end model flag
             self.nms = getattr(model, 'nms', False)  # NMS in graph flag
             stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
+            # For Hailo/RKNN models, use imgsz from model metadata if not explicitly set by user
+            if (self.hef or self.rknn) and hasattr(model, 'imgsz'):
+                model_imgsz = model.imgsz
+                if isinstance(model_imgsz, (list, tuple)):
+                    model_imgsz = max(model_imgsz)
+                self.args.imgsz = model_imgsz
             imgsz = check_imgsz(self.args.imgsz, stride=stride)
             if engine:
                 self.args.batch = model.batch_size
