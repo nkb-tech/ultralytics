@@ -501,6 +501,63 @@ def process_nms_onnx_results(preds: Tensor) -> List[Tensor]:
 
     return outputs
 
+def process_nms_hef_results(preds, img_hw: tuple[int, int] = (640, 640)) -> List[Tensor]:
+    """
+    Process Hailo on-chip NMS post-processed detection results into YOLO format.
+
+    Hailo NMS outputs per-class detections with normalised coordinates.
+    The structure returned by ``InferVStreams.infer`` (after ``autobackend``
+    collects outputs) is::
+
+        preds = [           # batch
+            [               # classes  (len == num_classes)
+                ndarray(N0, 5),   # class-0 detections
+                ndarray(N1, 5),   # class-1 detections
+                ...
+            ],
+            ...
+        ]
+
+    Each row inside a per-class array is ``[y_min, x_min, y_max, x_max, score]``
+    with coordinates normalised to **[0, 1]**.
+
+    Args:
+        preds: Nested list ``[batch][class]`` of numpy arrays ``(N, 5)``.
+        img_hw: ``(height, width)`` of the model input image used for
+            de-normalisation (pixels).
+
+    Returns:
+        List[torch.Tensor]: YOLO-style list of length *batch_size* where each
+            element is a tensor ``(num_boxes, 6)`` with columns
+            ``(x1, y1, x2, y2, confidence, class)``.
+    """
+    h, w = img_hw
+    outputs = []
+
+    for batch_dets in preds:  # iterate over batch
+        all_dets = []
+        for class_id, class_dets in enumerate(batch_dets):
+            if not isinstance(class_dets, np.ndarray):
+                class_dets = np.asarray(class_dets, dtype=np.float32)
+            if class_dets.ndim != 2 or class_dets.shape[0] == 0:
+                continue
+            # class_dets columns: [y_min, x_min, y_max, x_max, score]
+            n = class_dets.shape[0]
+            det = np.empty((n, 6), dtype=np.float32)
+            det[:, 0] = class_dets[:, 1] * w   # x1 = x_min * width
+            det[:, 1] = class_dets[:, 0] * h   # y1 = y_min * height
+            det[:, 2] = class_dets[:, 3] * w   # x2 = x_max * width
+            det[:, 3] = class_dets[:, 2] * h   # y2 = y_max * height
+            det[:, 4] = class_dets[:, 4]        # confidence
+            det[:, 5] = class_id                # class
+            all_dets.append(det)
+
+        if all_dets:
+            outputs.append(torch.from_numpy(np.concatenate(all_dets, axis=0)))
+        else:
+            outputs.append(torch.zeros((0, 6), dtype=torch.float32))
+
+    return outputs
 
 def dfl(position: Tensor) -> Tensor:
     # Distribution Focal Loss (DFL)
@@ -661,6 +718,144 @@ def process_rknn_end2end_results(
     scores = scores.sigmoid()
 
     # Combine and transpose: (bs, 4+nc, anchors) -> (bs, anchors, 4+nc)
+    preds = torch.cat([dbox, scores], dim=1).permute(0, 2, 1)
+
+    return preds
+
+def _is_logits(scores: Tensor) -> bool:
+    """Return True if *scores* look like raw logits rather than post-sigmoid probabilities.
+
+    The heuristic is trivial: sigmoid output is always in [0, 1], so any
+    value outside that range means the activation was not baked into the
+    model graph.
+    """
+    return bool(scores.min() < 0.0 or scores.max() > 1.0)
+
+
+def process_hef_dfl_results(
+    input_data: List[Tensor],
+    default_branch: int = 3,
+    imgsz: tuple[int, int] = (640, 640),
+    conf_thres: float = 0.01,
+) -> Tensor:
+    """Process Hailo DFL results (NHWC) into YOLO-style predictions.
+
+    Hailo outputs raw detection heads in NHWC format.  Each detection scale
+    has a pair of outputs: bbox DFL regression ``(H, W, 64)`` and class
+    scores ``(H, W, nc)``.
+
+    This is the Hailo equivalent of :func:`process_rknn_dfl_results`; the
+    only structural difference is the NHWC→NCHW permutation applied before
+    reusing the shared ``box_process`` / ``dfl`` helpers.
+
+    Args:
+        input_data: List of NHWC tensors ``[bbox0, cls0, bbox1, cls1, ...]``.
+        default_branch: Number of detection scales (default 3).
+        imgsz: Model input size ``(height, width)``.
+        conf_thres: Confidence threshold for early filtering.
+
+    Returns:
+        Tensor: Shape ``(batch, 4 + nc, num_boxes)`` ready for NMS.
+    """
+    boxes, classes_conf = [], []
+    pair_per_branch = len(input_data) // default_branch
+
+    for i in range(default_branch):
+        # Convert NHWC → NCHW for box_process / dfl helpers
+        bbox_nhwc = input_data[pair_per_branch * i]
+        bbox_nchw = bbox_nhwc.permute(0, 3, 1, 2).contiguous()  # (bs, 64, H, W)
+        boxes.append(box_process(bbox_nchw, imgsz=imgsz))
+
+        cls_nhwc = input_data[pair_per_branch * i + 1]
+        cls_nchw = cls_nhwc.permute(0, 3, 1, 2).contiguous()    # (bs, nc, H, W)
+        classes_conf.append(cls_nchw)
+
+    def sp_flatten(_in: Tensor) -> Tensor:
+        b, ch, h, w = _in.shape
+        return _in.reshape(b, ch, h * w)
+
+    boxes = torch.cat([sp_flatten(v) for v in boxes], dim=2)
+    classes_conf = torch.cat([sp_flatten(v) for v in classes_conf], dim=2)
+
+    # Auto-detect raw logits (sigmoid not baked into the HEF graph)
+    if _is_logits(classes_conf):
+        classes_conf = classes_conf.sigmoid()
+
+    return torch.cat((boxes, classes_conf), dim=1)
+
+
+def process_hef_end2end_results(
+    input_data: List[Tensor],
+    imgsz: tuple[int, int] = (640, 640),
+    conf_thres: float = 0.01,
+    nc: list[int] = [80],
+    strides: tuple[int, ...] = (8, 16, 32),
+) -> Tensor:
+    """Process Hailo end2end model outputs (NHWC) into predictions for NMS.
+
+    This is the Hailo equivalent of :func:`process_rknn_end2end_results`.
+    Hailo outputs are in NHWC format; this function permutes them to NCHW
+    before decoding boxes with ``dist2bbox`` and applying sigmoid to scores.
+
+    Args:
+        input_data: List of NHWC tensors
+            ``[reg0, cls0_t0, cls0_t1, …, reg1, cls1_t0, …]``.
+            reg shape ``(bs, h, w, 4)``, cls shape ``(bs, h, w, nc[t])``.
+        imgsz: Model input size ``(height, width)``.
+        conf_thres: Confidence threshold (kept for API consistency).
+        nc: Number of classes per task head.
+        strides: Feature-map strides for each detection layer.
+
+    Returns:
+        Tensor: Predictions ``(batch, num_anchors, 4 + sum(nc))``,
+            box format xyxy, scores after sigmoid.
+    """
+    from ultralytics.utils.tal import dist2bbox, make_anchors
+
+    num_tasks = len(nc)
+    outputs_per_scale = 1 + num_tasks
+    nl = len(input_data) // outputs_per_scale
+    bs = input_data[0].shape[0]
+
+    regs, clss, feats = [], [], []
+
+    for i in range(nl):
+        base_idx = i * outputs_per_scale
+        # Convert NHWC → NCHW
+        reg = input_data[base_idx].permute(0, 3, 1, 2).contiguous()  # (bs, 4, h, w)
+
+        regs.append(reg.view(bs, 4, -1))  # (bs, 4, h*w)
+        feats.append(reg)
+
+        # Collect all task cls outputs for this scale
+        scale_cls = []
+        for t in range(num_tasks):
+            cls = input_data[base_idx + 1 + t].permute(0, 3, 1, 2).contiguous()
+            scale_cls.append(cls.view(bs, nc[t], -1))  # (bs, nc[t], h*w)
+        clss.append(torch.cat(scale_cls, dim=1))  # (bs, total_nc, h*w)
+
+    # Concatenate across scales
+    boxes = torch.cat(regs, dim=-1)   # (bs, 4, total_anchors)
+    scores = torch.cat(clss, dim=-1)  # (bs, total_nc, total_anchors)
+
+    # Generate anchors and strides
+    stride_tensor = torch.tensor(
+        strides[:nl],
+        device=input_data[0].device,
+        dtype=input_data[0].dtype,
+    )
+    anchors, strides_out = make_anchors(feats, stride_tensor, 0.5)
+    anchors = anchors.transpose(0, 1)       # (2, total_anchors)
+    strides_out = strides_out.transpose(0, 1)  # (1, total_anchors)
+
+    # Decode boxes: ltrb distances → xyxy coordinates
+    dbox = dist2bbox(boxes, anchors.unsqueeze(0), xywh=False, dim=1) * strides_out
+
+    # Apply sigmoid only when the model exports raw logits
+    if _is_logits(scores):
+        scores = scores.sigmoid()
+
+    # Combine and transpose: (bs, 4+nc, anchors) → (bs, anchors, 4+nc)
     preds = torch.cat([dbox, scores], dim=1).permute(0, 2, 1)
 
     return preds

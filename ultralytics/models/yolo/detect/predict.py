@@ -253,6 +253,8 @@ class DetectionPredictor(BasePredictor):
                 preds = ops.process_nms_trt_results(preds, self.output_names)
             elif self.onnx:
                 preds = ops.process_nms_onnx_results(preds)
+            elif self.hef:
+                preds = ops.process_nms_hef_results(preds, img_hw=img_hw)
         else:
             if self.rknn:
                 if not end2end:
@@ -263,6 +265,20 @@ class DetectionPredictor(BasePredictor):
                     )
                 else:
                     preds = ops.process_rknn_end2end_results(
+                        input_data=preds,
+                        imgsz=img_hw,
+                        conf_thres=self.args.conf,
+                        nc=self.nc,
+                    )
+            elif self.hef:
+                if not end2end:
+                    preds = ops.process_hef_dfl_results(
+                        input_data=preds,
+                        imgsz=img_hw,
+                        conf_thres=self.args.conf,
+                    )
+                else:
+                    preds = ops.process_hef_end2end_results(
                         input_data=preds,
                         imgsz=img_hw,
                         conf_thres=self.args.conf,

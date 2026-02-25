@@ -102,11 +102,13 @@ class DetectionValidator(BaseValidator):
                 batch[k] = v.to(self.device, non_blocking=self.device.type == "cuda")
 
         is_rknn = getattr(self, "rknn", False)
+        is_hef = getattr(self, 'hef', False)
         is_int8 = getattr(self, "int8", False)
 
         batch["img"] = batch["img"].to(torch.uint8 if is_int8 else torch.float16 if self.args.half else torch.float32)
-
-        if not is_rknn:
+        
+        # RKNN and Hailo have their own normalization
+        if not is_rknn and not is_hef:
             bit_depth = getattr(self.args, "image_bit_depth", 8)
             if bit_depth == 8:
                 batch["img"] /= 255.0
@@ -147,6 +149,26 @@ class DetectionValidator(BaseValidator):
                     imgsz=self._img_hw,
                     conf_thres=self.args.conf,
                 )
+        # Handle Hailo models
+        elif getattr(self, 'hef', False):
+            # Check if NMS is in the graph (from metadata)
+            nms = getattr(self, 'nms', False)
+            if nms:
+                return ops.process_nms_hef_results(preds, img_hw=img_hw)
+            else:
+                if not self.end2end:
+                    preds = ops.process_hef_dfl_results(
+                        input_data=preds,
+                        imgsz=img_hw,
+                        conf_thres=self.args.conf,
+                    )
+                else:
+                    preds = ops.process_hef_end2end_results(
+                        input_data=preds,
+                        imgsz=img_hw,
+                        conf_thres=self.args.conf,
+                        nc=self.nc,
+                    )
 
         # Separate inference output from raw features dict
         if isinstance(preds, (list, tuple)):

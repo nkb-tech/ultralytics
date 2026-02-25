@@ -113,6 +113,7 @@ class AutoBackend(nn.Module):
             | PaddlePaddle          | *_paddle_model   |
             | NCNN                  | *_ncnn_model     |
             | RKNN                  | *_rknn_model     |
+            | Hailo                 | *.hef            |
 
     This class offers dynamic backend switching capabilities based on the input model format, making it easier to deploy
     models across various platforms.
@@ -125,6 +126,7 @@ class AutoBackend(nn.Module):
         device=torch.device("cpu"),
         dnn=False,
         data=None,
+        fp32=False,
         fp16=False,
         int8=False,
         batch=1,
@@ -169,14 +171,19 @@ class AutoBackend(nn.Module):
             rknn,         # 15
             executorch,   # 16
             triton,       # 17
-        ) = model_types if len(model_types) == 18 else model_types + [False] * (18 - len(model_types))
+            hef,          # 18
+        ) = model_types if len(model_types) == 19 else model_types + [False] * (19 - len(model_types))
 
+        fp32 &= hef
         fp16 &= pt or jit or onnx or xml or engine or nn_module or triton  # FP16
-        int8 &= rknn or jit or onnx & engine # INT8
-        nhwc = rknn or coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs torch BCWH)
+        int8 &= hef or rknn or jit or onnx or engine # INT8
+        nhwc = hef or rknn or coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs torch BCWH)
         if int8 and fp16:
             LOGGER.warning("WARNING ⚠️ int8=True and fp16=True are mutually exclusive, setting fp16=False.")
             fp16 = False
+        if int8 and fp32:
+            LOGGER.warning("WARNING ⚠️ int8=True and fp32=True are mutually exclusive, setting fp32=False.")
+            fp32 = False
         stride = 32  # default stride
         model, metadata = None, None
 
@@ -481,6 +488,69 @@ class AutoBackend(nn.Module):
             metadata = w.parent / "metadata.yaml"
             model = rknn
 
+        # Hailo
+        elif hef:
+            LOGGER.info(f"Loading {w} for Hailo inference...")
+            from hailo_platform import (
+                HEF,
+                VDevice,
+                InferVStreams,
+                InputVStreamParams,
+                OutputVStreamParams,
+                ConfigureParams,
+                FormatType,
+                HailoStreamInterface,
+            )
+
+            hef_model = HEF(w)
+            hailo_vdevice = VDevice()
+
+            configure_params = ConfigureParams.create_from_hef(
+                hef_model, interface=HailoStreamInterface.PCIe,
+            )
+
+            network_group = hailo_vdevice.configure(hef_model, configure_params)[0]
+            network_group_params = network_group.create_params()
+
+            input_vstream_infos = hef_model.get_input_vstream_infos()
+            output_vstream_infos = hef_model.get_output_vstream_infos()
+            output_names = hef_model.get_sorted_output_names()
+
+            input_vstream_info = input_vstream_infos[0]
+            input_shape = input_vstream_info.shape
+
+            hailo_input_format_type = FormatType.FLOAT32 if fp32 else FormatType.UINT8
+            if not fp32 and not int8:
+                int8 = True  # default to uint8 for Hailo
+
+            input_vstreams_params = InputVStreamParams.make_from_network_group(
+                network_group, format_type=hailo_input_format_type,
+            )
+            output_vstreams_params = OutputVStreamParams.make_from_network_group(
+                network_group, format_type=FormatType.FLOAT32,
+            )
+
+            # Activate network group (required before inference)
+            hailo_activated_ng = network_group.activate(network_group_params)
+            hailo_activated_ng.__enter__()
+
+            # Create and enter InferVStreams pipeline (kept alive for repeated inference)
+            hailo_pipeline = InferVStreams(
+                network_group, input_vstreams_params, output_vstreams_params,
+            )
+            hailo_pipeline.__enter__()
+
+            # Store input layer name for inference
+            hailo_input_name = input_vstream_infos[0].name
+
+            metadata = Path(w).parent / "metadata.yaml"
+            model = hailo_pipeline
+
+            LOGGER.info(
+                f"Hailo model loaded: input='{hailo_input_name}' {input_vstream_info.shape}, "
+                f"outputs={len(output_names)}, format={hailo_input_format_type}"
+            )
+
         # Any other format (unsupported)
         else:
             from ultralytics.engine.exporter import export_formats
@@ -679,6 +749,21 @@ class AutoBackend(nn.Module):
                 get_frame_id=False,
             )
 
+        # Hailo
+        elif self.hef:
+            # Transpose from NCHW to NHWC if needed (safety check)
+            if im.ndim == 4 and im.shape[1] in (1, 3):  # NCHW format detected
+                im = im.permute(0, 2, 3, 1).contiguous()
+            im = im.cpu().numpy()
+            if self.int8:
+                im = im.astype(np.uint8)
+            else:
+                im = im.astype(np.float32)
+            # Run inference via InferVStreams pipeline
+            results = self.model.infer({self.hailo_input_name: im})
+            # Collect outputs in sorted order
+            y = [results[name] for name in self.output_names]
+
         # TensorFlow (SavedModel, GraphDef, Lite, Edge TPU)
         else:
             im = im.cpu().numpy()
@@ -792,4 +877,6 @@ class AutoBackend(nn.Module):
             url = urlsplit(p)
             triton = bool(url.netloc) and bool(url.path) and url.scheme in {"http", "grpc"}
 
-        return types + [triton]
+        hef_detect = name.endswith(".hef")
+
+        return types + [triton, hef_detect]

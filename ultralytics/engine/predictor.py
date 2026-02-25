@@ -331,6 +331,7 @@ class BasePredictor:
         self.engine = self.model.engine if hasattr(self.model, "engine") else False
         self.onnx = self.model.onnx if hasattr(self.model, "onnx") else False
         self.rknn = self.model.rknn if hasattr(self.model, "rknn") else False
+        self.hef = self.model.hef if hasattr(self.model, "hef") else False
         self.names = self.model.names if hasattr(self.model, "names") else None
 
         self.is_multitask = len(self.names) > 1 if self.names else False

@@ -140,13 +140,22 @@ class BaseValidator:
                 data=self.args.data,
                 fp16=self.args.half,
             )
-            # self.model = model
+            self.model = model  # Store model for access to flags
             self.device = model.device  # update device
             self.args.half = model.fp16  # update half
             self.rknn = getattr(model, 'rknn', False)  # RKNN format flag
+            self.hef = getattr(model, 'hef', False)  # Hailo format flag
             self.int8 = getattr(model, 'int8', False)  # INT8 quantization flag
-            self.nhwc = getattr(model, 'nhwc', False)  # NHWC format flag (for RKNN, TFLite, etc.)
+            self.nhwc = getattr(model, 'nhwc', False)  # NHWC format flag (for RKNN, TFLite, Hailo, etc.)
+            self.end2end = getattr(model, 'end2end', False)  # End2end model flag
+            self.nms = getattr(model, 'nms', False)  # NMS in graph flag
             stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
+            # For Hailo/RKNN models, use imgsz from model metadata if not explicitly set by user
+            if (self.hef or self.rknn) and hasattr(model, 'imgsz'):
+                model_imgsz = model.imgsz
+                if isinstance(model_imgsz, (list, tuple)):
+                    model_imgsz = max(model_imgsz)
+                self.args.imgsz = model_imgsz
             imgsz = check_imgsz(self.args.imgsz, stride=stride)
             if engine:
                 self.args.batch = model.batch_size
