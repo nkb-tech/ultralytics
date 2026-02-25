@@ -4,7 +4,7 @@ import numpy as np
 
 from ultralytics.engine.results import Results
 from ultralytics.models.yolo.detect.predict import DetectionPredictor
-from ultralytics.utils import DEFAULT_CFG, ops
+from ultralytics.utils import DEFAULT_CFG, nms, ops
 
 
 class SegmentationPredictor(DetectionPredictor):
@@ -62,7 +62,7 @@ class SegmentationPredictor(DetectionPredictor):
             nc_list = list(nc)
         else:
             nc_list = [nc]
-        p = ops.non_max_suppression(
+        p = nms.non_max_suppression(
             preds[0],
             self.args.conf,
             self.args.iou,

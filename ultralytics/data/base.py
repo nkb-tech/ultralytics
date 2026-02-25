@@ -194,6 +194,9 @@ class BaseDataset(Dataset):
             # Convert single-channel to 3-channel by duplicating (for 16-bit grayscale support)
             if im.ndim == 2:
                 im = np.repeat(im[:, :, None], 3, axis=2)
+            # Convert RGBA to RGB by dropping alpha channel
+            elif im.ndim == 3 and im.shape[2] == 4:
+                im = cv2.cvtColor(im, cv2.COLOR_BGRA2BGR)
             return im, (h0, w0), im.shape[:2]
 
         if stored is not None:  # ram
@@ -229,6 +232,9 @@ class BaseDataset(Dataset):
         # Convert single-channel to 3-channel by duplicating (for 16-bit grayscale support)
         if im.ndim == 2:
             im = np.repeat(im[:, :, None], 3, axis=2)
+        # Convert RGBA to RGB by dropping alpha channel
+        elif im.ndim == 3 and im.shape[2] == 4:
+            im = cv2.cvtColor(im, cv2.COLOR_BGRA2BGR)
         return im, (h0, w0), im.shape[:2]
 
     def cache_images(self):

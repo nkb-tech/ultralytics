@@ -1,5 +1,7 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
+from __future__ import annotations
+
 """
 YOLO Segmentation Validator.
 
@@ -21,20 +23,19 @@ SAHI Mask Generation:
     4. Transforming masks to original image coordinates
 """
 
-from multiprocessing.pool import ThreadPool
 from pathlib import Path
-import cv2
+from typing import Any
 
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
 
 from ultralytics.models.yolo.detect import DetectionValidator
-from ultralytics.models.yolo.detect.sahi_val import _fix_ratio_pad, _to_tuple
-from ultralytics.utils import LOGGER, NUM_THREADS, ops
+from ultralytics.utils import LOGGER, nms, ops
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import SegmentMetrics, box_iou, mask_iou
-from ultralytics.utils.plotting import output_to_target, plot_images
+from ultralytics.utils.plotting import plot_images
 
 
 class SegmentationValidator(DetectionValidator):
@@ -61,18 +62,22 @@ class SegmentationValidator(DetectionValidator):
         ```
     """
 
-    # ==================== Initialization ====================
+    def __init__(
+        self,
+        dataloader=None,
+        save_dir=None,
+        pbar=None,
+        args=None,
+        _callbacks=None,
+    ) -> None:
+        """Initialize SegmentationValidator and set task to 'segment', metrics to SegmentMetrics.
 
-    def __init__(self, dataloader=None, save_dir=None, pbar=None, args=None, _callbacks=None):
-        """
-        Initialize SegmentationValidator.
-        
         Args:
-            dataloader: Validation dataloader
-            save_dir: Directory to save results
-            pbar: Progress bar
-            args: Validation arguments
-            _callbacks: Callback functions
+            dataloader (torch.utils.data.DataLoader, optional): DataLoader to use for validation.
+            save_dir (Path, optional): Directory to save results.
+            pbar (tqdm, optional): Progress bar.
+            args (dict, optional): Arguments for the validator.
+            _callbacks (list, optional): List of callback functions.
         """
         super().__init__(dataloader, save_dir, pbar, args, _callbacks)
         self.plot_masks = None
@@ -88,21 +93,18 @@ class SegmentationValidator(DetectionValidator):
                 self.sahi_aggregator = SAHISegmentAggregator(self)
                 self.sahi_aggregator.calculate_expected_crops(self.dataloader.dataset)
 
-    def init_metrics(self, model):
-        """
-        Initialize metrics for segmentation validation.
-        
-        Sets up:
-            - Mask processing function
-            - SegmentMetrics with mask support
-            - SAHI aggregator if enabled
-        
+    def init_metrics(self, model: torch.nn.Module) -> None:
+        """Initialize metrics for segmentation validation.
+
+        Sets up mask processing function (process_mask_native vs process_mask),
+        overrides stats with tp_m, overrides metrics with SegmentMetrics per task,
+        and configures SAHI aggregator when enabled.
+
         Args:
-            model: YOLO segmentation model
+            model (torch.nn.Module): Model to validate.
         """
         super().init_metrics(model)
-        self.plot_masks = []
-        
+
         # Choose mask processing function
         if self.args.save_json:
             check_requirements("pycocotools>=2.0.6")
@@ -124,12 +126,11 @@ class SegmentationValidator(DetectionValidator):
         if self.sahi_enabled:
             self._setup_sahi_segmentation()
 
-    def _setup_sahi_segmentation(self):
-        """
-        Setup SAHI mask aggregator for segmentation.
-        
-        Note: The aggregator is typically already set up in get_dataloader().
-        This method serves as a fallback or re-initialization if needed.
+    def _setup_sahi_segmentation(self) -> None:
+        """Setup SAHI mask aggregator for segmentation.
+
+        Verifies aggregator is SAHISegmentAggregator, initializes _last_raw_preds
+        and _last_proto. Serves as fallback if get_dataloader did not set it up.
         """
         # Check if aggregator is already correctly set up
         from ultralytics.models.yolo.segment.sahi_val import SAHISegmentAggregator
@@ -150,29 +151,26 @@ class SegmentationValidator(DetectionValidator):
             LOGGER.warning(f"Could not import SAHISegmentAggregator: {e}")
             self.sahi_enabled = False
 
-    def get_desc(self):
-        """Return formatted description of evaluation metrics."""
+    def get_desc(self) -> str:
+        """Return a formatted description of evaluation metrics."""
         return ("%22s" + "%11s" * 10) % (
             "Class", "Images", "Instances",
             "Box(P", "R", "mAP50", "mAP50-95)",
             "Mask(P", "R", "mAP50", "mAP50-95)",
         )
 
-    # ==================== Dataset & Dataloader ====================
+    def get_dataloader(self, dataset_path: str, batch_size: int = 16):
+        """Construct and return dataloader for segmentation validation.
 
-    def get_dataloader(self, dataset_path, batch_size):
-        """
-        Construct and return dataloader for segmentation validation.
-        
         Overrides DetectionValidator.get_dataloader to use SAHISegmentAggregator
-        instead of SAHICropAggregator for proper mask handling.
-        
+        instead of SAHICropAggregator when dataset is SAHIDataset.
+
         Args:
-            dataset_path: Path to dataset
-            batch_size: Batch size
-            
+            dataset_path (str): Path to dataset.
+            batch_size (int): Batch size.
+
         Returns:
-            DataLoader instance
+            (torch.utils.data.DataLoader): DataLoader instance.
         """
         from ultralytics.data import build_dataloader
         from ultralytics.data.sahi_dataset import SAHIDataset
@@ -189,240 +187,213 @@ class SegmentationValidator(DetectionValidator):
             self.sahi_aggregator = None
         return build_dataloader(dataset, batch_size, self.args.workers, shuffle=False, rank=-1, drop_last=False)
 
-    # ==================== Data Processing ====================
+    def preprocess(self, batch: dict[str, Any]) -> dict[str, Any]:
+        """Preprocess batch of images for YOLO segmentation validation.
 
-    def preprocess(self, batch):
-        """
-        Preprocess batch for segmentation.
-        
-        Extends parent preprocessing with mask handling.
-        
+        Extends parent preprocessing with mask handling (move to device, float).
+
         Args:
-            batch: Batch dict from dataloader
-            
+            batch (dict[str, Any]): Batch containing images and annotations.
+
         Returns:
-            Preprocessed batch with masks on device
+            (dict[str, Any]): Preprocessed batch with masks on device.
         """
         batch = super().preprocess(batch)
         batch["masks"] = batch["masks"].to(self.device).float()
         return batch
 
-    def postprocess(self, preds):
-        """
-        Post-process YOLO predictions for segmentation.
-        
-        Returns both detections and proto features.
-        
-        Args:
-            preds: Model predictions (detections + proto)
-            
-        Returns:
-            Tuple of (post-NMS detections, proto tensor)
-        """
-        sahi_enabled = getattr(self, 'sahi_enabled', False)
-        
-        # Clone raw predictions BEFORE NMS modifies them in-place
-        if sahi_enabled:
-            self._last_raw_preds = preds[0].clone()
-        
-        # Apply NMS
-        p = ops.non_max_suppression(
-            preds[0],
-            self.args.conf,
-            self.args.iou,
-            labels=self.lb,
-            multi_label=True,
-            agnostic=self.args.single_cls or self.args.agnostic_nms,
-            max_det=self.args.max_det,
-            nc=self.nc,
-        )
-        
-        # Extract proto features
-        proto = preds[1][-1] if isinstance(preds[1], (list, tuple)) and len(preds[1]) == 3 else preds[1]
-        
-        if sahi_enabled:
-            self._last_proto = proto
-        
-        return p, proto
+    def postprocess(self, preds: list[torch.Tensor] | tuple) -> list[dict[str, torch.Tensor]]:
+        """Post-process YOLO predictions for segmentation and return detections with masks.
 
-    def _prepare_batch(self, si, batch):
-        """
-        Prepare a single sample for segmentation validation.
-        
-        Adds masks to the prepared batch from parent.
-        
+        Extracts proto from preds[0][1] (tuple) or preds[1], runs parent NMS, then generates
+        instance masks from proto coefficients for each detection.
+
         Args:
-            si: Sample index in batch
-            batch: Full batch dict
-            
+            preds (list[torch.Tensor] | tuple): Raw predictions from the model. For segment,
+                preds[0] may be (det_tensor, proto) tuple or preds[1] is proto.
+
         Returns:
-            Prepared batch dict with masks
+            (list[dict[str, torch.Tensor]]): Processed detection predictions with 'bboxes',
+                'conf_0', 'cls_0', 'masks' keys per image.
+        """
+        proto = preds[0][1] if isinstance(preds[0], tuple) else preds[1]
+        if getattr(self, "sahi_enabled", False):
+            self._last_proto = proto
+        result = super().postprocess(preds[0])
+        imgsz = [4 * x for x in proto.shape[2:]]
+        for i, pred in enumerate(result):
+            coefficient = pred.pop("extra")
+            pred["masks"] = (
+                self.process(proto[i], coefficient, pred["bboxes"], shape=imgsz)
+                if coefficient.shape[0]
+                else torch.zeros(
+                    (0, *(imgsz if self.process is ops.process_mask_native else proto.shape[2:])),
+                    dtype=torch.uint8,
+                    device=pred["bboxes"].device,
+                )
+            )
+        return result
+
+    def _prepare_batch(self, si: int, batch: dict[str, Any]) -> dict[str, Any]:
+        """Prepare a batch for validation by processing images and targets.
+
+        Extends parent with mask preparation: overlap_mask handling, interpolation to
+        mask_size, and binarization.
+
+        Args:
+            si (int): Sample index within the batch.
+            batch (dict[str, Any]): Batch data containing images and annotations.
+
+        Returns:
+            (dict[str, Any]): Prepared batch with 'cls', 'bboxes', 'masks', 'ori_shape',
+                'imgsz', 'ratio_pad', 'im_file'.
         """
         pbatch = super()._prepare_batch(si, batch)
-        
-        # Fix ratio_pad format
-        if "ratio_pad" in pbatch:
-            pbatch["ratio_pad"] = _fix_ratio_pad(_to_tuple(pbatch["ratio_pad"]))
-        
-        # Add masks
-        midx = [si] if self.args.overlap_mask else batch["batch_idx"] == si
-        pbatch["masks"] = batch["masks"][midx]
-        pbatch["batch_idx_single"] = si
-        
+        nl = pbatch["cls"].shape[0]
+        if self.args.overlap_mask:
+            masks = batch["masks"][si]
+            index = torch.arange(1, nl + 1, device=masks.device).view(nl, 1, 1)
+            masks = (masks == index).float()
+        else:
+            masks = batch["masks"][batch["batch_idx"] == si]
+        if nl:
+            mask_size = [s if self.process is ops.process_mask_native else s // 4 for s in pbatch["imgsz"]]
+            if masks.shape[1:] != mask_size:
+                masks = F.interpolate(masks[None], mask_size, mode="bilinear", align_corners=False)[0]
+                masks = masks.gt_(0.5)
+        pbatch["masks"] = masks
         return pbatch
 
-    def _prepare_pred(self, pred, pbatch, proto):
-        """
-        Prepare predictions with masks for validation.
-        
-        Generates instance masks using proto features.
-        
-        Args:
-            pred: Predictions tensor
-            pbatch: Prepared batch dict
-            proto: Proto features tensor
-            
-        Returns:
-            Tuple of (scaled predictions, prediction masks)
-        """
-        predn = pred.clone()
-        ops.scale_boxes(
-            pbatch["imgsz"], predn[:, :4], pbatch["ori_shape"], 
-            ratio_pad=pbatch["ratio_pad"]
-        )
-        
-        # Handle proto shape
-        proto_in = proto
-        if isinstance(proto, (list, tuple)):
-            proto_in = proto[-1]
-        if isinstance(proto_in, torch.Tensor) and proto_in.dim() == 4:
-            proto_in = proto_in[pbatch.get("batch_idx_single", 0)]
-        
-        # Calculate mask coefficient start column
-        # Format: [x1, y1, x2, y2, conf0, cls0, conf1, cls1, ..., mask_coeffs(32)]
-        num_tasks = len(self.nc) if hasattr(self, 'nc') else 1
-        mask_start_col = 4 + 2 * num_tasks
-        
-        pred_masks = self.process(proto_in, pred[:, mask_start_col:], pred[:, :4], shape=pbatch["imgsz"])
-        return predn, pred_masks
+    def update_metrics(self, preds: list[dict[str, torch.Tensor]], batch: dict[str, Any]) -> None:
+        """Update metrics with new predictions and ground truth.
 
-    # ==================== Metrics Update ====================
+        Routes to SAHI aggregator when sahi_enabled, otherwise uses standard segment
+        metrics (appends to self.stats).
 
-    def update_metrics(self, preds, batch):
-        """
-        Update metrics with predictions.
-        
-        Routes to SAHI or standard processing based on mode.
-        
         Args:
-            preds: Tuple of (detections, proto)
-            batch: Current batch dict
+            preds (list[dict[str, torch.Tensor]]): List of predictions from the model.
+            batch (dict[str, Any]): Batch data containing ground truth.
         """
         if self.sahi_enabled and self.sahi_aggregator is not None:
             self._update_metrics_sahi(preds, batch)
         else:
             self._update_metrics_standard(preds, batch)
 
-    def _update_metrics_standard(self, preds, batch):
+    def _update_metrics_standard(self, preds: list[dict[str, torch.Tensor]], batch: dict[str, Any]) -> None:
+        """Standard segmentation metrics update.
+
+        Iterates over predictions, prepares batch and pred per image, computes tp and tp_m
+        via _process_batch, appends to self.stats, handles confusion matrix, save_json,
+        save_txt.
+
+        Args:
+            preds (list[dict[str, torch.Tensor]]): List of per-image prediction dicts.
+            batch (dict[str, Any]): Batch data containing ground truth.
         """
-        Standard segmentation metrics update.
-        
-        Computes both box and mask metrics for each prediction.
-        """
-        for si, pred in enumerate(preds[0]):
+        for si, pred in enumerate(preds):
             self.seen += 1
-            npr = len(pred)
-            
-            # Initialize statistics for all tasks
-            stat = [
-                dict(
-                    conf=torch.zeros(0, device=self.device),
-                    pred_cls=torch.zeros(0, device=self.device),
-                    tp=torch.zeros(npr, self.niou, dtype=torch.bool, device=self.device),
-                    tp_m=torch.zeros(npr, self.niou, dtype=torch.bool, device=self.device),
-                )
-                for _ in range(self.num_tasks)
-            ]
-            
             pbatch = self._prepare_batch(si, batch)
-            cls, bbox = pbatch.pop("cls"), pbatch.pop("bbox")
+            predn = self._prepare_pred(pred)
+
+            cls = pbatch["cls"]
             nl = len(cls)
-            
-            # Store target info for all tasks
+            no_pred = predn["cls_0"].shape[0] == 0
+
             for t in range(self.num_tasks):
-                gt_cls = cls[:, t] if cls.dim() > 1 else cls
-                stat[t]["target_cls"] = gt_cls
-                stat[t]["target_img"] = gt_cls.unique()
-            
-            if npr == 0:
-                if nl:
-                    for t in range(self.num_tasks):
-                        for k in self.stats[t].keys():
-                            self.stats[t][k].append(stat[t][k])
-                        if self.args.plots:
-                            self.confusion_matrices[t].process_batch(
-                                detections=None, gt_bboxes=bbox, gt_cls=cls[:, t] if cls.dim() > 1 else cls
-                            )
+                gt_cls = cls[:, t]
+                stat = {"target_cls": gt_cls, "target_img": gt_cls.unique()}
+
+                if no_pred:
+                    stat["conf"] = torch.zeros(0, device=self.device)
+                    stat["pred_cls"] = torch.zeros(0, device=self.device)
+                    stat["tp"] = np.zeros((0, self.niou), dtype=bool)
+                    stat["tp_m"] = np.zeros((0, self.niou), dtype=bool)
+                else:
+                    stat["conf"] = predn[f"conf_{t}"]
+                    stat["pred_cls"] = predn[f"cls_{t}"]
+                    if nl:
+                        stat.update(self._process_batch(predn, pbatch, task=t))
+                    else:
+                        npr = predn["cls_0"].shape[0]
+                        stat["tp"] = np.zeros((npr, self.niou), dtype=bool)
+                        stat["tp_m"] = np.zeros((npr, self.niou), dtype=bool)
+
+                for k in self.stats[t]:
+                    self.stats[t][k].append(stat[k].cpu().numpy() if hasattr(stat[k], "cpu") else stat[k])
+
+                if self.args.plots and nl:
+                    det = torch.cat([predn["bboxes"], predn[f"conf_{t}"].unsqueeze(1), predn[f"cls_{t}"].unsqueeze(1)], 1) if not no_pred else None
+                    self.confusion_matrices[t].process_batch(detections=det, gt_bboxes=pbatch["bboxes"], gt_cls=gt_cls)
+
+            if no_pred:
                 continue
 
-            gt_masks = pbatch.pop("masks")
-            
-            if self.args.single_cls:
-                pred[:, 5] = 0
-            
-            predn, pred_masks = self._prepare_pred(pred, pbatch, preds[1])
-            
-            # Process each task separately
-            for t in range(self.num_tasks):
-                # Extract conf/cls for task t (format: [x1,y1,x2,y2, conf0,cls0, conf1,cls1, ..., mask_coeffs])
-                stat[t]["conf"] = predn[..., 4 + 2 * t]
-                stat[t]["pred_cls"] = predn[..., 5 + 2 * t]
-                
-                gt_cls = cls[:, t] if cls.dim() > 1 else cls
-                
-                if nl:
-                    stat[t]["tp"] = self._process_batch(predn, bbox, gt_cls)
-                    stat[t]["tp_m"] = self._process_batch(
-                        predn, bbox, gt_cls, pred_masks, gt_masks, 
-                        self.args.overlap_mask, masks=True
-                    )
-                    if self.args.plots:
-                        det = predn[..., [0, 1, 2, 3, 4 + 2 * t, 5 + 2 * t]]
-                        self.confusion_matrices[t].process_batch(det, bbox, gt_cls)
-                
-                for k in self.stats[t].keys():
-                    self.stats[t][k].append(stat[t][k])
-
-            # Store masks for plotting
-            pred_masks = torch.as_tensor(pred_masks, dtype=torch.uint8)
-            if self.args.plots and self.batch_i < 3:
-                self.plot_masks.append(pred_masks[:15].cpu())
-
-            # Save outputs
+            if self.args.save_json or self.args.save_txt:
+                predn_scaled = self.scale_preds(predn, pbatch)
             if self.args.save_json:
-                self.pred_to_json(
-                    predn,
-                    batch["im_file"][si],
-                    ops.scale_image(
-                        pred_masks.permute(1, 2, 0).contiguous().cpu().numpy(),
-                        pbatch["ori_shape"],
-                        ratio_pad=batch["ratio_pad"][si],
-                    ),
-                )
+                self.pred_to_json(predn_scaled, pbatch)
             if self.args.save_txt:
-                self.save_one_txt(
-                    predn,
-                    pred_masks,
-                    self.args.save_conf,
-                    pbatch["ori_shape"],
-                    self.save_dir / "labels" / f'{Path(batch["im_file"][si]).stem}.txt',
-                )
+                self.save_one_txt(predn_scaled, self.args.save_conf, pbatch["ori_shape"], self.save_dir / "labels" / f"{Path(pbatch['im_file']).stem}.txt")
 
-    def _update_metrics_sahi(self, preds, batch):
+    def _prepare_pred(self, pred: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Prepare predictions for evaluation against ground truth.
+
+        Creates a copy of pred dict (cloned tensors) and optionally zeros cls_0
+        when single_cls is enabled.
+
+        Args:
+            pred (dict[str, torch.Tensor]): Post-processed predictions with 'bboxes',
+                'conf_0', 'cls_0', 'masks', etc.
+
+        Returns:
+            (dict[str, torch.Tensor]): Prepared predictions (copy, optionally modified).
         """
-        SAHI segmentation metrics update.
-        
-        Collects predictions and proto features, processes complete images.
+        predn = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in pred.items()}
+        if self.args.single_cls:
+            predn["cls_0"] = predn["cls_0"] * 0
+        return predn
+
+    def _process_batch(
+        self, preds: dict[str, torch.Tensor], batch: dict[str, Any], task: int = 0
+    ) -> dict[str, np.ndarray]:
+        """Compute correct prediction matrix for a batch based on bounding boxes and masks.
+
+        Calls parent for box IoU (tp), then computes mask IoU (tp_m) via mask_iou and
+        match_predictions. Aligns with upstream (preds, batch) -> dict signature.
+
+        Args:
+            preds (dict[str, torch.Tensor]): Predictions with 'bboxes', 'cls_{task}', 'masks'.
+            batch (dict[str, Any]): Batch with 'bboxes', 'cls', 'masks'.
+            task (int): Task index for multitask (default 0).
+
+        Returns:
+            (dict[str, np.ndarray]): Dictionary with 'tp' (box IoU) and 'tp_m' (mask IoU)
+                matrices of shape (N, niou).
+
+        Notes:
+            - Overlapping masks are handled based on overlap_mask in batch preparation.
+        """
+        tp = super()._process_batch(preds, batch, task=task)
+        gt_cls = batch["cls"][:, task] if batch["cls"].dim() > 1 else batch["cls"]
+        if gt_cls.shape[0] == 0 or preds[f"cls_{task}"].shape[0] == 0:
+            tp_m = np.zeros((preds[f"cls_{task}"].shape[0], self.niou), dtype=bool)
+        else:
+            gt_m = batch["masks"].flatten(1).float()
+            pr_m = preds["masks"].flatten(1).float()
+            iou = mask_iou(gt_m, pr_m)
+            tp_m = self.match_predictions(preds[f"cls_{task}"], gt_cls, iou).cpu().numpy()
+        tp["tp_m"] = tp_m
+        return tp
+
+    def _update_metrics_sahi(self, preds: list[dict[str, torch.Tensor]], batch: dict[str, Any]) -> None:
+        """SAHI segmentation metrics update.
+
+        Collects raw predictions and proto from _last_raw_preds/_last_proto (set in postprocess),
+        passes to SAHI aggregator, processes completed images via _process_complete_image_segment.
+
+        Args:
+            preds (list[dict[str, torch.Tensor]]): List of predictions (unused; raw from postprocess).
+            batch (dict[str, Any]): Batch data for crop metadata.
         """
         has_raw = hasattr(self, '_last_raw_preds') and self._last_raw_preds is not None
         has_proto = hasattr(self, '_last_proto') and self._last_proto is not None
@@ -434,7 +405,7 @@ class SegmentationValidator(DetectionValidator):
         raw_preds = self._last_raw_preds
         proto = self._last_proto
         
-        success = self.sahi_aggregator.add_crop_predictions(batch, raw_preds, preds[0], proto)
+        success = self.sahi_aggregator.add_crop_predictions(batch, raw_preds, [], proto)
         
         # Clear references
         self._last_raw_preds = None
@@ -455,18 +426,18 @@ class SegmentationValidator(DetectionValidator):
             finally:
                 self.sahi_aggregator.cleanup_image(img_key)
 
-    # ==================== SAHI Image Processing ====================
+    def _process_complete_image_segment(self, img_key: str) -> None:
+        """Process a complete SAHI image for segmentation.
 
-    def _process_complete_image_segment(self, img_key):
-        """
-        Process a complete SAHI image for segmentation.
-        
         Steps:
-            1. Get aggregated predictions
-            2. Apply NMS with tracking indices
-            3. Get ground truth and masks
-            4. Generate prediction masks
-            5. Update metrics
+            1. Get aggregated predictions from SAHI aggregator
+            2. Apply NMS with tracking indices to preserve mask coefficients
+            3. Load ground truth and build GT masks from segments
+            4. Generate prediction masks via _generate_pred_masks_for_sahi
+            5. Update metrics via _update_sahi_image_metrics
+
+        Args:
+            img_key (str): Key identifying the image in the SAHI aggregator.
         """
         aggregated_preds_raw = self.sahi_aggregator.get_aggregated_predictions(img_key)
         original_shape = self.sahi_aggregator.image_crops[img_key]['original_shape']
@@ -488,7 +459,7 @@ class SegmentationValidator(DetectionValidator):
             preds_with_tracking = torch.cat([aggregated_preds_raw, tracking_indices], dim=1)
             preds_for_nms = preds_with_tracking.unsqueeze(0).permute(0, 2, 1)
             
-            nms_results = ops.non_max_suppression(
+            nms_results = nms.non_max_suppression(
                 preds_for_nms,
                 self.args.conf,
                 self.args.iou,
@@ -544,10 +515,11 @@ class SegmentationValidator(DetectionValidator):
         )
         
         # Store for plotting (keep gt_cls in 2D format for proper plotting)
-        if self.args.plots and len(self.plotter._sahi_plot_cache) < 16:
+        plotter = getattr(self, "plotter", None)
+        if self.args.plots and plotter is not None and len(plotter._sahi_plot_cache) < 16:
             has_gt = len(gt_cls) > 0 and len(gt_bboxes) > 0
 
-            if has_gt and img_idx not in self.plotter._sahi_plot_cache:
+            if has_gt and img_idx not in plotter._sahi_plot_cache:
                 max_plot_items = 15
                 
                 if len(aggregated_preds) > 0:
@@ -560,7 +532,7 @@ class SegmentationValidator(DetectionValidator):
                 gt_bboxes_limited = gt_bboxes[:max_plot_items].clone().cpu() if len(gt_bboxes) > 0 else gt_bboxes.clone().cpu()
                 gt_masks_plot = gt_masks[:max_plot_items].cpu().to(torch.uint8) if gt_masks is not None and len(gt_masks) > 0 else None
                 
-                self.plotter._sahi_plot_cache[img_idx] = {
+                plotter._sahi_plot_cache[img_idx] = {
                     'im_file': self.dataloader.dataset.im_files[img_idx],
                     'original_shape': original_shape,
                     'predictions': preds_for_plot,
@@ -575,17 +547,28 @@ class SegmentationValidator(DetectionValidator):
             aggregated_preds, gt_cls, gt_bboxes, gt_masks, pred_masks, original_shape
         )
 
-    def _update_sahi_image_metrics(self, aggregated_preds, gt_cls, gt_bboxes, gt_masks, pred_masks, original_shape):
-        """
-        Update metrics for a single SAHI-processed image.
-                
+    def _update_sahi_image_metrics(
+        self,
+        aggregated_preds: torch.Tensor,
+        gt_cls: torch.Tensor,
+        gt_bboxes: torch.Tensor,
+        gt_masks: torch.Tensor,
+        pred_masks: torch.Tensor | None,
+        original_shape: tuple[int, int],
+    ) -> None:
+        """Update metrics for a single SAHI-processed image.
+
+        Builds preds_dict and batch_dict from tensors, calls _process_batch for tp/tp_m,
+        appends to self.stats per task.
+
         Args:
-            aggregated_preds: NMS'd predictions [M, cols] where cols = 4 + 2*num_tasks + 32
-            gt_cls: Ground truth classes (2D: [N, n_tasks])
-            gt_bboxes: Ground truth boxes (normalized xywh)
-            gt_masks: Ground truth masks
-            pred_masks: Prediction masks
-            original_shape: (h, w) of original image
+            aggregated_preds (torch.Tensor): NMS'd predictions [M, cols] where cols =
+                4 + 2*num_tasks + 32 (mask coefficients).
+            gt_cls (torch.Tensor): Ground truth classes (2D: [N, n_tasks]).
+            gt_bboxes (torch.Tensor): Ground truth boxes (normalized xywh).
+            gt_masks (torch.Tensor): Ground truth masks [N, H, W].
+            pred_masks (torch.Tensor | None): Prediction masks [M, H, W] or None.
+            original_shape (tuple[int, int]): (h, w) of original image.
         """
         self.seen += 1
         npr = len(aggregated_preds)
@@ -659,13 +642,20 @@ class SegmentationValidator(DetectionValidator):
             stat[t]["pred_cls"] = aggregated_preds[..., cls_idx]
             
             if nl > 0:
-                stat[t]["tp"] = self._process_batch(aggregated_preds, gt_bboxes_xyxy, gt_cls_task)
-                
-                if pred_masks is not None and len(gt_masks):
-                    stat[t]["tp_m"] = self._process_batch(
-                        aggregated_preds, gt_bboxes_xyxy, gt_cls_task,
-                        pred_masks, gt_masks, overlap=False, masks=True
-                    )
+                pm = pred_masks if pred_masks is not None and len(pred_masks) else torch.zeros((npr, *gt_masks.shape[1:]), device=self.device, dtype=torch.uint8)
+                preds_dict = {
+                    "bboxes": aggregated_preds[:, :4],
+                    f"cls_{t}": aggregated_preds[:, 5 + 2 * t],
+                    "masks": pm,
+                }
+                batch_dict = {
+                    "bboxes": gt_bboxes_xyxy,
+                    "cls": gt_cls_task.unsqueeze(1) if gt_cls_task.dim() == 1 else gt_cls[:, t : t + 1],
+                    "masks": gt_masks,
+                }
+                proc = self._process_batch(preds_dict, batch_dict, task=0)
+                stat[t]["tp"] = proc["tp"]
+                stat[t]["tp_m"] = proc["tp_m"]
                 
                 if self.args.plots:
                     det = aggregated_preds[..., [0, 1, 2, 3, conf_idx, cls_idx]]
@@ -674,18 +664,17 @@ class SegmentationValidator(DetectionValidator):
             for k in self.stats[t].keys():
                 self.stats[t][k].append(stat[t][k])
 
-    # ==================== Mask Generation ====================
+    def _build_gt_masks(
+        self, segments: list[Any], original_shape: tuple[int, int]
+    ) -> torch.Tensor:
+        """Build ground truth masks from polygon segments.
 
-    def _build_gt_masks(self, segments, original_shape):
-        """
-        Build ground truth masks from polygon segments.
-        
         Args:
-            segments: List of polygon segments (normalized coordinates)
-            original_shape: (h, w) of image
-            
+            segments (list[Any]): List of polygon segments (normalized coordinates).
+            original_shape (tuple[int, int]): (h, w) of image.
+
         Returns:
-            Tensor [N, H, W] of boolean masks
+            (torch.Tensor): Boolean masks of shape [N, H, W].
         """
         h, w = original_shape
         gt_masks_list = []
@@ -706,24 +695,30 @@ class SegmentationValidator(DetectionValidator):
         else:
             return torch.zeros((0, h, w), device=self.device, dtype=torch.bool)
 
-    def _generate_pred_masks_for_sahi(self, aggregated_preds, nms_indices, img_key, original_shape, mask_start_col):
-        """
-        Generate prediction masks for SAHI-aggregated detections.
-        
-        Uses stored proto features and model-space boxes to generate masks,
-        then transforms them to original image coordinates.
-        
-        Groups detections by source crop for efficient batch processing.
-        
+    def _generate_pred_masks_for_sahi(
+        self,
+        aggregated_preds: torch.Tensor,
+        nms_indices: torch.Tensor,
+        img_key: str,
+        original_shape: tuple[int, int],
+        mask_start_col: int,
+    ) -> torch.Tensor | None:
+        """Generate prediction masks for SAHI-aggregated detections.
+
+        Uses stored proto features and model-space boxes to generate masks via
+        process_mask, then transforms them to original image coordinates via
+        _transform_mask_to_original. Groups detections by source crop for
+        efficient batch processing.
+
         Args:
-            aggregated_preds: Post-NMS predictions
-            nms_indices: Indices mapping NMS results to original predictions
-            img_key: Image key in aggregator
-            original_shape: (h, w) of original image
-            mask_start_col: Column index where mask coefficients start
-            
+            aggregated_preds (torch.Tensor): Post-NMS predictions [M, cols].
+            nms_indices (torch.Tensor): Indices mapping NMS results to original predictions.
+            img_key (str): Image key in aggregator.
+            original_shape (tuple[int, int]): (h, w) of original image.
+            mask_start_col (int): Column index where mask coefficients start.
+
         Returns:
-            Tensor [N, H, W] of boolean masks, or None
+            (torch.Tensor | None): Boolean masks [N, H, W] or None if empty.
         """
         if len(aggregated_preds) == 0:
             return None
@@ -801,19 +796,25 @@ class SegmentationValidator(DetectionValidator):
         
         return pred_masks
 
-    def _transform_mask_to_original(self, mask_lb, box_model, box_orig, meta, original_shape):
-        """
-        Transform a mask from letterbox/model space to original image coordinates.
-        
+    def _transform_mask_to_original(
+        self,
+        mask_lb: torch.Tensor,
+        box_model: torch.Tensor,
+        box_orig: torch.Tensor,
+        meta: dict[str, Any],
+        original_shape: tuple[int, int],
+    ) -> torch.Tensor | None:
+        """Transform a mask from letterbox/model space to original image coordinates.
+
         Args:
-            mask_lb: Mask in letterbox space [H, W]
-            box_model: Box in model space (xyxy)
-            box_orig: Box in original image space (xyxy)
-            meta: Crop metadata dict
-            original_shape: (h, w) of original image
-            
+            mask_lb (torch.Tensor): Mask in letterbox space [H, W].
+            box_model (torch.Tensor): Box in model space (xyxy).
+            box_orig (torch.Tensor): Box in original image space (xyxy).
+            meta (dict[str, Any]): Crop metadata dict with 'imgsz', etc.
+            original_shape (tuple[int, int]): (h, w) of original image.
+
         Returns:
-            Boolean mask in original image coordinates, or None
+            (torch.Tensor | None): Boolean mask in original image coordinates, or None.
         """
         h_orig, w_orig = original_shape
         imgsz_h, imgsz_w = meta['imgsz']
@@ -856,203 +857,14 @@ class SegmentationValidator(DetectionValidator):
         
         return output_mask
 
-    # ==================== Batch Processing ====================
+    def get_stats(self) -> dict[str, Any]:
+        """Compute and return metrics statistics.
 
-    def _process_batch(self, detections, gt_bboxes, gt_cls, pred_masks=None, gt_masks=None, overlap=False, masks=False):
-        """
-        Compute correct prediction matrix for a batch.
-        
-        Handles both box and mask IoU computation.
-        
-        Args:
-            detections: Detection tensor
-            gt_bboxes: Ground truth boxes
-            gt_cls: Ground truth classes
-            pred_masks: Prediction masks (optional)
-            gt_masks: Ground truth masks (optional)
-            overlap: Whether GT masks are overlapping
-            masks: Whether to compute mask IoU
-            
+        Concatenates self.stats (numpy or tensor), computes nt_per_class/nt_per_image,
+        calls metrics.process for each task, returns combined results with fitness.
+
         Returns:
-            Tensor [N, niou] of true positive flags
-        """
-        if masks:
-            if gt_masks is None or pred_masks is None:
-                return torch.zeros(len(detections), self.niou, dtype=torch.bool, device=self.device)
-            
-            nl = len(gt_cls)
-            
-            # Process masks in batches to avoid OOM for large images
-            # Estimate memory usage: each mask is (H, W) and we need float copies
-            # Use batch processing if masks are too large
-            pred_shape = pred_masks.shape
-            gt_shape = gt_masks.shape
-            
-            # Calculate approximate memory needed (in elements)
-            # pred_masks: N * H * W (bool -> float = 4x memory)
-            # gt_masks: M * H * W (bool -> float = 4x memory)
-            # Total: (N + M) * H * W * 4 bytes
-            pred_mem = pred_shape[0] * pred_shape[1] * pred_shape[2] * 4
-            gt_mem = gt_shape[0] * gt_shape[1] * gt_shape[2] * 4
-            total_mem_estimate = (pred_mem + gt_mem) / (1024**3)  # GB
-            
-            # Use batch processing if estimated memory > 2GB
-            use_batch_processing = total_mem_estimate > 2.0
-            
-            if use_batch_processing:
-                LOGGER.debug(f"Using batch processing for masks (estimated memory: {total_mem_estimate:.2f} GB, "
-                           f"pred_shape: {pred_shape}, gt_shape: {gt_shape})")
-                # Process masks in smaller batches
-                batch_size = max(1, min(32, len(detections) // 4))  # Adaptive batch size
-                iou_parts = []
-                
-                # Prepare GT masks once (they're smaller)
-                gt_masks_f = gt_masks.float()
-                
-                # Decode merged GT mask if needed
-                if gt_masks_f.shape[0] == 1 and nl > 1:
-                    merged = gt_masks_f[0]
-                    decoded = []
-                    for cid in range(1, nl + 1):
-                        decoded.append((merged == cid).float())
-                    gt_masks_f = torch.stack(decoded, dim=0)
-                
-                # Handle overlap mode for GT
-                if overlap:
-                    if gt_masks_f.shape[0] == 1 and nl > 1:
-                        try:
-                            merged = gt_masks_f[0]
-                            decoded = torch.zeros((nl, *merged.shape), device=gt_masks_f.device, dtype=gt_masks_f.dtype)
-                            for idx in range(nl):
-                                decoded[idx] = (merged == (idx + 1)).float()
-                            gt_masks_f = decoded
-                            overlap = False
-                        except Exception:
-                            overlap = False
-                    else:
-                        overlap = False
-
-                    if overlap:
-                        index = torch.arange(nl, device=gt_masks_f.device).view(nl, 1, 1) + 1
-                        gt_masks_f = gt_masks_f.repeat(nl, 1, 1)
-                        gt_masks_f = torch.where(gt_masks_f == index, 1.0, 0.0)
-                
-                # Choose target shape
-                target_shape = gt_masks_f.shape[1:] if gt_masks_f.numel() else pred_masks.shape[1:]
-                
-                # Resize GT masks if needed
-                if gt_masks_f.shape[1:] != target_shape:
-                    gt_masks_f = F.interpolate(
-                        gt_masks_f[None], target_shape, mode="bilinear", align_corners=False
-                    )[0]
-                
-                gt_masks_flat = gt_masks_f.view(gt_masks_f.shape[0], -1)
-                
-                # Process pred masks in batches
-                for i in range(0, len(detections), batch_size):
-                    end_idx = min(i + batch_size, len(detections))
-                    pred_batch = pred_masks[i:end_idx]
-                    
-                    # Convert to float only for this batch
-                    pred_batch_f = pred_batch.float()
-                    
-                    # Resize if needed
-                    if pred_batch_f.shape[1:] != target_shape:
-                        pred_batch_f = F.interpolate(
-                            pred_batch_f[None], target_shape, mode="bilinear", align_corners=False
-                        )[0]
-                    
-                    pred_batch_flat = pred_batch_f.view(pred_batch_f.shape[0], -1)
-                    
-                    # Compute IoU for this batch
-                    # mask_iou returns (nl, batch_size) where nl is number of GT masks
-                    iou_batch = mask_iou(gt_masks_flat, pred_batch_flat)
-                    iou_parts.append(iou_batch)
-                    
-                    # Clear batch tensors
-                    del pred_batch_f, pred_batch_flat
-                    if torch.cuda.is_available():
-                        torch.cuda.empty_cache()
-                
-                # Concatenate all IoU results
-                # mask_iou returns (nl, npr), so concatenate along dim=1 (predictions)
-                # Result shape: (nl, len(detections)) - correct for match_predictions
-                iou = torch.cat(iou_parts, dim=1)
-                
-                # Clean up
-                del gt_masks_f, gt_masks_flat, iou_parts
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            else:
-                # Original processing for smaller masks
-                pred_masks_f = pred_masks.float()
-                gt_masks_f = gt_masks.float()
-
-                # Decode merged GT mask if needed
-                if gt_masks_f.shape[0] == 1 and nl > 1:
-                    merged = gt_masks_f[0]
-                    decoded = []
-                    for cid in range(1, nl + 1):
-                        decoded.append((merged == cid).float())
-                    gt_masks_f = torch.stack(decoded, dim=0)
-
-                # Choose target shape and resize if needed
-                if gt_masks_f.numel() and pred_masks_f.numel():
-                    target_shape = gt_masks_f.shape[1:]
-                elif pred_masks_f.numel():
-                    target_shape = pred_masks_f.shape[1:]
-                else:
-                    target_shape = None
-
-                if target_shape is not None:
-                    if pred_masks_f.shape[1:] != target_shape:
-                        pred_masks_f = F.interpolate(
-                            pred_masks_f[None], target_shape, mode="bilinear", align_corners=False
-                        )[0]
-                    if gt_masks_f.shape[1:] != target_shape:
-                        gt_masks_f = F.interpolate(
-                            gt_masks_f[None], target_shape, mode="bilinear", align_corners=False
-                        )[0]
-
-                # Handle overlap mode
-                if overlap:
-                    if gt_masks_f.shape[0] == 1 and nl > 1:
-                        try:
-                            merged = gt_masks_f[0]
-                            decoded = torch.zeros((nl, *merged.shape), device=gt_masks_f.device, dtype=gt_masks_f.dtype)
-                            for idx in range(nl):
-                                decoded[idx] = (merged == (idx + 1)).float()
-                            gt_masks_f = decoded
-                            overlap = False
-                        except Exception:
-                            overlap = False
-                    else:
-                        overlap = False
-
-                    if overlap:
-                        index = torch.arange(nl, device=gt_masks_f.device).view(nl, 1, 1) + 1
-                        gt_masks_f = gt_masks_f.repeat(nl, 1, 1)
-                        gt_masks_f = torch.where(gt_masks_f == index, 1.0, 0.0)
-
-                iou = mask_iou(
-                    gt_masks_f.view(gt_masks_f.shape[0], -1),
-                    pred_masks_f.view(pred_masks_f.shape[0], -1),
-                )
-        else:
-            iou = box_iou(gt_bboxes, detections[:, :4])
-
-        return self.match_predictions(detections[:, 5], gt_cls, iou)
-
-    # ==================== Results & Statistics ====================
-
-    def get_stats(self):
-        """
-        Compute and return metrics statistics.
-        
-        Handles empty stats gracefully.
-        
-        Returns:
-            Dict with all task metrics
+            (dict[str, Any]): Dictionary with task{i}_* keys and 'fitness'.
         """
         results = {}
         self.nt_per_class, self.nt_per_image = [], []
@@ -1070,7 +882,14 @@ class SegmentationValidator(DetectionValidator):
                 self.nt_per_class.append(np.zeros(self.nc[i], dtype=int))
                 self.nt_per_image.append(np.zeros(self.nc[i], dtype=int))
             else:
-                stats = {k: torch.cat(v, 0).cpu().numpy() if v else np.zeros(0) for k, v in st.items()}
+                stats = {}
+                for k, v in st.items():
+                    if not v:
+                        stats[k] = np.zeros(0)
+                    elif hasattr(v[0], "cpu"):
+                        stats[k] = torch.cat(v, 0).cpu().numpy()
+                    else:
+                        stats[k] = np.concatenate(v, 0)
                 ntc = np.bincount(stats["target_cls"].astype(int), minlength=self.nc[i])
                 nti = np.bincount(stats.get("target_img", stats["target_cls"]).astype(int), minlength=self.nc[i])
                 self.nt_per_class.append(ntc)
@@ -1091,13 +910,11 @@ class SegmentationValidator(DetectionValidator):
 
         return results
 
-    # ==================== Finalization ====================
+    def finalize_metrics(self, *args: Any, **kwargs: Any) -> None:
+        """Finalize metrics after validation.
 
-    def finalize_metrics(self, *args, **kwargs):
-        """
-        Finalize metrics after validation.
-        
-        Processes any remaining incomplete SAHI images.
+        Processes any remaining incomplete SAHI images in the aggregator, then
+        calls parent finalize_metrics.
         """
         if self.sahi_enabled and self.sahi_aggregator is not None:
             remaining_images = list(self.sahi_aggregator.image_crops.keys())
@@ -1115,11 +932,14 @@ class SegmentationValidator(DetectionValidator):
         
         super().finalize_metrics(*args, **kwargs)
 
-    # ==================== Plotting ====================
+    def plot_val_samples(self, batch: dict[str, Any], ni: int) -> None:
+        """Plot validation samples with masks and bounding boxes.
 
-    def plot_val_samples(self, batch, ni):
-        """Plot validation samples with masks and bounding boxes."""
-        if self.sahi_enabled:
+        Args:
+            batch (dict[str, Any]): Batch containing images and annotations.
+            ni (int): Batch index.
+        """
+        if self.sahi_enabled and getattr(self, "plotter", None) is not None:
             self.plotter.plot_val_samples(batch, ni)
             return
             
@@ -1135,62 +955,135 @@ class SegmentationValidator(DetectionValidator):
             on_plot=self.on_plot,
         )
 
-    def plot_predictions(self, batch, preds, ni):
-        """Plot batch predictions with masks."""
-        if self.sahi_enabled:
-            self.plotter.plot_predictions(batch, preds[0], ni)
+    def plot_predictions(
+        self, batch: dict[str, Any], preds: list[dict[str, torch.Tensor]], ni: int
+    ) -> None:
+        """Plot batch predictions with masks and bounding boxes.
+
+        Args:
+            batch (dict[str, Any]): Batch containing images and annotations.
+            preds (list[dict[str, torch.Tensor]]): List of predictions from the model.
+            ni (int): Batch index.
+        """
+        if self.sahi_enabled and getattr(self, "plotter", None) is not None:
+            self.plotter.plot_predictions(batch, preds, ni)
             return
-            
+        if not preds:
+            return
+        max_det = self.args.max_det
+        batch_idx = torch.cat([torch.full_like(p["conf_0"], i) for i, p in enumerate(preds)], 0)
+        cls = torch.cat([p["cls_0"][:max_det] for p in preds], 0)
+        bboxes = ops.xyxy2xywh(torch.cat([p["bboxes"][:max_det] for p in preds], 0))
+        confs = torch.cat([p["conf_0"][:max_det] for p in preds], 0)
+        masks_list = [p.get("masks", torch.zeros(0, dtype=torch.uint8))[:max_det] for p in preds]
+        masks = torch.cat(masks_list, 0) if any(m.numel() for m in masks_list) else torch.zeros(0, dtype=torch.uint8)
         plot_images(
             batch["img"],
-            *output_to_target(preds[0], max_det=15),
-            torch.cat(self.plot_masks, dim=0) if len(self.plot_masks) else self.plot_masks,
+            batch_idx,
+            cls,
+            bboxes,
+            confs=confs,
+            masks=masks,
             paths=batch["im_file"],
             fname=self.save_dir / f"val_batch{ni}_pred.jpg",
-            names=self.names,
+            names=self.names[0] if isinstance(self.names[0], dict) else self.names,
             on_plot=self.on_plot,
         )
-        self.plot_masks.clear()
 
-    # ==================== Output Saving ====================
+    def scale_preds(
+        self, predn: dict[str, torch.Tensor], pbatch: dict[str, Any]
+    ) -> dict[str, torch.Tensor]:
+        """Scale predictions and masks to original image size.
 
-    def save_one_txt(self, predn, pred_masks, save_conf, shape, file):
-        """Save YOLO detections to txt file."""
+        Args:
+            predn (dict[str, torch.Tensor]): Predictions with 'bboxes', 'masks', etc.
+            pbatch (dict[str, Any]): Batch with 'ori_shape', 'ratio_pad'.
+
+        Returns:
+            (dict[str, torch.Tensor]): Scaled predictions including 'masks'.
+        """
+        out = super().scale_preds(predn, pbatch)
+        if "masks" in predn:
+            out["masks"] = ops.scale_masks(predn["masks"][None], pbatch["ori_shape"], ratio_pad=pbatch["ratio_pad"])[0].byte()
+        return out
+
+    def save_one_txt(
+        self,
+        predn: dict[str, torch.Tensor],
+        save_conf: bool,
+        shape: tuple[int, int],
+        file: Path,
+    ) -> None:
+        """Save YOLO detections to a txt file in normalized coordinates.
+
+        Args:
+            predn (dict[str, torch.Tensor]): Prediction dictionary containing 'bboxes',
+                'conf_0', 'cls_0', and 'masks' keys.
+            save_conf (bool): Whether to save confidence scores.
+            shape (tuple[int, int]): Shape of the original image (height, width).
+            file (Path): File path to save the detections.
+        """
         from ultralytics.engine.results import Results
-        
+
         names = self.names[0] if isinstance(self.names, list) else self.names
+        boxes = torch.cat([predn["bboxes"], predn["conf_0"].unsqueeze(-1), predn["cls_0"].unsqueeze(-1)], dim=1)
+        masks = torch.as_tensor(predn["masks"], dtype=torch.uint8) if "masks" in predn else torch.zeros((0, *shape), dtype=torch.uint8)
+        Results(np.zeros((shape[0], shape[1]), dtype=np.uint8), path=None, names=names, boxes=boxes, masks=masks).save_txt(file, save_conf=save_conf)
 
-        Results(
-            np.zeros((shape[0], shape[1]), dtype=np.uint8),
-            path=None,
-            names=names,
-            boxes=predn[:, :6],
-            masks=pred_masks,
-        ).save_txt(file, save_conf=save_conf)
+    def pred_to_json(
+        self, predn: dict[str, torch.Tensor], pbatch: dict[str, Any]
+    ) -> None:
+        """Save one JSON result for COCO evaluation with RLE segmentation masks.
 
-    def pred_to_json(self, predn, filename, pred_masks):
-        """Save predictions to COCO JSON format with RLE masks."""
-        from pycocotools.mask import encode
+        Args:
+            predn (dict[str, torch.Tensor]): Predictions containing bboxes, masks,
+                conf_0, cls_0.
+            pbatch (dict[str, Any]): Batch dictionary containing 'imgsz', 'ori_shape',
+                'ratio_pad', and 'im_file'.
+        """
+        def to_string(counts: list[int]) -> str:
+            """Convert RLE counts to compact string (delta + variable-length encoding)."""
+            result = []
+            for i in range(len(counts)):
+                x = int(counts[i])
+                if i > 2:
+                    x -= int(counts[i - 2])
+                while True:
+                    c = x & 0x1F
+                    x >>= 5
+                    more = (x != -1) if (c & 0x10) else (x != 0)
+                    if more:
+                        c |= 0x20
+                    c += 48
+                    result.append(chr(c))
+                    if not more:
+                        break
+            return "".join(result)
 
-        def single_encode(x):
-            rle = encode(np.asarray(x[:, :, None], order="F", dtype="uint8"))[0]
-            rle["counts"] = rle["counts"].decode("utf-8")
-            return rle
+        def multi_encode(pixels: torch.Tensor) -> list[list[int]]:
+            """Convert binary masks to RLE counts per row."""
+            transitions = pixels[:, 1:] != pixels[:, :-1]
+            row_idx, col_idx = torch.where(transitions)
+            col_idx = col_idx + 1
+            counts = []
+            for i in range(pixels.shape[0]):
+                positions = col_idx[row_idx == i]
+                if len(positions):
+                    count = torch.diff(positions).tolist()
+                    count.insert(0, positions[0].item())
+                    count.append(len(pixels[i]) - positions[-1].item())
+                else:
+                    count = [len(pixels[i])]
+                if pixels[i][0].item() == 1:
+                    count = [0, *count]
+                counts.append(count)
+            return counts
 
-        stem = Path(filename).stem
-        image_id = int(stem) if stem.isnumeric() else stem
-        box = ops.xyxy2xywh(predn[:, :4])
-        box[:, :2] -= box[:, 2:] / 2
-        pred_masks = np.transpose(pred_masks, (2, 0, 1))
-        
-        with ThreadPool(NUM_THREADS) as pool:
-            rles = pool.map(single_encode, pred_masks)
-        
-        for i, (p, b) in enumerate(zip(predn.tolist(), box.tolist())):
-            self.jdict.append({
-                "image_id": image_id,
-                "category_id": self.class_map[int(p[5])],
-                "bbox": [round(x, 3) for x in b],
-                "score": round(p[4], 5),
-                "segmentation": rles[i],
-            })
+        super().pred_to_json(predn, pbatch)
+        if "masks" in predn and len(predn["masks"]):
+            pred_masks = predn["masks"].transpose(2, 1).contiguous().view(len(predn["masks"]), -1)
+            h, w = predn["masks"].shape[1:3]
+            counts = multi_encode(pred_masks)
+            rles = [{"size": [h, w], "counts": to_string(c)} for c in counts]
+            for i, r in enumerate(rles):
+                self.jdict[-len(rles) + i]["segmentation"] = r

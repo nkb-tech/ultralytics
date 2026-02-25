@@ -34,6 +34,7 @@ class SAHIBatchSampler(Sampler[List[int]]):
         self.drop_last = drop_last
         self.shuffle = shuffle
         self.group_shuffle = group_shuffle
+        self.epoch = 0
         self.image_groups = self._build_image_groups()
     
     def _build_image_groups(self) -> Dict[int, List[int]]:
@@ -48,14 +49,18 @@ class SAHIBatchSampler(Sampler[List[int]]):
         image_indices = list(self.image_groups.keys())
         
         if self.shuffle:
-            random.shuffle(image_indices)
+            rng = random.Random(self.epoch)
+            rng.shuffle(image_indices)
         
         # Flatten with image locality preserved
         all_indices = []
         for img_idx in image_indices:
             group = self.image_groups[img_idx].copy()
             if self.group_shuffle:
-                random.shuffle(group)
+                if self.shuffle:
+                    rng.shuffle(group)
+                else:
+                    random.shuffle(group)
             all_indices.extend(group)
         
         # Yield fixed-size batches
@@ -65,7 +70,12 @@ class SAHIBatchSampler(Sampler[List[int]]):
                 yield batch
     
     def __len__(self) -> int:
+        """Set the length of the sampler."""
         n = len(self.slice_indices)
         if self.drop_last:
             return n // self.batch_size
         return (n + self.batch_size - 1) // self.batch_size
+
+    def set_epoch(self, epoch: int):
+        """Set epoch for deterministic, epoch-aware shuffling."""
+        self.epoch = int(epoch)

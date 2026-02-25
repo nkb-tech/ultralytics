@@ -17,7 +17,7 @@ from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colors
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 
 from ultralytics.utils.loss import (
-    E2EDetectLoss,
+    E2ELoss,
     E2EPoseLoss,
     E2ESegmentLoss,
     PoseLoss26,
@@ -312,7 +312,6 @@ class DetectionModel(BaseModel):
             for nc_i in self.yaml["nc"]
         ]  # default names dict
         self.inplace = self.yaml.get("inplace", True)
-        self.end2end = getattr(self.model[-1], "end2end", False)
 
         # Build strides
         m = self.model[-1]  # Detect()
@@ -325,23 +324,16 @@ class DetectionModel(BaseModel):
 
             def _forward(x):
                 """Performs a forward pass through the model, handling different Detect subclass types accordingly."""
+                output = self.forward(x)
                 if self.end2end:
-                    raw = self.forward(x)
-                    y = raw["one2many"]
-                    # Extract feats from dict if returned by forward_head
-                    if isinstance(y, dict) and "feats" in y:
-                        y = y["feats"]
-                    return y[0] if isinstance(m, (v10Pose, v10Segment)) else y
-                result = self.forward(x)
-                # Handle tuple return (inference mode) or dict return (training mode)
-                if isinstance(result, tuple):
-                    result = result[0] if isinstance(m, (Segment, Segment26, Pose, Pose26, OBB, OBB26)) else result[1]
-                if isinstance(result, dict) and "feats" in result:
-                    result = result["feats"]
-                return result
+                    output = output["one2many"]
+                return output["feats"]
 
+            self.model.eval()  # Avoid changing batch statistics until training begins
+            m.training = True  # Setting it to True to properly return strides
             m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
+            self.model.train()  # Set model back to training(default) mode
             m.bias_init()  # only run once
         else:
             self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
@@ -351,6 +343,29 @@ class DetectionModel(BaseModel):
         if verbose:
             self.info()
             LOGGER.info("")
+
+    @property
+    def end2end(self):
+        """Return whether the model uses end-to-end NMS-free detection."""
+        return getattr(self.model[-1], "end2end", False)
+
+    @end2end.setter
+    def end2end(self, value):
+        """Override the end-to-end detection mode."""
+        self.set_head_attr(end2end=value)
+
+    def set_head_attr(self, **kwargs):
+        """Set attributes of the model head (last layer).
+
+        Args:
+            **kwargs: Arbitrary keyword arguments representing attributes to set.
+        """
+        head = self.model[-1]
+        for k, v in kwargs.items():
+            if not hasattr(head, k):
+                LOGGER.warning(f"Head has no attribute '{k}'.")
+                continue
+            setattr(head, k, v)
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference and train outputs."""
@@ -391,16 +406,18 @@ class DetectionModel(BaseModel):
         y[-1] = y[-1][..., i:]  # small
         return y
 
-    def init_criterion(self, weights=None, clf_loss_weights=None):
+    def init_criterion(self, clf_loss_weights=None):
         """Initialize the loss criterion for the DetectionModel."""
-        return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(
-            self,
+        kwargs = dict(
             clf_loss_weights=clf_loss_weights,
             clf_loss_fn=self.args.clf_loss_fn,
             iou_loss_fn=self.args.iou_loss_fn,
             nwd_loss=self.args.nwd_loss,
             use_wiseiou=self.args.use_wiseiou,
+            iou_ratio=self.args.iou_ratio,
         )
+
+        return E2ELoss(self, v8DetectionLoss, **kwargs) if getattr(self, "end2end", False) else v8DetectionLoss(self, **kwargs)
 
 
 class OBBModel(DetectionModel):
@@ -410,9 +427,17 @@ class OBBModel(DetectionModel):
         """Initialize YOLOv8 OBB model with given config and parameters."""
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self, weights=None):
+    def init_criterion(self, clf_loss_weights=None):
         """Initialize the loss criterion for the model."""
-        return v8OBBLoss(self)
+        kwargs = dict(
+            clf_loss_weights=clf_loss_weights,
+            clf_loss_fn=self.args.clf_loss_fn,
+            iou_loss_fn=self.args.iou_loss_fn,
+            nwd_loss=self.args.nwd_loss,
+            use_wiseiou=self.args.use_wiseiou,
+            iou_ratio=self.args.iou_ratio,
+        )
+        return E2ELoss(self, v8OBBLoss, **kwargs) if getattr(self, "end2end", False) else v8OBBLoss(self, **kwargs)
 
 
 class SegmentationModel(DetectionModel):
@@ -422,16 +447,17 @@ class SegmentationModel(DetectionModel):
         """Initialize YOLOv8 segmentation model with given config and parameters."""
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self, weights=None, clf_loss_weights=None, **kwargs):
+    def init_criterion(self, clf_loss_weights=None):
         """Initialize the loss criterion for the SegmentationModel."""
-        return E2ESegmentLoss(self) if getattr(self, "end2end", False) else v8SegmentationLoss(
-            self,
+        kwargs = dict(
             clf_loss_weights=clf_loss_weights,
-            clf_loss_fn=self.args.clf_loss_fn if hasattr(self.args, 'clf_loss_fn') else "bce",
-            iou_loss_fn=self.args.iou_loss_fn if hasattr(self.args, 'iou_loss_fn') else "ciou",
-            nwd_loss=self.args.nwd_loss if hasattr(self.args, 'nwd_loss') else False,
-            use_wiseiou=self.args.use_wiseiou if hasattr(self.args, 'use_wiseiou') else False,
+            clf_loss_fn=self.args.clf_loss_fn,
+            iou_loss_fn=self.args.iou_loss_fn,
+            nwd_loss=self.args.nwd_loss,
+            use_wiseiou=self.args.use_wiseiou,
+            iou_ratio=self.args.iou_ratio,
         )
+        return E2ELoss(self, v8SegmentationLoss, **kwargs) if getattr(self, "end2end", False) else v8SegmentationLoss(self, **kwargs)
 
 
 
@@ -447,17 +473,17 @@ class PoseModel(DetectionModel):
             cfg["kpt_shape"] = data_kpt_shape
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self, weights=None):
+    def init_criterion(self, clf_loss_weights=None):
         """Initialize the loss criterion for the PoseModel."""
-        # Check if using Pose26 head (has RealNVP flow model)
-        has_pose26 = hasattr(self.model[-1], "flow_model") and self.model[-1].flow_model is not None
-        if getattr(self, "end2end", False):
-            return E2EPoseLoss(self)
-        elif has_pose26:
-            return PoseLoss26(self)
-        else:
-            return v8PoseLoss(self)
-
+        kwargs = dict(
+            clf_loss_weights=clf_loss_weights,
+            clf_loss_fn=self.args.clf_loss_fn,
+            iou_loss_fn=self.args.iou_loss_fn,
+            nwd_loss=self.args.nwd_loss,
+            use_wiseiou=self.args.use_wiseiou,
+            iou_ratio=self.args.iou_ratio,
+        )
+        return E2EPoseLoss(self, v8PoseLoss, **kwargs) if getattr(self, "end2end", False) else v8PoseLoss(self, **kwargs)
 
 
 class ClassificationModel(BaseModel):
@@ -505,9 +531,9 @@ class ClassificationModel(BaseModel):
                 if m[i].out_channels != nc:
                     m[i] = nn.Conv2d(m[i].in_channels, nc, m[i].kernel_size, m[i].stride, bias=m[i].bias is not None)
 
-    def init_criterion(self, weights=None):
+    def init_criterion(self, clf_loss_weights=None):
         """Initialize the loss criterion for the ClassificationModel."""
-        return v8ClassificationLoss(weights)
+        return v8ClassificationLoss(clf_loss_weights)
 
 
 class RTDETRDetectionModel(DetectionModel):

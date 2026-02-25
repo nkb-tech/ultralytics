@@ -30,6 +30,9 @@ def imread(filename: str, flags: int = cv2.IMREAD_COLOR):
     # Handle single channel images by duplicating to 3 channels (for 16-bit grayscale support)
     if img is not None and img.ndim == 2:
         img = np.repeat(img[:, :, None], 3, axis=2)
+    # Handle RGBA images by dropping alpha channel
+    elif img is not None and img.ndim == 3 and img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
     return img
 
 

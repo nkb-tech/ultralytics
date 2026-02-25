@@ -2,46 +2,58 @@ import torch
 import numpy as np
 import cv2
 
+from ultralytics.utils import NOT_MACOS14
+
 
 def clip_boxes(boxes, shape):
-    """
-    Takes a list of bounding boxes and a shape (height, width) and clips the bounding boxes to the shape.
+    """Clip bounding boxes to image boundaries.
 
     Args:
-        boxes (torch.Tensor): the bounding boxes to clip
-        shape (tuple): the shape of the image
+        boxes (torch.Tensor | np.ndarray): Bounding boxes to clip.
+        shape (tuple): Image shape as HWC or HW (supports both).
 
     Returns:
-        (torch.Tensor | numpy.ndarray): Clipped boxes
+        (torch.Tensor | np.ndarray): Clipped bounding boxes.
     """
-    if isinstance(boxes, torch.Tensor):  # faster individually (WARNING: inplace .clamp_() Apple MPS bug)
-        boxes[..., 0] = boxes[..., 0].clamp(0, shape[1])  # x1
-        boxes[..., 1] = boxes[..., 1].clamp(0, shape[0])  # y1
-        boxes[..., 2] = boxes[..., 2].clamp(0, shape[1])  # x2
-        boxes[..., 3] = boxes[..., 3].clamp(0, shape[0])  # y2
+    h, w = shape[:2]  # supports both HWC or HW shapes
+    if isinstance(boxes, torch.Tensor):  # faster individually
+        if NOT_MACOS14:
+            boxes[..., 0].clamp_(0, w)  # x1
+            boxes[..., 1].clamp_(0, h)  # y1
+            boxes[..., 2].clamp_(0, w)  # x2
+            boxes[..., 3].clamp_(0, h)  # y2
+        else:  # Apple macOS14 MPS bug https://github.com/ultralytics/ultralytics/pull/21878
+            boxes[..., 0] = boxes[..., 0].clamp(0, w)
+            boxes[..., 1] = boxes[..., 1].clamp(0, h)
+            boxes[..., 2] = boxes[..., 2].clamp(0, w)
+            boxes[..., 3] = boxes[..., 3].clamp(0, h)
     else:  # np.array (faster grouped)
-        boxes[..., [0, 2]] = boxes[..., [0, 2]].clip(0, shape[1])  # x1, x2
-        boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, shape[0])  # y1, y2
+        boxes[..., [0, 2]] = boxes[..., [0, 2]].clip(0, w)  # x1, x2
+        boxes[..., [1, 3]] = boxes[..., [1, 3]].clip(0, h)  # y1, y2
     return boxes
 
 
 def clip_coords(coords, shape):
-    """
-    Clip line coordinates to the image boundaries.
+    """Clip line coordinates to image boundaries.
 
     Args:
-        coords (torch.Tensor | numpy.ndarray): A list of line coordinates.
-        shape (tuple): A tuple of integers representing the size of the image in the format (height, width).
+        coords (torch.Tensor | np.ndarray): Line coordinates to clip.
+        shape (tuple): Image shape as HWC or HW (supports both).
 
     Returns:
-        (torch.Tensor | numpy.ndarray): Clipped coordinates
+        (torch.Tensor | np.ndarray): Clipped coordinates.
     """
-    if isinstance(coords, torch.Tensor):  # faster individually (WARNING: inplace .clamp_() Apple MPS bug)
-        coords[..., 0] = coords[..., 0].clamp(0, shape[1])  # x
-        coords[..., 1] = coords[..., 1].clamp(0, shape[0])  # y
-    else:  # np.array (faster grouped)
-        coords[..., 0] = coords[..., 0].clip(0, shape[1])  # x
-        coords[..., 1] = coords[..., 1].clip(0, shape[0])  # y
+    h, w = shape[:2]  # supports both HWC or HW shapes
+    if isinstance(coords, torch.Tensor):
+        if NOT_MACOS14:
+            coords[..., 0].clamp_(0, w)  # x
+            coords[..., 1].clamp_(0, h)  # y
+        else:  # Apple macOS14 MPS bug https://github.com/ultralytics/ultralytics/pull/21878
+            coords[..., 0] = coords[..., 0].clamp(0, w)
+            coords[..., 1] = coords[..., 1].clamp(0, h)
+    else:  # np.array
+        coords[..., 0] = coords[..., 0].clip(0, w)  # x
+        coords[..., 1] = coords[..., 1].clip(0, h)  # y
     return coords
 
 

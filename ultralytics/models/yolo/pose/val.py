@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from ultralytics.models.yolo.detect import DetectionValidator
-from ultralytics.utils import LOGGER, ops
+from ultralytics.utils import LOGGER, nms, ops
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import OKS_SIGMA, PoseMetrics, box_iou, kpt_iou
 from ultralytics.utils.plotting import output_to_target, plot_images
@@ -63,7 +63,7 @@ class PoseValidator(DetectionValidator):
 
     def postprocess(self, preds):
         """Apply non-maximum suppression and return detections with high confidence scores."""
-        return ops.non_max_suppression(
+        return nms.non_max_suppression(
             preds,
             self.args.conf,
             self.args.iou,

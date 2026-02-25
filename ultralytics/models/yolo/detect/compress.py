@@ -410,7 +410,12 @@ class DetectionCompressor(BaseTrainer):
         batch['img'] = batch['img'].to(self.device, non_blocking=True).float()
         # Normalize based on bit depth from config
         bit_depth = getattr(self.args, 'image_bit_depth', 8)
-        batch['img'] /= 65_535.0 if bit_depth == 16 else 255.0
+        if bit_depth == 8:
+            batch['img'] /= 255.0
+        elif bit_depth == 16:
+            batch['img'] /= 65_535.0
+        else:
+            LOGGER.error(f"BitDepth {bit_depth} unsupported.")
         return batch
 
     def set_model_attributes(self):

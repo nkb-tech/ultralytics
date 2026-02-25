@@ -48,7 +48,7 @@ mask_ratio: 4 # (int) mask downsample ratio (segment train only)
 
 # Classification
 dropout: 0.0 # (float) use dropout regularization (classify train only)
-weighted_loss: False # Whether to use weighted loss with weight=1/sqrt(n_samples) - for classification train only
+weighted_loss: False # Whether to use weighted loss with weight=1/sqrt(n_samples)
 clf_loss_fn: "bce" # (str) classification loss function, choices=[bce, vfl, qfl]
 clf_loss_weights:  # (list[list[float]] | None) Class weights for weighted classification loss. If None or invalid, weights are auto-calculated from class distribution. Example: [0.1, 0.3, 0.5, ...]
 iou_loss_fn: "piouv2" # (str) IoU loss function, choices=[wiou, eiou, giou, diou, ciou, siou, shapeiou, piouv1, piouv2]
@@ -56,12 +56,10 @@ nwd_loss: False # (bool) Whether to use Wasserstein Distance loss for BBox Regre
 use_wiseiou: False # (bool) Whether to use Wise IoU loss for BBox Regression
 iou_ratio: 0.5 # (float) The ratio of the IoU loss to the Wasserstein Distance loss for BBox Regression
 
-
 # Val/Test settings ----------------------------------------------------------------------------------------------------
 val: True # (bool) validate/test during training
 split: val # (str) dataset split to use for validation, i.e. 'val', 'test' or 'train'
 save_json: False # (bool) save results to JSON file
-save_hybrid: False # (bool) save hybrid version of labels (labels + additional predictions)
 conf: # (float, optional) object confidence threshold for detection (default 0.25 predict, 0.001 val)
 iou: 0.7 # (float) intersection over union (IoU) threshold for NMS
 max_det: 300 # (int) maximum number of detections per image
@@ -143,7 +141,7 @@ ar_thr: 100 # aspect ratio threshold for bboxes after RandomPerspective augmenta
 wh_thr: 5 # after RandomPerspective width and height threshold in pixels. Boxes smaller than this in either dimension are rejected.
 area_thr: 0.1 # Boxes with an area ratio = (new_area/old_area) less than this value are rejected after RandomPerspectiveAug
 
-# Albumentations  settings TODO: separate config ------------------------------------------------------------------------------------------------------
+# Albumentations settings TODO: separate config -----------------------------------------------------------------------
 albu_dropout_prob: 0.1
 albu_quality_lower: 75
 albu_max_factor: 1.1
@@ -178,23 +176,20 @@ imgaug_snowflakes_speed: [0.001, 0.03]
 imgaug_rain_drop_size: [0.10, 0.20]
 p_BrightnessContrast: 0.0
 
-# Custom config.yaml ---------------------------------------------------------------------------------------------------
+# Custom config.yaml ----------------------------------------------------------------------------------------------------
 cfg: # (str, optional) for overriding defaults.yaml
 
 # Tracker settings ------------------------------------------------------------------------------------------------------
 tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yaml]
-
 
 # Distillation settings -------------------------------------------------------------------------------------------------
 teacher: None #  None | (str) path to teacher model
 temperature: 3.0 # (float) temperature for softening logits
 alpha: 0.5 # (float) weight for distillation loss
 
-
 # Pruning settings -------------------------------------------------------------------------------------------------
 do_prune: True       # Set to True to enable the pruning stage.
 do_finetune: True    # Set to True to enable the fine-tuning stage. Recommended: False for the first stage (pruning), True for the second.
-
 prune_method: group_slim # Pruning method to be used. Available: `random`, `l1`, `lamp`, `slim`, `group_slim`, `group_sl`, `group_taylor`, `group_norm`, `growing_reg`.
 speed_up: 2.0        # Target GFLOPs reduction factor (e.g., 2.0 for a 2x reduction).
 global_pruning: False # Set to True for global pruning across the entire model, False for layer-wise pruning.

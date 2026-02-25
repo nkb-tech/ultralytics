@@ -14,8 +14,6 @@ from .dataset import YOLODataset
 # Marker for full image slice (used in validation to include letterboxed full image)
 FULL_IMAGE_SLICE_IDX = -1
 
-# ==================== Numba-accelerated Polygon Utilities ====================
-
 @nb.jit(nopython=True, fastmath=True, cache=True)
 def _polygon_area(polygon: np.ndarray) -> float:
     """Calculate polygon area using shoelace formula (numba-accelerated)."""
@@ -200,8 +198,6 @@ def _transform_segments_for_letterbox(
     
     return new_segments, valid_mask
 
-
-# ==================== Numba-accelerated functions ====================
 
 @nb.jit(nopython=True, fastmath=True, cache=True)
 def _calculate_grid_coords(
@@ -391,8 +387,6 @@ def _generate_random_coords_numba(
     return coords
 
 
-# ==================== LRU-cached wrappers ====================
-
 @lru_cache(maxsize=4096)
 def cached_grid_coords(img_h: int, img_w: int, crop_h: int, crop_w: int, overlap_ratio: float) -> Tuple[Tuple[int, ...], ...]:
     """Cached grid coordinates (hashable tuple output for LRU cache)."""
@@ -405,8 +399,6 @@ def cached_grid_count(img_h: int, img_w: int, crop_h: int, crop_w: int, overlap_
     """Cached grid slice count."""
     return _count_grid_slices(img_h, img_w, crop_h, crop_w, overlap_ratio)
 
-
-# ==================== SAHIDataset ====================
 
 class SAHIDataset(YOLODataset):
     """
@@ -452,9 +444,19 @@ class SAHIDataset(YOLODataset):
         
         self.image_shapes: Dict[int, Tuple[int, int]] = {}
 
-        super().__init__(img_path=img_path, *args, **kwargs)
+        # sahi=True MUST be passed to super() so load_image() does NOT resize
+        # during cache_images() — we need original resolution for cropping
+        kwargs["sahi"] = True
 
-        self.sahi = True
+        # Warn about RAM usage: SAHI caches full-resolution images
+        cache_val = kwargs.get("cache", None)
+        if cache_val == "ram" or cache_val is True:
+            LOGGER.warning(
+                "WARNING ⚠️ SAHI + cache='ram' stores full-resolution images in RAM. "
+                "Consider cache='low-ram' for SAHI to save memory."
+            )
+
+        super().__init__(img_path=img_path, *args, **kwargs)
         self._cache_image_shapes()
         self.slice_indices = self._precompute_slices()
         

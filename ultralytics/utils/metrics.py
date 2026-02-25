@@ -1158,39 +1158,20 @@ class Metric(SimpleClass):
 
 
 class DetMetrics(SimpleClass):
-    """
-    Utility class for computing detection metrics such as precision, recall, and mean average precision (mAP) of an
-    object detection model.
-
-    Args:
-        save_dir (Path): A path to the directory where the output plots will be saved. Defaults to current directory.
-        plot (bool): A flag that indicates whether to plot precision-recall curves for each class. Defaults to False.
-        on_plot (func): An optional callback to pass plots path and data when they are rendered. Defaults to None.
-        names (dict of str): A dict of strings that represents the names of the classes. Defaults to an empty tuple.
+    """Utility class for computing detection metrics such as precision, recall, and mean average precision (mAP).
 
     Attributes:
-        save_dir (Path): A path to the directory where the output plots will be saved.
-        plot (bool): A flag that indicates whether to plot the precision-recall curves for each class.
-        on_plot (func): An optional callback to pass plots path and data when they are rendered.
-        names (dict of str): A dict of strings that represents the names of the classes.
-        box (Metric): An instance of the Metric class for storing the results of the detection metrics.
-        speed (dict): A dictionary for storing the execution time of different parts of the detection process.
-
-    Methods:
-        process(tp, conf, pred_cls, target_cls): Updates the metric results with the latest batch of predictions.
-        keys: Returns a list of keys for accessing the computed detection metrics.
-        mean_results: Returns a list of mean values for the computed detection metrics.
-        class_result(i): Returns a list of values for the computed detection metrics for a specific class.
-        maps: Returns a dictionary of mean average precision (mAP) values for different IoU thresholds.
-        fitness: Computes the fitness score based on the computed detection metrics.
-        ap_class_index: Returns a list of class indices sorted by their average precision (AP) values.
-        results_dict: Returns a dictionary that maps detection metric keys to their computed values.
-        curves: TODO
-        curves_results: TODO
+        names (dict[int, str]): A dictionary of class names.
+        box (Metric): An instance of the Metric class for storing detection results.
+        speed (dict[str, float]): A dictionary for storing execution times.
+        task (str): The task type, set to 'detect'.
+        stats (dict[str, list]): Statistics containers for tp, conf, pred_cls, target_cls, target_img.
+        nt_per_class: Number of targets per class.
+        nt_per_image: Number of targets per image.
     """
 
     def __init__(self, save_dir=Path("."), plot=False, on_plot=None, names={}) -> None:
-        """Initialize a DetMetrics instance with a save directory, plot flag, callback function, and class names."""
+        """Initialize a DetMetrics instance."""
         self.save_dir = save_dir
         self.plot = plot
         self.on_plot = on_plot
@@ -1198,31 +1179,61 @@ class DetMetrics(SimpleClass):
         self.box = Metric()
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
         self.task = "detect"
+        self.stats = dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
+        self.nt_per_class = None
+        self.nt_per_image = None
 
-    def process(self, tp, conf, pred_cls, target_cls, prefix=""):
-        """Process predicted results for object detection and update metrics.
+    def update_stats(self, stat):
+        """Update statistics by appending new values.
 
         Args:
-            tp (np.ndarray): True-positive matrix.
-            conf (np.ndarray): Confidence scores.
-            pred_cls (np.ndarray): Predicted classes.
-            target_cls (np.ndarray): Ground truth classes.
-            prefix (str): Filename prefix for saved plots.
+            stat (dict): Dictionary with keys matching self.stats (tp, conf, pred_cls, target_cls, target_img).
         """
+        for k in self.stats:
+            v = stat[k]
+            self.stats[k].append(v.cpu().numpy() if hasattr(v, "cpu") else v)
+
+    def process(self, save_dir=None, plot=None, on_plot=None, prefix=""):
+        """Process accumulated stats and compute metrics.
+
+        Args:
+            save_dir (Path, optional): Directory to save plots. Uses self.save_dir if None.
+            plot (bool, optional): Whether to plot. Uses self.plot if None.
+            on_plot (callable, optional): Plot callback. Uses self.on_plot if None.
+            prefix (str): Filename prefix for saved plots.
+
+        Returns:
+            dict[str, np.ndarray]: Concatenated statistics arrays.
+        """
+        save_dir = save_dir if save_dir is not None else self.save_dir
+        plot = plot if plot is not None else self.plot
+        on_plot = on_plot if on_plot is not None else self.on_plot
+
+        stats = {k: np.concatenate(v, 0) for k, v in self.stats.items() if v}
+        if not stats:
+            return stats
 
         results = ap_per_class(
-            tp,
-            conf,
-            pred_cls,
-            target_cls,
-            plot=self.plot,
-            save_dir=self.save_dir,
+            stats["tp"],
+            stats["conf"],
+            stats["pred_cls"],
+            stats["target_cls"],
+            plot=plot,
+            save_dir=save_dir,
             names=self.names,
-            on_plot=self.on_plot,
+            on_plot=on_plot,
             prefix=prefix,
         )[2:]
         self.box.nc = len(self.names)
         self.box.update(results)
+        self.nt_per_class = np.bincount(stats["target_cls"].astype(int), minlength=len(self.names))
+        self.nt_per_image = np.bincount(stats["target_img"].astype(int), minlength=len(self.names))
+        return stats
+
+    def clear_stats(self):
+        """Clear the stored statistics."""
+        for v in self.stats.values():
+            v.clear()
 
     @property
     def keys(self):
