@@ -6,7 +6,7 @@ import cv2
 from pathlib import Path
 from ultralytics.engine.predictor import BasePredictor
 from ultralytics.engine.results import Results
-from ultralytics.utils import DEFAULT_CFG, ops, LOGGER, colorstr
+from ultralytics.utils import DEFAULT_CFG, LOGGER, colorstr, nms, ops
 
 from ultralytics.models.yolo.detect.sahi_predict import slice_image, SAHIPredictAggregator
 
@@ -126,7 +126,7 @@ class DetectionPredictor(BasePredictor):
                 is_multitask = isinstance(m.nc, (list, tuple)) and len(m.nc) > 1
                 agnostic = self.args.agnostic_nms or is_multitask
 
-                crop_preds = ops.non_max_suppression(
+                crop_preds = nms.non_max_suppression(
                     preds, self.args.conf, self.args.iou,
                     agnostic=agnostic,
                     max_det=self.args.max_det,
@@ -168,7 +168,7 @@ class DetectionPredictor(BasePredictor):
             is_multitask = isinstance(m.nc, (list, tuple)) and len(m.nc) > 1
             agnostic = self.args.agnostic_nms or is_multitask
 
-            final = ops.non_max_suppression(
+            final = nms.non_max_suppression(
                 aggregated_for_nms,
                 self.args.conf,
                 self.args.iou,
@@ -206,8 +206,14 @@ class DetectionPredictor(BasePredictor):
                 orig_img = self._sahi_orig_imgs[i]
                 # Normalize based on bit depth from config
                 bit_depth = getattr(self.args, 'image_bit_depth', 8)
+                if bit_depth == 8:
+                    norm_divisor = 255.0
+                elif bit_depth == 16:
+                    norm_divisor = 65_535.0
+                else:
+                    LOGGER.error(f"BitDepth {bit_depth} unsupported.")
                 norm_divisor = 65_535.0 if bit_depth == 16 else 255.0
-                orig_tensor = torch.from_numpy(orig_img).permute(2, 0, 1)\
+                orig_tensor = torch.from_numpy(orig_img).permute(2, 0, 1) \
                     .unsqueeze(0).float().to(self.device) / norm_divisor
 
                 s[i] += self.write_results(i, Path(paths[i]), orig_tensor, s)
@@ -264,7 +270,7 @@ class DetectionPredictor(BasePredictor):
                     )
 
             agnostic = self.args.agnostic_nms or self.is_multitask
-            preds = ops.non_max_suppression(
+            preds = nms.non_max_suppression(
                 preds,
                 self.args.conf,
                 self.args.iou,

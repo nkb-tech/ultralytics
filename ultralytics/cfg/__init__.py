@@ -173,7 +173,6 @@ CFG_BOOL_KEYS = {  # boolean-only arguments
     "overlap_mask",
     "val",
     "save_json",
-    "save_hybrid",
     "half",
     "dnn",
     "plots",

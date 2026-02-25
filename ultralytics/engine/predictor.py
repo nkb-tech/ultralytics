@@ -135,7 +135,12 @@ class BasePredictor:
         if not self.model.rknn and not_tensor and not self.model.int8:
             # Normalize based on bit depth from config
             bit_depth = getattr(self.args, 'image_bit_depth', 8)
-            ims /= 65_535.0 if bit_depth == 16 else 255.0  # 0 - 255/65535 to 0.0 - 1.0
+            if bit_depth == 8:
+                ims /= 255.0
+            elif bit_depth == 16:
+                ims /= 65_535.0
+            else:
+                LOGGER.error(f"BitDepth {bit_depth} unsupported.")
 
         return ims
 

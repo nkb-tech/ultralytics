@@ -56,6 +56,7 @@ from ultralytics.utils.torch_utils import (
     strip_optimizer,
     torch_distributed_zero_first,
     attempt_compile,
+    unwrap_model,
 )
 from ultralytics.utils.loss import DistillationLoss
 
@@ -278,7 +279,7 @@ class BaseTrainer:
                 v.requires_grad = True
 
         # Check AMP
-        self.amp = torch.tensor(self.args.amp).to(self.device)  # True or False
+        self.amp = torch.tensor(self.args.amp, device=self.device)  # True or False
         if self.amp and RANK in {-1, 0}:  # Single-GPU and DDP
             callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them
             self.amp = torch.tensor(check_amp(self.model), device=self.device)
@@ -323,6 +324,8 @@ class BaseTrainer:
                 mode="val",
             )
             self.validator = self.get_validator()
+            self.validator.data = self.data
+            self.validator.init_metrics(unwrap_model(self.model))
             metrics = self.validator.metrics
             if isinstance(metrics, list):
                 metric_keys = metrics[0].keys + self.label_loss_items(prefix="val")
@@ -357,68 +360,66 @@ class BaseTrainer:
         if world_size > 1:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
-        # Weighted loss (for classify task)
-        loss_weights = None
-        if self.args.weighted_loss:
-            loss_weights = self.train_loader.dataset.calculate_weights(0.5)
-            loss_weights = torch.tensor([loss_weights[k] for k in sorted(loss_weights)], device=self.device, dtype=torch.float)
-            LOGGER.info(f'Loss weights for {self.args.task} task = {loss_weights}')
-
-        # Calculate class weights 
+        # Weighted loss
         clf_loss_weights = None
-        if self.args.task in {"detect", "segment", "pose", "obb"}:
-            # Get number of classes for validation
-            nc_list = self.model.model[-1].nc
-            # Get clf_loss_weights from args if provided
-            if hasattr(self.args, 'clf_loss_weights') and self.args.clf_loss_weights is not None:
-                clf_loss_weights = self.args.clf_loss_weights
-                # Validate and convert to list of lists if needed
-                if isinstance(clf_loss_weights, list):
-                    # Validate number of weights matches number of classes
-                    if len(clf_loss_weights) != len(nc_list):
-                        LOGGER.warning(
-                            f"WARNING Number of weight lists ({len(clf_loss_weights)}) doesn't match "
-                            f"number of tasks ({len(nc_list)}), using automatic calculation"
-                        )
-                        clf_loss_weights = None
-                    else:
-                        # Validate all weights are positive and count matches classes
-                        valid = True
-                        for task_idx, task_weights in enumerate(clf_loss_weights):
-                            if not isinstance(task_weights, list):
-                                valid = False
-                                break
-                            if len(task_weights) != nc_list[task_idx]:
-                                LOGGER.warning(
-                                    f"WARNING Number of weights ({len(task_weights)}) for task {task_idx} "
-                                    f"doesn't match number of classes ({nc_list[task_idx]}), using automatic calculation"
-                                )
-                                valid = False
-                                break
-                            if not all(isinstance(w, (float)) and w > 0 for w in task_weights):
-                                LOGGER.warning(
-                                    f"WARNING Some class weights are not positive for task {task_idx}, "
-                                    "using automatic calculation"
-                                )
-                                valid = False
-                                break
-                        if not valid:
+        if self.args.weighted_loss:
+            if self.args.task == "classify":
+                clf_loss_weights = self.train_loader.dataset.calculate_weights(0.5)
+                clf_loss_weights = torch.tensor(clf_loss_weights, device=self.device, dtype=torch.float)
+            else:
+                # Get number of classes for validation
+                nc_list = self.model.model[-1].nc
+                # Get clf_loss_weights from args if provided
+                if hasattr(self.args, 'clf_loss_weights') and self.args.clf_loss_weights is not None:
+                    clf_loss_weights = self.args.clf_loss_weights
+                    # Validate and convert to list of lists if needed
+                    if isinstance(clf_loss_weights, list):
+                        # Validate number of weights matches number of classes
+                        if len(clf_loss_weights) != len(nc_list):
+                            LOGGER.warning(
+                                f"WARNING Number of weight lists ({len(clf_loss_weights)}) doesn't match "
+                                f"number of tasks ({len(nc_list)}), using automatic calculation"
+                            )
                             clf_loss_weights = None
-                else:
-                    LOGGER.warning("WARNING clf_loss_weights must be a list, using automatic calculation")
-                    clf_loss_weights = None
-            # Auto-calculate weights if not provided or invalid
-            if clf_loss_weights is None:
-                calculated_weights = self._calculate_class_weights(nc_list=nc_list)
-                clf_loss_weights = calculated_weights
-                LOGGER.info(f'{colorstr("Auto-calculated class weights")}: {clf_loss_weights}')
+                        else:
+                            # Validate all weights are positive and count matches classes
+                            valid = True
+                            for task_idx, task_weights in enumerate(clf_loss_weights):
+                                if not isinstance(task_weights, list):
+                                    valid = False
+                                    break
+                                if len(task_weights) != nc_list[task_idx]:
+                                    LOGGER.warning(
+                                        f"WARNING Number of weights ({len(task_weights)}) for task {task_idx} "
+                                        f"doesn't match number of classes ({nc_list[task_idx]}), using automatic calculation"
+                                    )
+                                    valid = False
+                                    break
+                                if not all(isinstance(w, (float)) and w > 0 for w in task_weights):
+                                    LOGGER.warning(
+                                        f"WARNING Some class weights are not positive for task {task_idx}, "
+                                        "using automatic calculation"
+                                    )
+                                    valid = False
+                                    break
+                            if not valid:
+                                clf_loss_weights = None
+                    else:
+                        LOGGER.warning("WARNING clf_loss_weights must be a list, using automatic calculation")
+                        clf_loss_weights = None
+                # Auto-calculate weights if not provided or invalid
+                if clf_loss_weights is None:
+                    calculated_weights = self._calculate_class_weights(nc_list=nc_list)
+                    clf_loss_weights = calculated_weights
+            
+            LOGGER.info(f'{colorstr("Auto-calculated class weights")}: {clf_loss_weights}')
 
         # Initialize criterion
         if world_size > 1:
-            criterion = self.model.module.init_criterion(weights=loss_weights, clf_loss_weights=clf_loss_weights)
+            criterion = self.model.module.init_criterion(wclf_loss_weights=clf_loss_weights)
             self.model.module.criterion = criterion
         else:
-            criterion = self.model.init_criterion(weights=loss_weights, clf_loss_weights=clf_loss_weights)
+            criterion = self.model.init_criterion(clf_loss_weights=clf_loss_weights)
             self.model.criterion = criterion
 
         # Compile model
@@ -544,6 +545,9 @@ class BaseTrainer:
                         self.plot_training_samples(batch, ni)
 
                 self.run_callbacks("on_train_batch_end")
+
+            if hasattr(unwrap_model(self.model).criterion, "update"):
+                unwrap_model(self.model).criterion.update()
 
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
@@ -966,8 +970,11 @@ class BaseTrainer:
             nc = nc_attr if isinstance(nc_attr, int) else sum(nc_attr)  # number of classes
             lr_fit = round(0.002 * 5 / (4 + nc), 6)  # lr0 fit equation to 6 decimal places
             # Use MuSGD for large-scale training (YOLO26 style)
-            name, lr, momentum = ("MuSGD", 0.01, 0.9) if iterations > 10000 else ("AdamW", lr_fit, 0.9)
-            self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
+            if iterations > 10000:
+                name, lr, momentum = "MuSGD", 0.01, 0.9
+            else:
+                name, lr, momentum = "AdamW", lr_fit, 0.9
+                self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
 
         use_muon = name == "MuSGD"
         for module_name, module in model.named_modules():

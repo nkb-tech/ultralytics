@@ -2,7 +2,7 @@
 
 from ultralytics.engine.results import Results
 from ultralytics.models.yolo.detect.predict import DetectionPredictor
-from ultralytics.utils import DEFAULT_CFG, LOGGER, ops
+from ultralytics.utils import DEFAULT_CFG, LOGGER, nms, ops
 
 
 class PosePredictor(DetectionPredictor):
@@ -32,7 +32,7 @@ class PosePredictor(DetectionPredictor):
 
     def postprocess(self, preds, img, orig_imgs):
         """Return detection results for a given input image or list of images."""
-        preds = ops.non_max_suppression(
+        preds = nms.non_max_suppression(
             preds,
             self.args.conf,
             self.args.iou,

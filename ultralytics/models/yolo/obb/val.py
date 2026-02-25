@@ -5,7 +5,7 @@ from pathlib import Path
 import torch
 
 from ultralytics.models.yolo.detect import DetectionValidator
-from ultralytics.utils import LOGGER, ops
+from ultralytics.utils import LOGGER, nms, ops
 from ultralytics.utils.metrics import OBBMetrics, batch_probiou
 from ultralytics.utils.plotting import output_to_rotated_target, plot_images
 
@@ -38,7 +38,7 @@ class OBBValidator(DetectionValidator):
 
     def postprocess(self, preds):
         """Apply Non-maximum suppression to prediction outputs."""
-        return ops.non_max_suppression(
+        return nms.non_max_suppression(
             preds,
             self.args.conf,
             self.args.iou,

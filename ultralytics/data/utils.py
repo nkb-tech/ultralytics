@@ -308,15 +308,17 @@ def check_det_dataset(dataset, autodownload=True):
         raise SyntaxError(emojis(f"{dataset} key missing ❌.\n either 'names' or 'nc' are required in all data YAMLs."))
     if "names" in data and "nc" in data and \
         (len(data["names"]) != len(data["nc"]) or \
-        not all(len(names) == len(nci) for names, nci in zip(data["names"], data["nc"]))):
+        not all(len(names) == nci for names, nci in zip(data["names"], data["nc"]))):
         raise SyntaxError(emojis(f"{dataset} 'names' length {data['names']} and 'nc: {data['nc']}' must match."))
     if "names" in data:
         raw_names = data.get("names")
-        if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
-            data["names"] = [check_class_names(n) for n in raw_names]
+        if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple, dict)):
+            # Multi-task format: list of lists, list of tuples, or list of dicts
+            # check_class_names returns [normalized_dict], so unwrap with [0]
+            data["names"] = [check_class_names(n)[0] for n in raw_names]
         elif isinstance(raw_names, (dict, list)):
-            names_list = check_class_names(raw_names)
-            data["names"] = [names_list]
+            # Single-task format: dict or flat list of names - check_class_names returns a list
+            data["names"] = check_class_names(raw_names)
         else:
             raise SyntaxError(emojis(f"{dataset} 'names' must be a list of lists, a list, or a dictionary."))
         data["nc"] = [len(names) for names in data["names"]]

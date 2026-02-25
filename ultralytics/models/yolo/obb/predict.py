@@ -4,7 +4,7 @@ import torch
 
 from ultralytics.engine.results import Results
 from ultralytics.models.yolo.detect.predict import DetectionPredictor
-from ultralytics.utils import DEFAULT_CFG, ops
+from ultralytics.utils import DEFAULT_CFG, nms, ops
 
 
 class OBBPredictor(DetectionPredictor):
@@ -29,7 +29,7 @@ class OBBPredictor(DetectionPredictor):
 
     def postprocess(self, preds, img, orig_imgs):
         """Post-processes predictions and returns a list of Results objects."""
-        preds = ops.non_max_suppression(
+        preds = nms.non_max_suppression(
             preds,
             self.args.conf,
             self.args.iou,

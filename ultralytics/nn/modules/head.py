@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch.nn.init import constant_, xavier_uniform_
 
+from ultralytics.utils import NOT_MACOS14
 from ultralytics.utils.tal import dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import disable_dynamo, smart_inference_mode, TORCH_1_11, fuse_conv_and_bn
 
@@ -693,7 +694,10 @@ class Pose(Detect):
         else:
             y = kpts.clone()
             if ndim == 3:
-                y[:, 2::3] = y[:, 2::3].sigmoid()
+                if NOT_MACOS14:
+                    y[:, 2::ndim].sigmoid_()
+                else:  # Apple macOS14 MPS bug https://github.com/ultralytics/ultralytics/pull/21878
+                    y[:, 2::ndim] = y[:, 2::ndim].sigmoid()
             y[:, 0::ndim] = (y[:, 0::ndim] * 2.0 + (self.anchors[0] - 0.5)) * self.strides
             y[:, 1::ndim] = (y[:, 1::ndim] * 2.0 + (self.anchors[1] - 0.5)) * self.strides
             return y
