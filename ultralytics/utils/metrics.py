@@ -215,9 +215,9 @@ class WiseIoULoss(torch.nn.Module):
 
         union_i = wi * hi + w2 * h2 - inter_i + 1e-7
         iou_i = inter_i / union_i
-        return self['iou'] + iou_i - 1
+        return self['iou'] + (1 - iou_i)
 
-    def _d_iterpiou(self, interp_coe=0.98, lv=0.6, hv=0.9):
+    def _d_iterpiou(self, lv=0.6, hv=0.99):
         interp_coe = (1 - self['iou'].detach()).clamp(min=lv, max=hv)
         return self._iterpiou(interp_coe)
 
@@ -445,23 +445,22 @@ def bbox_iou(
                     q = torch.exp(-P)
                     x = q * Lambda
                     return 1 - 3 * x * torch.exp(-x ** 2) * piou_v1
-            elif interpiou:
-                bi_x1, bi_y1, bi_x2, bi_y2 = ((1 - interp_coe) * b1_x1 + interp_coe * b2_x1,
-                                      (1 - interp_coe) * b1_y1 + interp_coe * b2_y1,
-                                      (1 - interp_coe) * b1_x2 + interp_coe * b2_x2,
-                                      (1 - interp_coe) * b1_y2 + interp_coe * b2_y2)
-                inter_i = (torch.min(bi_x2, b2_x2) - torch.max(bi_x1, b2_x1)).clamp_min_(0) * \
-                        (torch.min(bi_y2, b2_y2) - torch.max(bi_y1, b2_y1)).clamp_min_(0)
-
-                wi, hi = bi_x2 - bi_x1 + eps, bi_y2 - bi_y1 + eps
-                w2, h2 = b2_x2 - b2_x1 + eps, b2_y2 - b2_y1 + eps
-
-                union_i = wi * hi + w2 * h2 - inter_i + eps
-                iou_i = inter_i / union_i
-                return iou + iou_i - 1
             return iou - rho2 / c2  # DIoU
         c_area = cw * ch + eps  # convex area
         return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+    if interpiou:
+        bi_x1 = (1 - interp_coe) * b1_x1 + interp_coe * b2_x1
+        bi_y1 = (1 - interp_coe) * b1_y1 + interp_coe * b2_y1
+        bi_x2 = (1 - interp_coe) * b1_x2 + interp_coe * b2_x2
+        bi_y2 = (1 - interp_coe) * b1_y2 + interp_coe * b2_y2
+        inter_i = (torch.min(bi_x2, b2_x2) - torch.max(bi_x1, b2_x1)).clamp_min_(0) * (
+            torch.min(bi_y2, b2_y2) - torch.max(bi_y1, b2_y1)
+        ).clamp_min_(0)
+        wi, hi = bi_x2 - bi_x1 + eps, bi_y2 - bi_y1 + eps
+        w2, h2 = b2_x2 - b2_x1 + eps, b2_y2 - b2_y1 + eps
+        union_i = wi * hi + w2 * h2 - inter_i + eps
+        iou_i = inter_i / union_i
+        return iou + iou_i - 1
     return iou  # IoU
 
 
