@@ -931,6 +931,7 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
         ckpt, w = torch_safe_load(w)  # load ckpt
         args = {**DEFAULT_CFG_DICT, **ckpt["train_args"]} if "train_args" in ckpt else None  # combined args
         model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
+        patch_model_inplace(model)
 
         # Model compatibility updates
         model.args = args  # attach args to model
@@ -963,22 +964,28 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
 
 
 def _ensure_nested_cv3_on_module(mod: nn.Module) -> bool:
-    """
-    If mod has attribute 'cv3' that is ModuleList[...], ensure it becomes
-    ModuleList[ModuleList[...]] (single-task wrap). Also normalize 'nc' int -> [int].
-    Returns True if modified.
+    """Ensure cv3 (and one2one_cv3) are nested ModuleList[ModuleList[...]] for multitask.
+
+    Converts flat layout (one ModuleList of per-scale Sequentials) to nested
+    (outer=tasks, inner=scales). Also normalizes nc int -> [int].
+
+    Args:
+        mod (nn.Module): Module to check (typically a Detect head).
+
+    Returns:
+        (bool): True if the module was modified.
     """
     if not hasattr(mod, "cv3"):
         return False
-    cv3 = getattr(mod, "cv3")
-    if isinstance(cv3, nn.ModuleList):
-        needs_wrap = (len(cv3) == 0) or not isinstance(cv3[0], nn.ModuleList)
-        if needs_wrap:
-            setattr(mod, "cv3", nn.ModuleList([cv3]))     # wrap to task dim
-            if hasattr(mod, "nc") and isinstance(getattr(mod, "nc"), int):
-                setattr(mod, "nc", [getattr(mod, "nc")])  # normalize to list
-            return True
-    return False
+    changed = False
+    for attr in ("cv3", "one2one_cv3"):
+        cv3 = getattr(mod, attr, None)
+        if isinstance(cv3, nn.ModuleList) and len(cv3) > 0 and not isinstance(cv3[0], nn.ModuleList):
+            setattr(mod, attr, nn.ModuleList([cv3]))
+            changed = True
+    if changed and hasattr(mod, "nc") and isinstance(mod.nc, int):
+        mod.nc = [mod.nc]
+    return changed
 
 def patch_model_inplace(root: nn.Module):
     """

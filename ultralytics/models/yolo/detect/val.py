@@ -152,20 +152,19 @@ class DetectionValidator(BaseValidator):
         # Handle Hailo models
         elif getattr(self, 'hef', False):
             # Check if NMS is in the graph (from metadata)
-            nms = getattr(self, 'nms', False)
-            if nms:
-                return ops.process_nms_hef_results(preds, img_hw=img_hw)
+            if getattr(self, 'nms', False):
+                return ops.process_nms_hef_results(preds, img_hw=self._img_hw)
             else:
                 if not self.end2end:
                     preds = ops.process_hef_dfl_results(
                         input_data=preds,
-                        imgsz=img_hw,
+                        imgsz=self._img_hw,
                         conf_thres=self.args.conf,
                     )
                 else:
                     preds = ops.process_hef_end2end_results(
                         input_data=preds,
-                        imgsz=img_hw,
+                        imgsz=self._img_hw,
                         conf_thres=self.args.conf,
                         nc=self.nc,
                     )
