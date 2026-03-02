@@ -169,9 +169,9 @@ class AutoBackend(nn.Module):
             ncnn,         # 13
             imx,          # 14
             rknn,         # 15
-            executorch,   # 16
-            triton,       # 17
-            hef,          # 18
+            hef,          # 16  (Hailo — matches export_formats)
+            executorch,   # 17
+            triton,       # 18
         ) = model_types if len(model_types) == 19 else model_types + [False] * (19 - len(model_types))
 
         fp32 &= hef
@@ -502,7 +502,11 @@ class AutoBackend(nn.Module):
                 HailoStreamInterface,
             )
 
-            hef_model = HEF(w)
+            w = Path(w)
+            if not w.is_file():
+                w = next(w.rglob("*.hef"))
+
+            hef_model = HEF(str(w))
             hailo_vdevice = VDevice()
 
             configure_params = ConfigureParams.create_from_hef(
@@ -544,6 +548,21 @@ class AutoBackend(nn.Module):
             hailo_input_name = input_vstream_infos[0].name
 
             metadata = Path(w).parent / "metadata.yaml"
+
+            # Sort outputs: group by spatial size (H*W desc), bbox before cls.
+            # Use nc from metadata to reliably distinguish cls (c==nc) from bbox
+            # regardless of reg_max or architecture.
+            _meta = YAML.load(metadata) if metadata.exists() else {}
+            _nc = len(_meta.get("names", {}))
+            info_map = {info.name: info.shape for info in output_vstream_infos}
+
+            def _sort_key(name):
+                shape = info_map[name]
+                h, w, c = shape[0], shape[1], shape[2]  # (H, W, C)
+                is_cls = 1 if c == _nc else 0
+                return (-(h * w), is_cls)
+
+            output_names = sorted(output_names, key=_sort_key)
             model = hailo_pipeline
 
             LOGGER.info(
@@ -877,6 +896,4 @@ class AutoBackend(nn.Module):
             url = urlsplit(p)
             triton = bool(url.netloc) and bool(url.path) and url.scheme in {"http", "grpc"}
 
-        hef_detect = name.endswith(".hef")
-
-        return types + [triton, hef_detect]
+        return types + [triton]

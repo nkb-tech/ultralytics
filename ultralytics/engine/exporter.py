@@ -161,6 +161,14 @@ def export_formats():
             False,
             ["batch", "half", "int8", "simplify", "data", "name", "verbose", "opset"],
         ],
+        [
+            "Hailo",
+            "hailo",
+            "_hef_model",
+            False,
+            False,
+            ["batch", "half", "int8", "simplify", "data", "name", "verbose", "opset"],
+        ],
         ["ExecuTorch", "executorch", "_executorch_model", False, False, ["batch"]],
     ]
     return dict(zip(["Format", "Argument", "Suffix", "CPU", "GPU", "Arguments"], zip(*x)))

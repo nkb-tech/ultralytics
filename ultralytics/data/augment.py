@@ -42,7 +42,7 @@ try:
 except Exception:
     iaa = None
 
-if IMGAUG_AVAILABLE:
+if IMGAUG_AVAILABLE and ALBU_AVAILABLE:
 
     class ImgAugWeatherTransform(A.ImageOnlyTransform):
         """
