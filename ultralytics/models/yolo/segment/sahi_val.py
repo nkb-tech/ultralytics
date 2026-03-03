@@ -27,8 +27,6 @@ from ultralytics.utils import LOGGER, ops
 from ultralytics.models.yolo.detect.sahi_val import _to_tuple, _fix_ratio_pad
 
 
-# ==================== SAHI Segment Aggregator ====================
-
 class SAHISegmentAggregator:
     """
     Aggregates predictions from SAHI crops with mask support for instance segmentation.

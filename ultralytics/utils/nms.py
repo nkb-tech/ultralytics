@@ -2,11 +2,12 @@
 
 import sys
 import time
+from typing import Dict, List
 
 import torch
 
 from ultralytics.utils import LOGGER
-from ultralytics.utils.metrics import batch_probiou, box_iou
+from ultralytics.utils.metrics import batch_probiou, box_iou, box_intersection
 from ultralytics.utils.ops import xywh2xyxy
 
 
@@ -26,6 +27,7 @@ def non_max_suppression(
     rotated: bool = False,
     end2end: bool = False,
     return_idxs: bool = False,
+    nms_strategy: str = "usual",  # "usual" (NMS), "nmm", "nmm_greedy"
 ):
     """Perform non-maximum suppression (NMS) on prediction results.
 
@@ -34,7 +36,7 @@ def non_max_suppression(
 
     Args:
         prediction (torch.Tensor): Predictions (batch_size, 4 + sum(nc) + extra, num_boxes) BCN format,
-            or (batch_size, num_boxes, 6) for end2end models.
+            or (batch_size, num_boxes, 4+2*num_tasks) for post-processed/end2end models.
         conf_thres (float): Confidence threshold (0.0 to 1.0).
         iou_thres (float): IoU threshold for NMS (0.0 to 1.0).
         classes (list[int], optional): Filter by class indices.
@@ -49,6 +51,7 @@ def non_max_suppression(
         rotated (bool): Handle Oriented Bounding Boxes.
         end2end (bool): End-to-end model (no NMS needed).
         return_idxs (bool): Return indices of kept detections.
+        nms_strategy (str): "usual" for NMS, "nmm" or "nmm_greedy" for non-maximum merging (useful for SAHI).
 
     Returns:
         list[torch.Tensor]: Detections per image with shape (N, 4 + 2*num_tasks + extra).
@@ -65,14 +68,57 @@ def non_max_suppression(
     num_tasks = len(nc)
     total_nc = sum(nc)
 
-    # End-to-end model fast path: input is (batch, max_det, 6) with [x,y,w,h, score, label]
-    if prediction.shape[-1] == 6 or end2end:
+    # Post-processed format: (batch, N, 4+2*num_tasks) with [x1, y1, x2, y2, conf0, cls0, ...]
+    # Already xyxy — must NOT go through BCN path (xywh2xyxy would corrupt coordinates)
+    n_cols = prediction.shape[-1]
+    is_postprocessed = (n_cols == 4 + 2 * num_tasks) or end2end
+
+    if is_postprocessed:
         output = []
         for pred in prediction:
-            pred = pred[pred[:, 4] > conf_thres][:max_det]
+            pred = pred[pred[:, 4] > conf_thres]
             if classes is not None:
                 pred = pred[(pred[:, 5:6] == classes).any(1)]
-            output.append(pred)
+            if len(pred) == 0:
+                output.append(pred[:0])
+                continue
+
+            boxes = pred[:, :4]
+            scores = pred[:, 4]
+
+            # Class offset: unique per combination of all task classes
+            if agnostic:
+                c = torch.zeros(len(pred), 1, device=pred.device)
+            elif num_tasks > 1:
+                unique_id = pred[:, 5].view(-1, 1).clone()
+                multiplier = nc[0]
+                for t in range(1, num_tasks):
+                    task_cls_col = pred[:, 5 + 2 * t]
+                    unique_id = unique_id + task_cls_col.view(-1, 1) * multiplier
+                    multiplier *= nc[t]
+                c = unique_id * max_wh
+            else:
+                c = pred[:, 5].view(-1, 1) * max_wh
+
+            if nms_strategy in ("nmm", "nmm_greedy"):
+                nmm_input = torch.cat(
+                    [boxes + c, scores.view(-1, 1), pred[:, 5].view(-1, 1)], dim=1
+                )
+                keep_to_merge = _nmm_core(
+                    nmm_input, match_metric="IOU", match_threshold=iou_thres,
+                    greedy=(nms_strategy == "nmm_greedy"),
+                )
+                result = _merge_from_map(pred, keep_to_merge, max_det=max_det)
+            else:
+                boxes_offset = boxes + c
+                if "torchvision" in sys.modules:
+                    import torchvision
+                    i = torchvision.ops.nms(boxes_offset.float(), scores.float(), iou_thres)
+                else:
+                    i = TorchNMS.nms(boxes_offset, scores, iou_thres)
+                i = i[:max_det]
+                result = pred[i]
+            output.append(result)
         return output
 
     # Standard NMS path: input is (batch, channels, anchors) BCN format
@@ -175,7 +221,6 @@ def non_max_suppression(
         if agnostic:
             c = torch.zeros_like(j.view(-1, 1))
         elif num_tasks > 1:
-            # Multi-task: create unique ID from all task classes
             unique_id = x[:, 5].view(-1, 1)
             multiplier = nc[0]
             for t in range(1, num_tasks):
@@ -190,6 +235,21 @@ def non_max_suppression(
         if rotated:
             boxes = torch.cat((x[:, :2] + c, x[:, 2:4], x[:, -1:]), dim=-1)
             i = TorchNMS.fast_nms(boxes, scores, iou_thres, iou_func=batch_probiou)
+            i = i[:max_det]
+            output[xi] = x[i]
+            if return_idxs:
+                keepi[xi] = xk[i].view(-1)
+        elif nms_strategy in ("nmm", "nmm_greedy"):
+            boxes_for_nmm = x[:, :4] + c
+            nmm_input = torch.cat([boxes_for_nmm, scores.view(-1, 1), j.view(-1, 1)], dim=1)
+            keep_to_merge = _nmm_core(
+                nmm_input, match_metric="IOU", match_threshold=iou_thres,
+                greedy=(nms_strategy == "nmm_greedy"),
+            )
+            merged = _merge_from_map(x, keep_to_merge, max_det=max_det)
+            if return_idxs and merged.numel():
+                keepi[xi] = torch.arange(len(merged), device=x.device)
+            output[xi] = merged
         else:
             boxes = x[:, :4] + c
             if "torchvision" in sys.modules:
@@ -197,16 +257,173 @@ def non_max_suppression(
                 i = torchvision.ops.nms(boxes.float(), scores.float(), iou_thres)
             else:
                 i = TorchNMS.nms(boxes, scores, iou_thres)
-        i = i[:max_det]
-
-        output[xi] = x[i]
-        if return_idxs:
-            keepi[xi] = xk[i].view(-1)
+            i = i[:max_det]
+            output[xi] = x[i]
+            if return_idxs:
+                keepi[xi] = xk[i].view(-1)
         if (time.time() - t) > time_limit:
             LOGGER.warning(f"NMS time limit {time_limit:.3f}s exceeded")
             break
 
     return (output, keepi) if return_idxs else output
+
+
+def _nmm_core(
+    predictions: torch.Tensor,
+    match_metric: str,
+    match_threshold: float,
+    greedy: bool,
+) -> Dict[int, List[int]]:
+    """
+    Core NMM logic using fastquadtree for spatial indexing.
+
+    Processes boxes in descending confidence order. Each box either becomes a "keep"
+    (representative) or gets merged into an existing keep. Once merged, a box is
+    invisible to the rest of the algorithm (no transitive merging).
+    """
+    from fastquadtree import RectQuadTree
+
+    x1 = predictions[:, 0]
+    y1 = predictions[:, 1]
+    x2 = predictions[:, 2]
+    y2 = predictions[:, 3]
+    scores = predictions[:, 4]
+    xmin = torch.minimum(x1, x2)
+    xmax = torch.maximum(x1, x2)
+    ymin = torch.minimum(y1, y2)
+    ymax = torch.maximum(y1, y2)
+    areas = (xmax - xmin) * (ymax - ymin)
+    n = len(predictions)
+
+    if n == 0:
+        return {}
+
+    min_coord = min(xmin.min().item(), ymin.min().item()) - 1
+    max_coord = max(xmax.max().item(), ymax.max().item()) + 1
+    bounds = (min_coord, min_coord, max_coord, max_coord)
+
+    tree = RectQuadTree(bounds, capacity=10)
+    for i in range(n):
+        tree.insert((xmin[i].item(), ymin[i].item(), xmax[i].item(), ymax[i].item()), id_=i)
+
+    sorted_idxs = torch.argsort(scores, descending=True).tolist()
+    keep_to_merge_list: Dict[int, List[int]] = {}
+    merge_to_keep: Dict[int, int] = {}
+    suppressed: set = set()  # only used in greedy mode
+
+    for current_idx in sorted_idxs:
+        if current_idx in merge_to_keep:
+            continue
+        if greedy and current_idx in suppressed:
+            continue
+
+        cx1 = xmin[current_idx].item()
+        cy1 = ymin[current_idx].item()
+        cx2 = xmax[current_idx].item()
+        cy2 = ymax[current_idx].item()
+        current_area = areas[current_idx].item()
+        query_rect = (cx1, cy1, cx2, cy2)
+
+        results = tree.query(query_rect)
+        matched_box_indices = []
+        found_suppressed_keeps: set = set()
+
+        for (candidate_idx, qx1, qy1, qx2, qy2) in results:
+            if candidate_idx == current_idx:
+                continue
+            if candidate_idx in merge_to_keep:
+                if greedy:
+                    keep_idx = merge_to_keep[candidate_idx]
+                    found_suppressed_keeps.add(keep_idx)
+                continue
+            if scores[candidate_idx] > scores[current_idx]:
+                continue
+            if scores[candidate_idx] == scores[current_idx]:
+                candidate_coords = (xmin[candidate_idx].item(), ymin[candidate_idx].item(),
+                                    xmax[candidate_idx].item(), ymax[candidate_idx].item())
+                if candidate_coords > query_rect:
+                    continue
+
+            box_a = torch.tensor([[cx1, cy1, cx2, cy2]], dtype=torch.float32, device=predictions.device)
+            box_b = torch.tensor([[qx1, qy1, qx2, qy2]], dtype=torch.float32, device=predictions.device)
+            intersection = box_intersection(box_a, box_b).item()
+            if match_metric == "IOU":
+                union = current_area + areas[candidate_idx].item() - intersection
+                metric = intersection / union if union > 0 else 0
+            elif match_metric == "IOS":
+                smaller = min(current_area, areas[candidate_idx].item())
+                metric = intersection / smaller if smaller > 0 else 0
+            else:
+                raise ValueError(f"Invalid match_metric: {match_metric}")
+
+            if metric >= match_threshold:
+                matched_box_indices.append(candidate_idx)
+                if greedy:
+                    suppressed.add(candidate_idx)
+                    merge_to_keep[candidate_idx] = int(current_idx)
+
+        current_idx_native = int(current_idx)
+        if greedy:
+            if found_suppressed_keeps:
+                keep_idx = max(found_suppressed_keeps, key=lambda k: scores[k].item())
+                if keep_idx not in keep_to_merge_list:
+                    keep_to_merge_list[keep_idx] = []
+                keep_to_merge_list[keep_idx].append(current_idx_native)
+                for m in matched_box_indices:
+                    m_native = int(m)
+                    merge_to_keep[m_native] = keep_idx
+                    if m_native not in keep_to_merge_list[keep_idx]:
+                        keep_to_merge_list[keep_idx].append(m_native)
+                    suppressed.add(m_native)
+                suppressed.add(current_idx)
+                merge_to_keep[current_idx_native] = keep_idx
+            else:
+                keep_to_merge_list[current_idx_native] = [int(idx) for idx in matched_box_indices]
+        else:
+            keep_to_merge_list[current_idx_native] = []
+            for matched_box_idx in matched_box_indices:
+                matched_box_idx_native = int(matched_box_idx)
+                if matched_box_idx_native not in merge_to_keep:
+                    keep_to_merge_list[current_idx_native].append(matched_box_idx_native)
+                    merge_to_keep[matched_box_idx_native] = current_idx_native
+
+    return keep_to_merge_list
+
+
+def _merge_from_map(x, keep_to_merge, max_det=300):
+    """Merge boxes: use coordinates from the largest-area box, confidence/class from highest-conf box."""
+    merged_indices = set()
+    merged_boxes = []
+
+    for keep_idx, merge_list in keep_to_merge.items():
+        if keep_idx in merged_indices:
+            continue
+
+        merged_box = x[keep_idx].clone()
+        merged_indices.add(keep_idx)
+
+        if merge_list:
+            all_indices = [keep_idx] + [m for m in merge_list if m not in merged_indices]
+            for m in merge_list:
+                merged_indices.add(m)
+
+            if len(all_indices) > 1:
+                all_boxes = torch.stack([x[i] for i in all_indices])
+                # Coordinates from the largest-area box (most complete view of the object)
+                areas = (all_boxes[:, 2] - all_boxes[:, 0]) * (all_boxes[:, 3] - all_boxes[:, 1])
+                largest_idx = areas.argmax()
+                merged_box[:4] = all_boxes[largest_idx, :4]
+                # Confidence + class from highest-confidence box
+                best_conf_idx = all_boxes[:, 4].argmax()
+                merged_box[4:] = all_boxes[best_conf_idx, 4:]
+
+        merged_boxes.append(merged_box)
+
+    for idx in range(len(x)):
+        if idx not in merged_indices:
+            merged_boxes.append(x[idx])
+
+    return torch.stack(merged_boxes)[:max_det] if merged_boxes else x[:0]
 
 
 class TorchNMS:

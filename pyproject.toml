@@ -83,7 +83,8 @@ dependencies = [
     "tensorboard==2.18.0",
     "einops",
     "numba",
-    "imaug @ git+https://github.com/imaug/imaug.git"
+    "imaug @ git+https://github.com/imaug/imaug.git",
+    "fastquadtree>=2.0.0",  # spatial index for NMM (non-max merging) with SAHI
 ]
 
 # Optional dependencies ------------------------------------------------------------------------------------------------

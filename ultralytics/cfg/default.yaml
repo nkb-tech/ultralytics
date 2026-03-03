@@ -76,6 +76,7 @@ stream_buffer: False # (bool) buffer all streaming frames (True) or return the m
 visualize: False # (bool) visualize model features
 augment: False # (bool) apply image augmentation to prediction sources
 agnostic_nms: True # (bool) class-agnostic NMS
+nms_strategy: usual # (str) NMS strategy: 'usual' (standard NMS), 'nmm' (non-max merging), 'nmm_greedy' (greedy NMM, faster); NMM useful for SAHI
 classes: # (int | list[int], optional) filter results by class, i.e. classes=0, or classes=[0,2,3]
 retina_masks: False # (bool) use high-resolution segmentation masks
 embed: # (list[int], optional) return feature vectors/embeddings from given layers
