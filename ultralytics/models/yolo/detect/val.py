@@ -448,7 +448,8 @@ class DetectionValidator(BaseValidator):
                 stat["conf"] = aggregated_pred[f"conf_{t}"]
                 stat["pred_cls"] = aggregated_pred[f"cls_{t}"]
                 if nl:
-                    stat["tp"] = self._process_batch(aggregated_pred, gt_bboxes_xyxy, gt_cls_t, task=t)
+                    gt_batch = {"bboxes": gt_bboxes_xyxy, "cls": gt_cls}
+                    stat["tp"] = self._process_batch(aggregated_pred, gt_batch, task=t)["tp"]
                 else:
                     stat["tp"] = torch.zeros(npr, self.niou, dtype=torch.bool, device=self.device)
 
