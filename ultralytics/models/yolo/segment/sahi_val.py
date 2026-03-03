@@ -82,8 +82,6 @@ class SAHISegmentAggregator:
         self._batch_count = 0
         self.reset()
     
-    # -------------------- Lifecycle Methods --------------------
-    
     def reset(self):
         """Reset aggregator state for a new validation run."""
         self.image_crops = defaultdict(lambda: {
@@ -109,8 +107,6 @@ class SAHISegmentAggregator:
         self.expected_crops_per_image.clear()
         for img_idx, _, _ in dataset.slice_indices:
             self.expected_crops_per_image[img_idx] = self.expected_crops_per_image.get(img_idx, 0) + 1
-    
-    # -------------------- Prediction Collection --------------------
     
     def add_crop_predictions(
         self, 
@@ -300,8 +296,6 @@ class SAHISegmentAggregator:
         
         self.image_crops[img_key]['predictions'].append(crop_preds_transformed.detach())
 
-    # -------------------- Prediction Retrieval --------------------
-
     def get_aggregated_predictions(self, img_key: str) -> torch.Tensor:
         """
         Get concatenated predictions for a complete image.
@@ -339,8 +333,6 @@ class SAHISegmentAggregator:
                 return meta, pred_idx - start
         return None, -1
     
-    # -------------------- Completion Tracking --------------------
-    
     def is_image_complete(self, img_key: str) -> bool:
         """Check if all crops for an image have been processed."""
         img_idx = self.image_crops[img_key].get('original_img_idx')
@@ -355,8 +347,7 @@ class SAHISegmentAggregator:
     def get_completed_images(self) -> List[str]:
         """Get list of image keys that have all crops processed."""
         return [img_key for img_key in list(self.image_crops.keys()) if self.is_image_complete(img_key)]
-    
-    # -------------------- Memory Management --------------------
+
     
     def cleanup_image(self, img_key: str):
         """

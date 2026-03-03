@@ -140,7 +140,7 @@ class SAHIPredictAggregator:
         if img_key not in self.image_predictions or not self.image_predictions[img_key]:
             # Return empty tensor with correct shape
             return torch.empty((0, 6), dtype=torch.float32)
-        
+
         # Collect all predictions
         all_preds = []
         for preds, _ in self.image_predictions[img_key]:
@@ -151,24 +151,22 @@ class SAHIPredictAggregator:
             
             if len(preds) > 0:
                 all_preds.append(preds)
-        
+
         if not all_preds:
             return torch.empty((0, 6), dtype=torch.float32)
-        
+
         # Concatenate all predictions
         aggregated = torch.cat(all_preds, dim=0)
-        
-        # Clip boxes to image boundaries
+
+        # Clip boxes to image boundaries (in-place for efficiency)
         h, w = orig_shape
-        aggregated[:, 0] = torch.clamp(aggregated[:, 0], 0, w)  # x_center
-        aggregated[:, 1] = torch.clamp(aggregated[:, 1], 0, h)  # y_center
-        aggregated[:, 2] = torch.clamp(aggregated[:, 2], 0, w)  # width
-        aggregated[:, 3] = torch.clamp(aggregated[:, 3], 0, h)  # height
-        
+        aggregated[:, 0].clamp_(0, w)  # x1
+        aggregated[:, 2].clamp_(0, w)  # x2
+        aggregated[:, 1].clamp_(0, h)  # y1
+        aggregated[:, 3].clamp_(0, h)  # y2
+
         return aggregated
     
     def is_image_complete(self, img_key: str, expected_crops: int) -> bool:
         """Check if all crops for an image have been processed."""
         return len(self.image_predictions.get(img_key, [])) >= expected_crops
-
-
