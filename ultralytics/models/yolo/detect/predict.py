@@ -121,17 +121,38 @@ class DetectionPredictor(BasePredictor):
 
         # Postprocess
         with self.profilers[2]:
+            nhwc = getattr(self.model, "nhwc", False)
+            end2end = getattr(self.model, "end2end", False)
+            img_hw = tuple(int(i) for i in (im.shape[1:3] if nhwc else im.shape[2:4]))
+
+            if self.rknn:
+                if not end2end:
+                    preds = ops.process_rknn_dfl_results(
+                        input_data=preds, imgsz=img_hw, conf_thres=self.args.conf,
+                    )
+                else:
+                    preds = ops.process_rknn_end2end_results(
+                        input_data=preds, imgsz=img_hw, conf_thres=self.args.conf, nc=self.nc,
+                    )
+            elif self.hef:
+                if not end2end:
+                    preds = ops.process_hef_dfl_results(
+                        input_data=preds, imgsz=img_hw, conf_thres=self.args.conf,
+                    )
+                else:
+                    preds = ops.process_hef_end2end_results(
+                        input_data=preds, imgsz=img_hw, conf_thres=self.args.conf, nc=self.nc,
+                    )
+
             if not self.nms:
-                m = self.model.model.model[-1]
-                is_multitask = isinstance(m.nc, (list, tuple)) and len(m.nc) > 1
-                agnostic = self.args.agnostic_nms or is_multitask
+                agnostic = self.args.agnostic_nms or self.is_multitask
 
                 crop_preds = nms.non_max_suppression(
                     preds, self.args.conf, self.args.iou,
                     agnostic=agnostic,
                     max_det=self.args.max_det,
                     classes=self.args.classes,
-                    nc=m.nc,
+                    nc=self.nc,
                 )[0]
 
                 if len(crop_preds) == 0:
@@ -164,9 +185,7 @@ class DetectionPredictor(BasePredictor):
             aggregated_for_nms = torch.cat([aggregated_xyxy, aggregated[:, 4:]], dim=1)
             aggregated_for_nms = aggregated_for_nms.unsqueeze(0)
 
-            m = self.model.model.model[-1]
-            is_multitask = isinstance(m.nc, (list, tuple)) and len(m.nc) > 1
-            agnostic = self.args.agnostic_nms or is_multitask
+            agnostic = self.args.agnostic_nms or self.is_multitask
 
             final = nms.non_max_suppression(
                 aggregated_for_nms,
@@ -175,7 +194,7 @@ class DetectionPredictor(BasePredictor):
                 agnostic=agnostic,
                 max_det=self.args.max_det,
                 classes=self.args.classes,
-                nc=m.nc,
+                nc=self.nc,
             )[0]
 
             return final
