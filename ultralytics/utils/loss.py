@@ -220,7 +220,7 @@ class EffectiveClassMarginLoss(nn.Module):
             (pred_neg + 1e-9).log() * (1 - target)
         )
         
-        cls_weight = self.detection_cls_weight.to(loss_cls.device)
+        cls_weight = self.detection_cls_weight
         loss_cls = loss_cls * cls_weight
         
         if self.class_weight is not None:
@@ -250,7 +250,7 @@ class EffectiveClassMarginLoss(nn.Module):
 class PPLoss(nn.Module):
     """PP-Loss: Size-Aware Prioritization Loss for object detection."""
     
-    def __init__(self, num_levels=3, strides=None, reduction='none', weight=None, **kwargs):
+    def __init__(self, num_levels=3, strides=None, reduction='none', weight=None, verbose=True, **kwargs):
         super().__init__()
         self.num_levels = num_levels
         self.strides = strides if strides is not None else [8, 16, 32]
@@ -260,8 +260,9 @@ class PPLoss(nn.Module):
         self.register_buffer('mu', torch.tensor([32.0, 64.0, 128.0]))
         self.register_buffer('sigma', torch.tensor([16.0, 32.0, 64.0]))
         
-        LOGGER.info(f"{colorstr('PP Loss')}: Initialized with {num_levels} FPN levels")
-        LOGGER.info(f"{colorstr('PP Loss')}: Strides: {self.strides}, Mu: {self.mu.tolist()}, Sigma: {self.sigma.tolist()}")
+        if verbose:
+            LOGGER.info(f"{colorstr('PP Loss')}: Initialized with {num_levels} FPN levels")
+            LOGGER.info(f"{colorstr('PP Loss')}: Strides: {self.strides}, Mu: {self.mu.tolist()}, Sigma: {self.sigma.tolist()}")
     
     def compute_ppf(self, object_sizes, level_idx):
         """Compute Prediction Probability Function (PPF) for objects."""
@@ -282,6 +283,39 @@ class PPLoss(nn.Module):
         weights = num_levels * ppf_current / (ppf_sum + 1e-8)
         return weights
     
+    def apply_weights(self, loss, gt_bboxes, stride_tensor, fg_mask):
+        """Apply PP size-aware weights to a per-element loss tensor.
+
+        Args:
+            loss: Unreduced loss tensor (batch, anchors, classes).
+            gt_bboxes: Ground-truth boxes in xyxy format for foreground anchors.
+            stride_tensor: Per-anchor stride values.
+            fg_mask: Boolean foreground mask.
+
+        Returns:
+            Weighted loss tensor (same shape as input).
+        """
+        if fg_mask.sum() == 0:
+            return loss
+
+        gt_w = gt_bboxes[..., 2] - gt_bboxes[..., 0]
+        gt_h = gt_bboxes[..., 3] - gt_bboxes[..., 1]
+        object_sizes = torch.sqrt(gt_w * gt_h + 1e-8)
+
+        if stride_tensor.dim() == 2:
+            stride_tensor = stride_tensor.unsqueeze(0).expand(loss.shape[0], -1, -1)
+        stride_vals = stride_tensor.squeeze(-1)
+
+        level_idx = torch.zeros_like(stride_vals, dtype=torch.long)
+        for i, stride in enumerate(self.strides):
+            level_idx[stride_vals == stride] = i
+
+        pp_weights = self.compute_weights(object_sizes[fg_mask], level_idx[fg_mask], num_levels=self.num_levels)
+
+        weights_tensor = torch.ones_like(loss)
+        weights_tensor[fg_mask] = pp_weights.unsqueeze(-1).expand(-1, loss.shape[-1])
+        return loss * weights_tensor
+
     def forward(self, pred_scores, gt_scores, pred_bboxes=None, gt_bboxes=None, fg_mask=None,
                 anchor_points=None, stride_tensor=None, **kwargs):
         """Forward pass for PP Loss."""
@@ -292,101 +326,34 @@ class PPLoss(nn.Module):
                 reduction='none',
                 weight=self.class_weight
             )
-        
-        if gt_bboxes is None or stride_tensor is None or fg_mask is None:
-            LOGGER.warning(f"{colorstr('PP Loss')}: Missing bbox/stride info, using standard BCE")
-            if self.reduction == 'mean':
-                return loss.mean()
-            elif self.reduction == 'sum':
-                return loss.sum()
-            return loss
-        
-        if fg_mask.sum() > 0:
-            gt_w = gt_bboxes[..., 2] - gt_bboxes[..., 0]
-            gt_h = gt_bboxes[..., 3] - gt_bboxes[..., 1]
-            object_sizes = torch.sqrt(gt_w * gt_h + 1e-8)
-            
-            if stride_tensor.dim() == 2:
-                stride_tensor = stride_tensor.unsqueeze(0).expand(pred_scores.shape[0], -1, -1)
-            
-            stride_vals = stride_tensor.squeeze(-1)
-            
-            level_idx = torch.zeros_like(stride_vals, dtype=torch.long)
-            for i, stride in enumerate(self.strides):
-                level_idx[stride_vals == stride] = i
-            
-            object_sizes_fg = object_sizes[fg_mask]
-            level_idx_fg = level_idx[fg_mask]
-            
-            pp_weights = self.compute_weights(object_sizes_fg, level_idx_fg, num_levels=self.num_levels)
-            
-            weights_tensor = torch.ones_like(loss)
-            weights_tensor[fg_mask] = pp_weights.unsqueeze(-1).expand(-1, loss.shape[-1])
-            loss = loss * weights_tensor
-        
+
+        if gt_bboxes is not None and stride_tensor is not None and fg_mask is not None:
+            loss = self.apply_weights(loss, gt_bboxes, stride_tensor, fg_mask)
+
         if self.reduction == 'mean':
             if fg_mask is not None and fg_mask.sum() > 0:
-                loss = loss.sum() / fg_mask.sum()
-            else:
-                loss = loss.mean()
+                return loss.sum() / fg_mask.sum()
+            return loss.mean()
         elif self.reduction == 'sum':
-            loss = loss.sum()
-        
+            return loss.sum()
         return loss
 
 
 class PPQualityFocalLoss(QualityFocalLoss):
     """Combination of PP-Loss and Quality Focal Loss."""
     
-    def __init__(self, num_levels=3, strides=None, weight=None, *args, **kwargs):
+    def __init__(self, num_levels=3, strides=None, weight=None, verbose=True, *args, **kwargs):
         super().__init__(weight=weight, *args, **kwargs)
-        self.pp_loss = PPLoss(num_levels=num_levels, strides=strides, reduction='none', weight=weight)
+        self.pp_loss = PPLoss(num_levels=num_levels, strides=strides, reduction='none', weight=weight, verbose=verbose)
     
     def forward(self, pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask,
                 anchor_points=None, stride_tensor=None, beta=2.0, *args, **kwargs):
         """Computes PP-weighted Quality Focal Loss."""
-        cls_iou_targets, targets_onehot_pos = self.preprocess(pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask)
-        
-        pred_sigmoid = pred_scores.float().sigmoid()
-        scale_factor = pred_sigmoid
-        zerolabel = torch.zeros_like(pred_scores)
-        
-        with autocast(enabled=False):
-            loss = F.binary_cross_entropy_with_logits(
-                pred_scores, zerolabel, reduction='none', weight=self.weight
-            ) * scale_factor.pow(beta)
-        
-        scale_factor = cls_iou_targets[targets_onehot_pos] - pred_sigmoid[targets_onehot_pos]
-        with autocast(enabled=False):
-            loss[targets_onehot_pos] = F.binary_cross_entropy_with_logits(
-                pred_scores[targets_onehot_pos],
-                cls_iou_targets[targets_onehot_pos],
-                reduction='none',
-            ) * scale_factor.abs().pow(beta)
-        
-        if anchor_points is not None and stride_tensor is not None and gt_bboxes is not None:
-            gt_w = gt_bboxes[..., 2] - gt_bboxes[..., 0]
-            gt_h = gt_bboxes[..., 3] - gt_bboxes[..., 1]
-            object_sizes = torch.sqrt(gt_w * gt_h + 1e-8)
-            
-            if stride_tensor.dim() == 2:
-                stride_tensor = stride_tensor.unsqueeze(0).expand(pred_scores.shape[0], -1, -1)
-            stride_vals = stride_tensor.squeeze(-1)
-            
-            level_idx = torch.zeros_like(stride_vals, dtype=torch.long)
-            for i, stride in enumerate(self.pp_loss.strides):
-                level_idx[stride_vals == stride] = i
-            
-            if fg_mask.sum() > 0:
-                object_sizes_fg = object_sizes[fg_mask]
-                level_idx_fg = level_idx[fg_mask]
-                
-                pp_weights = self.pp_loss.compute_weights(object_sizes_fg, level_idx_fg, num_levels=self.pp_loss.num_levels)
-                
-                weights_tensor = torch.ones_like(loss)
-                weights_tensor[fg_mask] = pp_weights.unsqueeze(-1).expand(-1, loss.shape[-1])
-                loss = loss * weights_tensor
-        
+        loss = super().forward(pred_scores, gt_scores, pred_bboxes, gt_bboxes, fg_mask, beta=beta)
+
+        if stride_tensor is not None and gt_bboxes is not None and fg_mask is not None:
+            loss = self.pp_loss.apply_weights(loss, gt_bboxes, stride_tensor, fg_mask)
+
         return loss
 
 
@@ -416,7 +383,7 @@ class FocalLoss(nn.Module):
         """Initialize FocalLoss class with focusing and balancing parameters."""
         super().__init__()
         self.gamma = gamma
-        self.alpha = torch.tensor(alpha)
+        self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
 
     def forward(self, pred_scores, gt_scores, gamma=None, alpha=None, *args, **kwargs):
         """Calculates focal loss."""
@@ -427,7 +394,6 @@ class FocalLoss(nn.Module):
         modulating_factor = (1.0 - p_t) ** gamma
         loss *= modulating_factor
         if (self.alpha > 0).any():
-            self.alpha = self.alpha.to(device=pred_scores.device, dtype=pred_scores.dtype)
             alpha_factor = gt_scores * self.alpha + (1 - gt_scores) * (1 - self.alpha)
             loss *= alpha_factor
         return loss
@@ -708,7 +674,7 @@ class KeypointLoss(nn.Module):
     def __init__(self, sigmas: torch.Tensor) -> None:
         """Initialize the KeypointLoss class with keypoint sigmas."""
         super().__init__()
-        self.sigmas = sigmas
+        self.register_buffer("sigmas", sigmas if isinstance(sigmas, torch.Tensor) else torch.tensor(sigmas))
 
     def forward(
         self, pred_kpts: torch.Tensor, gt_kpts: torch.Tensor, kpt_mask: torch.Tensor, area: torch.Tensor
@@ -780,20 +746,23 @@ class v8DetectionLoss:
                     num_levels=len(m.stride),
                     strides=m.stride.tolist(),
                     reduction='none',
-                    weight=self.clf_loss_weights[i]
+                    weight=self.clf_loss_weights[i],
+                    verbose=verbose,
                 ))
             elif clf_loss_fn == "ppqfl":
                 cls_losses.append(PPQualityFocalLoss(
                     num_levels=len(m.stride),
                     strides=m.stride.tolist(),
-                    weight=self.clf_loss_weights[i]
+                    weight=self.clf_loss_weights[i],
+                    verbose=verbose,
                 ))
             elif clf_loss_fn == "focal":
                 cls_losses.append(FocalLoss())
             else:
                 raise ValueError(f"Unknown classification loss function: {clf_loss_fn}")
         self.cls_losses = nn.ModuleList(cls_losses)
-        
+        self.cls_losses.to(device)  # Move loss modules (buffers) to model device
+
         # Also keep standard BCE for compatibility
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
 
@@ -906,6 +875,8 @@ class v8DetectionLoss:
                 pred_bboxes=pred_bboxes,
                 gt_bboxes=target_bboxes / stride_tensor,
                 fg_mask=fg_mask,
+                anchor_points=anchor_points,
+                stride_tensor=stride_tensor,
             ).sum() / target_scores_sum
 
             offset += n_cls_task
@@ -1599,7 +1570,7 @@ class TVPDetectLoss:
 
         preds["scores"] = self._get_vp_features(preds)
         vp_loss = self.vp_criterion(preds, batch)
-        box_loss = vp_loss[0][1]
+        box_loss = vp_loss[1][0]
         return box_loss, vp_loss[1]
 
     def _get_vp_features(self, preds: dict[str, torch.Tensor]) -> torch.Tensor:

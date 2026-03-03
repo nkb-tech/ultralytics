@@ -200,6 +200,7 @@ CFG_BOOL_KEYS = {  # boolean-only arguments
     "nms",
     "weighted",
     "weighted_loss",
+    "end2end",
 }
 
 

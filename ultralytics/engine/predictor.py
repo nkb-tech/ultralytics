@@ -323,19 +323,12 @@ class BasePredictor:
             batch=self.args.batch,
             fuse=True,
             verbose=verbose,
+            end2end=getattr(self.args, "end2end", None),
         )
 
-        # Backward compatibility
-        self.output_names = sorted(self.model.output_names) if hasattr(self.model, "output_names") else None
-        self.nms = self.model.nms if hasattr(self.model, "nms") else False
-        self.engine = self.model.engine if hasattr(self.model, "engine") else False
-        self.onnx = self.model.onnx if hasattr(self.model, "onnx") else False
-        self.rknn = self.model.rknn if hasattr(self.model, "rknn") else False
-        self.hef = self.model.hef if hasattr(self.model, "hef") else False
-        self.names = self.model.names if hasattr(self.model, "names") else None
-
-        self.is_multitask = len(self.names) > 1 if self.names else False
-        self.nc = [len(nc) for nc in self.names] if self.names else [1]
+        names = getattr(self.model, "names", None)
+        self.is_multitask = len(names) > 1 if names else False
+        self.nc = [len(nc) for nc in names] if names else [1]
 
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half

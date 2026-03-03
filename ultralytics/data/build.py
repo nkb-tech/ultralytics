@@ -384,17 +384,18 @@ def build_dataloader(
             else ContiguousDistributedSampler(dataset)
         )
       
+    has_batch_sampler = kwargs.get("batch_sampler") is not None
     return InfiniteDataLoader(
         dataset=dataset,
-        batch_size=batch,
-        shuffle=shuffle and kwargs['sampler'] is None,
+        batch_size=1 if has_batch_sampler else batch,
+        shuffle=False if has_batch_sampler else (shuffle and kwargs.get("sampler") is None),
         num_workers=nw,
         prefetch_factor=4 if nw > 0 else None,  # increase over default 2
         pin_memory=nd > 0 and pin_memory,
         collate_fn=getattr(dataset, "collate_fn", None),
         worker_init_fn=seed_worker,
         generator=generator,
-        drop_last=drop_last and len(dataset) % batch != 0,
+        drop_last=False if has_batch_sampler else (drop_last and len(dataset) % batch != 0),
         **kwargs,
     )
 

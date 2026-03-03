@@ -132,6 +132,7 @@ class AutoBackend(nn.Module):
         batch=1,
         fuse=True,
         verbose=True,
+        end2end=None,
     ):
         """
         Initialize the AutoBackend for inference.
@@ -201,14 +202,10 @@ class AutoBackend(nn.Module):
         # In-memory PyTorch model
         if nn_module:
             model = weights.to(device)
+            if end2end is not None:
+                model.end2end = end2end
             if fuse:
                 model = model.fuse(verbose=verbose)
-            if hasattr(model, "kpt_shape"):
-                kpt_shape = model.kpt_shape  # pose-only
-            stride = max(int(model.stride.max()), 32)  # model stride
-            names = model.module.names if hasattr(model, "module") else model.names
-            model.half() if fp16 else model.float()
-            self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
             pt = True
 
         # PyTorch
@@ -220,13 +217,18 @@ class AutoBackend(nn.Module):
                 device=device,
                 inplace=True,
                 fuse=fuse,
+                end2end=end2end,
             )
+
+        # Shared PyTorch model setup
+        if pt:
             if hasattr(model, "kpt_shape"):
-                kpt_shape = model.kpt_shape  # pose-only
-            stride = max(int(model.stride.max()), 32)  # model stride
+                kpt_shape = model.kpt_shape
+            stride = max(int(model.stride.max()), 32)
             names = model.module.names if hasattr(model, "module") else model.names
             model.half() if fp16 else model.float()
-            self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
+            self.model = model
+            end2end = getattr(model, "end2end", False)
 
         # TorchScript
         elif jit:
@@ -613,9 +615,7 @@ class AutoBackend(nn.Module):
         if "names" not in locals():  # names missing
             names = default_class_names(data)
 
-        # TODO: Remove this once we have a better way to handle names
-        if not(isinstance(names, list) and all(isinstance(n, dict) for n in names)):
-            names = check_class_names(names)
+        names = check_class_names(names)
 
         # Disable gradients
         if pt:
@@ -827,10 +827,10 @@ class AutoBackend(nn.Module):
             y = [x if isinstance(x, np.ndarray) else x.numpy() for x in y]
 
         if isinstance(y, (list, tuple)):
-            if len(self.names) == 999 and (self.task == "segment" or len(y) == 2):  # segments and names not defined
+            if len(self.names[0]) == 999 and (self.task == "segment" or len(y) == 2):  # segments and names not defined
                 ip, ib = (0, 1) if len(y[0].shape) == 4 else (1, 0)  # index of protos, boxes
                 nc = y[ib].shape[1] - y[ip].shape[3] - 4  # y = (1, 160, 160, 32), (1, 116, 8400)
-                self.names = {i: f"class{i}" for i in range(nc)}
+                self.names = [{i: f"class{i}" for i in range(nc)}]
             return self.from_numpy(y[0]) if len(y) == 1 else [self.from_numpy(x) for x in y]
         else:
             return self.from_numpy(y)

@@ -203,6 +203,8 @@ class BaseModel(nn.Module):
                     m.forward = m.forward_fuse
                 if hasattr(m, "switch_to_deploy"):
                     m.switch_to_deploy()
+                if isinstance(m, Detect) and getattr(m, "end2end", False):
+                    m.fuse()  # remove one2many head
             self.info(verbose=verbose)
 
         return self
@@ -351,7 +353,14 @@ class DetectionModel(BaseModel):
 
     @end2end.setter
     def end2end(self, value):
-        """Override the end-to-end detection mode."""
+        """Override the end-to-end detection mode. Only applies to YOLOv10/YOLO26-style models with one2one heads."""
+        head = self.model[-1]
+        if not hasattr(head, "one2one_cv2"):
+            LOGGER.warning(
+                f"WARNING ⚠️ end2end={value} ignored: model head '{type(head).__name__}' "
+                f"has no one2one heads (not a YOLOv10/YOLO26-style end2end model)."
+            )
+            return
         self.set_head_attr(end2end=value)
 
     def set_head_attr(self, **kwargs):
@@ -924,7 +933,7 @@ def torch_safe_load(weight, safe_only=False):
     return ckpt, file
 
 
-def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
+def attempt_load_weights(weights, device=None, inplace=True, fuse=False, end2end=None):
     """Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a."""
     ensemble = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
@@ -939,6 +948,10 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
         model.task = guess_model_task(model)
         if not hasattr(model, "stride"):
             model.stride = torch.tensor([32.0])
+
+        # Override end2end on the head before fusing so fuse() knows whether to remove one2many
+        if end2end is not None:
+            model.end2end = end2end
 
         # Append
         ensemble.append(model.fuse().eval() if fuse and hasattr(model, "fuse") else model.eval())  # model in eval mode

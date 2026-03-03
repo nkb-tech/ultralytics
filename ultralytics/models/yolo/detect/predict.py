@@ -109,68 +109,52 @@ class DetectionPredictor(BasePredictor):
 
         return self._aggregate_final_predictions(img_key, orig_shape)
 
+    def _decode_backend_preds(self, preds, img_hw):
+        """Decode RKNN/HEF backend-specific prediction formats into standard tensor format."""
+        end2end = getattr(self.model, "end2end", False)
+        if getattr(self.model, "rknn", False):
+            if not end2end:
+                preds = ops.process_rknn_dfl_results(input_data=preds, imgsz=img_hw, conf_thres=self.args.conf)
+            else:
+                preds = ops.process_rknn_end2end_results(input_data=preds, imgsz=img_hw, conf_thres=self.args.conf, nc=self.nc)
+        elif getattr(self.model, "hef", False):
+            if not end2end:
+                preds = ops.process_hef_dfl_results(input_data=preds, imgsz=img_hw, conf_thres=self.args.conf)
+            else:
+                preds = ops.process_hef_end2end_results(input_data=preds, imgsz=img_hw, conf_thres=self.args.conf, nc=self.nc)
+        return preds
+
     def _process_single_crop(self, img_key, crop_im, crop_coords, *args, **kwargs):
         crop_im_batch = [crop_im]
         im = self.preprocess(crop_im_batch)
 
-        # Inference
         with self.profilers[1]:
             preds = self.inference(im, *args, **kwargs)
             if self.args.embed:
                 return
 
-        # Postprocess
         with self.profilers[2]:
             nhwc = getattr(self.model, "nhwc", False)
-            end2end = getattr(self.model, "end2end", False)
             img_hw = tuple(int(i) for i in (im.shape[1:3] if nhwc else im.shape[2:4]))
+            preds = self._decode_backend_preds(preds, img_hw)
 
-            if self.rknn:
-                if not end2end:
-                    preds = ops.process_rknn_dfl_results(
-                        input_data=preds, imgsz=img_hw, conf_thres=self.args.conf,
-                    )
-                else:
-                    preds = ops.process_rknn_end2end_results(
-                        input_data=preds, imgsz=img_hw, conf_thres=self.args.conf, nc=self.nc,
-                    )
-            elif self.hef:
-                if not end2end:
-                    preds = ops.process_hef_dfl_results(
-                        input_data=preds, imgsz=img_hw, conf_thres=self.args.conf,
-                    )
-                else:
-                    preds = ops.process_hef_end2end_results(
-                        input_data=preds, imgsz=img_hw, conf_thres=self.args.conf, nc=self.nc,
-                    )
-
-            if not self.nms:
+            if not getattr(self.model, "nms", False):
                 agnostic = self.args.agnostic_nms or self.is_multitask
-
                 crop_preds = nms.non_max_suppression(
                     preds, self.args.conf, self.args.iou,
-                    agnostic=agnostic,
-                    max_det=self.args.max_det,
-                    classes=self.args.classes,
-                    nc=self.nc,
+                    agnostic=agnostic, max_det=self.args.max_det,
+                    classes=self.args.classes, nc=self.nc,
                 )[0]
 
                 if len(crop_preds) == 0:
                     return
 
-                crop_h, crop_w = crop_im.shape[:2]
-                model_h, model_w = im.shape[2:]
-
-                crop_preds[:, :4] = ops.scale_boxes(
-                    (model_h, model_w), crop_preds[:, :4], (crop_h, crop_w)
-                )
+                crop_preds[:, :4] = ops.scale_boxes(im.shape[2:], crop_preds[:, :4], crop_im.shape[:2])
 
                 crop_preds_xywh = crop_preds.clone()
                 crop_preds_xywh[:, :4] = ops.xyxy2xywh(crop_preds[:, :4])
 
-                self.sahi_aggregator.add_crop_predictions(
-                    img_key, crop_preds_xywh, crop_coords
-                )
+                self.sahi_aggregator.add_crop_predictions(img_key, crop_preds_xywh, crop_coords)
 
     def _aggregate_final_predictions(self, img_key, orig_shape):
         with self.profilers[2]:
@@ -223,14 +207,7 @@ class DetectionPredictor(BasePredictor):
 
             if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
                 orig_img = self._sahi_orig_imgs[i]
-                # Normalize based on bit depth from config
                 bit_depth = getattr(self.args, 'image_bit_depth', 8)
-                if bit_depth == 8:
-                    norm_divisor = 255.0
-                elif bit_depth == 16:
-                    norm_divisor = 65_535.0
-                else:
-                    LOGGER.error(f"BitDepth {bit_depth} unsupported.")
                 norm_divisor = 65_535.0 if bit_depth == 16 else 255.0
                 orig_tensor = torch.from_numpy(orig_img).permute(2, 0, 1) \
                     .unsqueeze(0).float().to(self.device) / norm_divisor
@@ -259,50 +236,22 @@ class DetectionPredictor(BasePredictor):
                 if self.args.save_txt else ""
             LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}{s}")
             
-    # For standar inference without Sahi
-    def postprocess(self, preds, img, orig_imgs, nc: list[int] = [80]):
+    # Standard inference without SAHI
+    def postprocess(self, preds, img, orig_imgs):
         """Post-processes predictions and returns a list of Results objects."""
-
         nhwc = getattr(self.model, "nhwc", False)
-        end2end = getattr(self.model, "end2end", False)
         img_hw = tuple(int(i) for i in (img.shape[1:3] if nhwc else img.shape[2:4]))
 
-        if self.nms: # nms inside the graph
-            if self.engine:
-                preds = ops.process_nms_trt_results(preds, self.output_names)
-            elif self.onnx:
+        if getattr(self.model, "nms", False):
+            output_names = sorted(self.model.output_names) if hasattr(self.model, "output_names") else None
+            if getattr(self.model, "engine", False):
+                preds = ops.process_nms_trt_results(preds, output_names)
+            elif getattr(self.model, "onnx", False):
                 preds = ops.process_nms_onnx_results(preds)
-            elif self.hef:
+            elif getattr(self.model, "hef", False):
                 preds = ops.process_nms_hef_results(preds, img_hw=img_hw)
         else:
-            if self.rknn:
-                if not end2end:
-                    preds = ops.process_rknn_dfl_results(
-                        input_data=preds,
-                        imgsz=img_hw,
-                        conf_thres=self.args.conf,
-                    )
-                else:
-                    preds = ops.process_rknn_end2end_results(
-                        input_data=preds,
-                        imgsz=img_hw,
-                        conf_thres=self.args.conf,
-                        nc=self.nc,
-                    )
-            elif self.hef:
-                if not end2end:
-                    preds = ops.process_hef_dfl_results(
-                        input_data=preds,
-                        imgsz=img_hw,
-                        conf_thres=self.args.conf,
-                    )
-                else:
-                    preds = ops.process_hef_end2end_results(
-                        input_data=preds,
-                        imgsz=img_hw,
-                        conf_thres=self.args.conf,
-                        nc=self.nc,
-                    )
+            preds = self._decode_backend_preds(preds, img_hw)
 
             agnostic = self.args.agnostic_nms or self.is_multitask
             preds = nms.non_max_suppression(

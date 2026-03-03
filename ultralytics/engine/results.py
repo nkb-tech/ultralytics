@@ -557,7 +557,7 @@ class Results(SimpleClass):
                 label_lines, num_tasks = [], (len(b) - 4) // 2
                 for t in range(num_tasks):
                     conf, cls = float(b[4 + t * 2]), int(b[5 + t * 2])
-                    name = ("" if id is None else f"id:{id} ") + names[t][cls]
+                    name = ("" if id is None else f"id:{id} ") + str(names[t][cls])
                     label = (f"{name} {conf:.2f}" if conf else name) if labels else None
                     label_lines.append(label)
 
@@ -579,7 +579,7 @@ class Results(SimpleClass):
 
         # Plot Classify results
         if pred_probs is not None and show_probs:
-            text = ",\n".join(f"{names[j] if names else j} {pred_probs.data[j]:.2f}" for j in pred_probs.top5)
+            text = ",\n".join(f"{names[0][j] if names else j} {pred_probs.data[j]:.2f}" for j in pred_probs.top5)
             x = round(self.orig_shape[0] * 0.03)
             annotator.text([x, x], text, txt_color=(255, 255, 255))  # TODO: allow setting colors
 
@@ -678,11 +678,15 @@ class Results(SimpleClass):
         if len(self) == 0:
             return log_string if probs is not None else f"{log_string}(no detections), "
         if probs is not None:
-            log_string += f"{', '.join(f'{self.names[j]} {probs.data[j]:.2f}' for j in probs.top5)}, "
+            log_string += f"{', '.join(f'{self.names[0][j]} {probs.data[j]:.2f}' for j in probs.top5)}, "
         if boxes:
-            for c in boxes.cls.unique():
-                n = (boxes.cls == c).sum()  # detections per class
-                log_string += f"{n} {self.names[0][int(c)]}{'s' * (n > 1)}, "
+            num_tasks = (boxes.data.shape[-1] - 4) // 2
+            for t in range(num_tasks):
+                cls_col = boxes.data[:, 5 + t * 2]
+                for c in cls_col.unique():
+                    n = (cls_col == c).sum()
+                    name = str(self.names[t][int(c)])
+                    log_string += f"{n} {name}{'s' * (n > 1)}, "
         return log_string
 
     def save_txt(self, txt_file, save_conf=False):
@@ -720,19 +724,29 @@ class Results(SimpleClass):
         texts = []
         if probs is not None:
             # Classify
-            [texts.append(f"{probs.data[j]:.2f} {self.names[j]}") for j in probs.top5]
+            [texts.append(f"{probs.data[j]:.2f} {self.names[0][j]}") for j in probs.top5]
         elif boxes:
-            # Detect/segment/pose
+            # Detect/segment/pose (multitask-aware)
             for j, d in enumerate(boxes):
-                c, conf, id = int(d.cls), float(d.conf), None if d.id is None else int(d.id.item())
+                b = d.data[0]
+                num_tasks = (len(b) - 4) // 2
+                id = None if d.id is None else int(d.id.item())
+                c = int(b[5])  # primary task class for geometry line
                 line = (c, *(d.xyxyxyxyn.view(-1) if is_obb else d.xywhn.view(-1)))
                 if masks:
-                    seg = masks[j].xyn[0].copy().reshape(-1)  # reversed mask.xyn, (n,2) to (n*2)
+                    seg = masks[j].xyn[0].copy().reshape(-1)
                     line = (c, *seg)
                 if kpts is not None:
                     kpt = torch.cat((kpts[j].xyn, kpts[j].conf[..., None]), 2) if kpts[j].has_visible else kpts[j].xyn
                     line += (*kpt.reshape(-1).tolist(),)
-                line += (conf,) * save_conf + (() if id is None else (id,))
+                if save_conf:
+                    for t in range(num_tasks):
+                        line += (float(b[4 + t * 2]),)
+                if num_tasks > 1:
+                    for t in range(1, num_tasks):
+                        line += (int(b[5 + t * 2]),)
+                if id is not None:
+                    line += (id,)
                 texts.append(("%g " * len(line)).rstrip() % line)
 
         if texts:
@@ -772,7 +786,7 @@ class Results(SimpleClass):
             save_one_box(
                 d.xyxy,
                 self.orig_img.copy(),
-                file=Path(save_dir) / self.names[int(d.cls)] / f"{Path(file_name)}.jpg",
+                file=Path(save_dir) / self.names[0][int(d.cls)] / f"{Path(file_name)}.jpg",
                 BGR=True,
             )
 
@@ -805,7 +819,7 @@ class Results(SimpleClass):
             class_id = self.probs.top1
             results.append(
                 {
-                    "name": self.names[class_id],
+                    "name": self.names[0][class_id],
                     "class": class_id,
                     "confidence": round(self.probs.top1conf.item(), decimals),
                 }
@@ -815,16 +829,26 @@ class Results(SimpleClass):
         is_obb = self.obb is not None
         data = self.obb if is_obb else self.boxes
         h, w = self.orig_shape if normalize else (1, 1)
-        for i, row in enumerate(data):  # xyxy, track_id if tracking, conf, class_id
-            class_id, conf = int(row.cls), round(row.conf.item(), decimals)
+        for i, row in enumerate(data):
+            b = row.data[0]
+            num_tasks = (len(b) - 4) // 2
             box = (row.xyxyxyxy if is_obb else row.xyxy).squeeze().reshape(-1, 2).tolist()
             xy = {}
-            for j, b in enumerate(box):
-                xy[f"x{j + 1}"] = round(b[0] / w, decimals)
-                xy[f"y{j + 1}"] = round(b[1] / h, decimals)
-            result = {"name": self.names[class_id], "class": class_id, "confidence": conf, "box": xy}
+            for j, bp in enumerate(box):
+                xy[f"x{j + 1}"] = round(bp[0] / w, decimals)
+                xy[f"y{j + 1}"] = round(bp[1] / h, decimals)
+            class_id = int(b[5])
+            conf = round(float(b[4]), decimals)
+            result = {"name": self.names[0][class_id], "class": class_id, "confidence": conf, "box": xy}
+            if num_tasks > 1:
+                tasks = []
+                for t in range(num_tasks):
+                    t_conf = round(float(b[4 + t * 2]), decimals)
+                    t_cls = int(b[5 + t * 2])
+                    tasks.append({"name": str(self.names[t][t_cls]), "class": t_cls, "confidence": t_conf})
+                result["tasks"] = tasks
             if data.is_track:
-                result["track_id"] = int(row.id.item())  # track ID
+                result["track_id"] = int(row.id.item())
             if self.masks:
                 result["segments"] = {
                     "x": (self.masks.xy[i][:, 0] / w).round(decimals).tolist(),
