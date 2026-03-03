@@ -363,6 +363,7 @@ class Exporter:
             ncnn,
             imx,
             rknn,
+            hailo,
             executorch,
         ) = flags  # export booleans
         is_tf_format = any((saved_model, pb, tflite, edgetpu, tfjs))

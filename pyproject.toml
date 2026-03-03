@@ -68,9 +68,11 @@ dependencies = [
     "pyyaml>=5.3.1",
     "requests>=2.23.0",
     "scipy>=1.4.1",
-    "torch>=1.8.0",
+    "torch>=1.8.0; platform_machine != 'aarch64'",
+    "torch==2.2.0; platform_machine == 'aarch64'",  # rknn-toolkit2 requires torch<=2.2.0; torchvision 0.17.x compatibility
     "torch>=1.8.0,!=2.4.0; sys_platform == 'win32'", # Windows CPU errors w/ 2.4.0 https://github.com/ultralytics/ultralytics/issues/15049
-    "torchvision>=0.9.0",
+    "torchvision>=0.9.0; platform_machine != 'aarch64'",
+    "torchvision==0.17.2; platform_machine == 'aarch64'",  # matches torch 2.2.0 on aarch64
     "tqdm>=4.64.0", # progress bars
     "psutil", # system utilization
     "py-cpuinfo", # display CPU info
@@ -103,7 +105,9 @@ dev = [
     "mkdocs-macros-plugin>=1.0.5"  # duplicating content (i.e. export tables) in multiple places
 ]
 export = [
-    "onnx>=1.12.0", # ONNX export
+    "onnx>=1.12.0,<1.17.0; platform_machine != 'aarch64'", # ONNX export
+    "onnx==1.16.1; platform_machine == 'aarch64'",  # rknn-toolkit2 2.3.2 requires onnx==1.16.1; onnx 1.17+ removes onnx.mapping
+    "protobuf==3.20.3; platform_machine == 'aarch64'",  # rknn-toolkit2 2.3.2 requires protobuf==3.20.3; v4+ UPB backend removes FieldDescriptor.label
     "coremltools>=7.0; platform_system != 'Windows' and python_version <= '3.11'", # CoreML supported on macOS and Linux
     "scikit-learn>=1.3.2; platform_system != 'Windows' and python_version <= '3.11'", # CoreML k-means quantization
     "openvino>=2024.0.0", # OpenVINO export

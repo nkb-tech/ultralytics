@@ -69,9 +69,11 @@ def non_max_suppression(
     total_nc = sum(nc)
 
     # Post-processed format: (batch, N, 4+2*num_tasks) with [x1, y1, x2, y2, conf0, cls0, ...]
-    # Already xyxy — must NOT go through BCN path (xywh2xyxy would corrupt coordinates)
+    # Already xyxy — must NOT go through BCN path (xywh2xyxy would corrupt coordinates).
+    # Disambiguate from BCN (batch, channels, anchors): in postprocessed, last dim (cols) < dim 1 (N);
+    # in BCN, last dim (anchors) > dim 1 (channels).
     n_cols = prediction.shape[-1]
-    is_postprocessed = (n_cols == 4 + 2 * num_tasks) or end2end
+    is_postprocessed = ((n_cols == 4 + 2 * num_tasks) and n_cols < prediction.shape[1]) or end2end
 
     if is_postprocessed:
         output = []
@@ -391,7 +393,7 @@ def _nmm_core(
 
 
 def _merge_from_map(x, keep_to_merge, max_det=300):
-    """Merge boxes: use coordinates from the largest-area box, confidence/class from highest-conf box."""
+    """Merge overlapping boxes: keep the highest-confidence detection (coordinates + class)."""
     merged_indices = set()
     merged_boxes = []
 
@@ -403,19 +405,8 @@ def _merge_from_map(x, keep_to_merge, max_det=300):
         merged_indices.add(keep_idx)
 
         if merge_list:
-            all_indices = [keep_idx] + [m for m in merge_list if m not in merged_indices]
             for m in merge_list:
                 merged_indices.add(m)
-
-            if len(all_indices) > 1:
-                all_boxes = torch.stack([x[i] for i in all_indices])
-                # Coordinates from the largest-area box (most complete view of the object)
-                areas = (all_boxes[:, 2] - all_boxes[:, 0]) * (all_boxes[:, 3] - all_boxes[:, 1])
-                largest_idx = areas.argmax()
-                merged_box[:4] = all_boxes[largest_idx, :4]
-                # Confidence + class from highest-confidence box
-                best_conf_idx = all_boxes[:, 4].argmax()
-                merged_box[4:] = all_boxes[best_conf_idx, 4:]
 
         merged_boxes.append(merged_box)
 

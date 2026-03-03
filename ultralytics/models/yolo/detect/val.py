@@ -46,13 +46,17 @@ class DetectionValidator(BaseValidator):
         # SAHI state
         self.sahi_enabled = False
         self.sahi_aggregator = None
+        self.nms_strategy = getattr(self.args, "nms_strategy", "usual")
 
         # Detect SAHI dataset from dataloader
         if self.dataloader is not None and isinstance(self.dataloader.dataset, SAHIDataset):
             from ultralytics.models.yolo.detect.sahi_val import SAHICropAggregator
+            crop_size = getattr(self.args, "crop_size", 640)
+            overlap_ratio = getattr(self.args, "overlap_ratio", 0.2)
             self.sahi_enabled = True
             self.sahi_aggregator = SAHICropAggregator(self)
             self.sahi_aggregator.calculate_expected_crops(self.dataloader.dataset)
+            LOGGER.info(f"SAHI inference enabled: crop_size={crop_size}, overlap_ratio={overlap_ratio}, {self.args.nms_strategy} NMS.")
 
     def init_metrics(self, model: torch.nn.Module) -> None:
         """Initialize evaluation metrics.
@@ -403,6 +407,7 @@ class DetectionValidator(BaseValidator):
                 agnostic=self.args.single_cls or self.args.agnostic_nms,
                 max_det=self.args.max_det,
                 nc=self.nc,
+                nms_strategy=self.nms_strategy,
             )
             aggregated_pred = self._tensor_to_pred_dict(nms_results[0])
 
