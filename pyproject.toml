@@ -105,7 +105,7 @@ dev = [
     "mkdocs-macros-plugin>=1.0.5"  # duplicating content (i.e. export tables) in multiple places
 ]
 export = [
-    "onnx>=1.12.0,<1.17.0; platform_machine != 'aarch64'", # ONNX export
+    "onnx>=1.12.0,<1.17.0", # ONNX export; rknn-toolkit2 2.3.2 uses onnx.mapping removed in 1.17+
     "onnx==1.16.1; platform_machine == 'aarch64'",  # rknn-toolkit2 2.3.2 requires onnx==1.16.1; onnx 1.17+ removes onnx.mapping
     "protobuf==3.20.3; platform_machine == 'aarch64'",  # rknn-toolkit2 2.3.2 requires protobuf==3.20.3; v4+ UPB backend removes FieldDescriptor.label
     "coremltools>=7.0; platform_system != 'Windows' and python_version <= '3.11'", # CoreML supported on macOS and Linux

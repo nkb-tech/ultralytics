@@ -638,89 +638,93 @@ def process_rknn_dfl_results(
 
     return torch.cat((boxes, classes_conf), dim=1)
 
-def process_rknn_end2end_results(
+def _decode_end2end_outputs(
     input_data: List[Tensor],
-    imgsz: tuple[int, int] = (640, 640),
-    conf_thres: float = 0.01,
-    nc: list[int] = [80],
-    strides: tuple[int, ...] = (8, 16, 32),
+    nc: list[int],
+    strides: tuple[int, ...],
+    nhwc: bool = False,
 ) -> Tensor:
-    """Process RKNN end2end model outputs into predictions format for NMS.
+    """Shared decoder for RKNN / Hailo end2end model outputs.
 
-    This function takes raw outputs from an RKNN-exported YOLO model (with end2end=True)
-    and converts them to the standard prediction format expected by non_max_suppression.
+    Converts raw per-scale reg + cls tensors into the postprocessed format
+    expected by ``non_max_suppression(end2end=True)``:
+    ``(batch, num_anchors, 4 + 2 * num_tasks)``.
 
     Args:
-        input_data: List of tensors from RKNN model in format [reg0, cls0, reg1, cls1, ...]
-                   where reg shape is (bs, 4, h, w) and cls shape is (bs, nc, h, w).
-                   For multitask models: [reg0, cls0_task0, cls0_task1, ..., reg1, ...]
-        imgsz: Model input size (height, width) used during export.
-        conf_thres: Confidence threshold for early filtering (optional optimization).
-        nc: Number of classes. Can be int for single task or list for multitask.
-        strides: Feature map strides for each detection layer.
+        input_data: ``[reg0, cls0_t0, …, reg1, cls1_t0, …]``.
+            NCHW for RKNN, NHWC for Hailo (controlled by *nhwc*).
+        nc: Number of classes per task head.
+        strides: Feature-map strides per detection layer.
+        nhwc: If True, permute each tensor from NHWC → NCHW first.
 
     Returns:
-        Tensor: Predictions with shape (batch_size, num_anchors, 4 + sum(nc))
-                Box format is xyxy coordinates, scores are after sigmoid.
-
-    Examples:
-        >>> outputs = model(img)  # RKNN model outputs
-        >>> preds = process_rknn_end2end_results(outputs, imgsz=(640, 640), nc=80)
-        >>> results = non_max_suppression(preds, conf_thres=0.25, iou_thres=0.45)
+        Tensor: ``(batch, num_anchors, 4 + 2 * num_tasks)`` with xyxy boxes
+            and ``(conf, class_id)`` pairs per task.
     """
     from ultralytics.utils.tal import dist2bbox, make_anchors
 
     num_tasks = len(nc)
-
-    # Determine number of detection layers
-    # Format: [reg0, cls0_t0, cls0_t1, ..., reg1, cls1_t0, ...]
-    # Each scale has 1 reg + num_tasks cls outputs
     outputs_per_scale = 1 + num_tasks
     nl = len(input_data) // outputs_per_scale
-
     bs = input_data[0].shape[0]
 
-    regs, clss, feats = [], [], []
+    regs, feats = [], []
+    task_clss = [[] for _ in range(num_tasks)]
 
     for i in range(nl):
         base_idx = i * outputs_per_scale
-        reg = input_data[base_idx]  # (bs, 4, h, w)
-
-        regs.append(reg.view(bs, 4, -1))  # (bs, 4, h*w)
+        reg = input_data[base_idx]
+        if nhwc:
+            reg = reg.permute(0, 3, 1, 2).contiguous()
+        regs.append(reg.view(bs, 4, -1))
         feats.append(reg)
 
-        # Collect all task cls outputs for this scale
-        scale_cls = []
         for t in range(num_tasks):
-            cls = input_data[base_idx + 1 + t]  # (bs, nc[t], h, w)
-            scale_cls.append(cls.view(bs, nc[t], -1))  # (bs, nc[t], h*w)
-        clss.append(torch.cat(scale_cls, dim=1))  # (bs, total_nc, h*w)
+            cls = input_data[base_idx + 1 + t]
+            if nhwc:
+                cls = cls.permute(0, 3, 1, 2).contiguous()
+            task_clss[t].append(cls.view(bs, nc[t], -1))
 
-    # Concatenate across scales
     boxes = torch.cat(regs, dim=-1)  # (bs, 4, total_anchors)
-    scores = torch.cat(clss, dim=-1)  # (bs, total_nc, total_anchors)
 
-    # Generate anchors and strides
-    stride_tensor = torch.tensor(
-        strides[:nl],
-        device=input_data[0].device,
-        dtype=input_data[0].dtype,
-    )
+    stride_tensor = torch.tensor(strides[:nl], device=boxes.device, dtype=boxes.dtype)
     anchors, strides_out = make_anchors(feats, stride_tensor, 0.5)
-    anchors = anchors.transpose(0, 1)  # (2, total_anchors)
-    strides_out = strides_out.transpose(0, 1)  # (1, total_anchors)
+    anchors = anchors.transpose(0, 1)
+    strides_out = strides_out.transpose(0, 1)
 
-    # Decode boxes: boxes contains [left, top, right, bottom] distances from anchor
-    # dist2bbox converts ltrb distances to xyxy coordinates
     dbox = dist2bbox(boxes, anchors.unsqueeze(0), xywh=False, dim=1) * strides_out
+    dbox = dbox.permute(0, 2, 1)  # (bs, total_anchors, 4)
 
-    # Apply sigmoid to class scores
-    scores = scores.sigmoid()
+    task_pairs = []
+    for t in range(num_tasks):
+        scores_t = torch.cat(task_clss[t], dim=-1)  # (bs, nc[t], total_anchors)
+        if _is_logits(scores_t):
+            scores_t = scores_t.sigmoid()
+        conf, cls_id = scores_t.max(dim=1)
+        task_pairs.append(conf.unsqueeze(-1))
+        task_pairs.append(cls_id.float().unsqueeze(-1))
 
-    # Combine and transpose: (bs, 4+nc, anchors) -> (bs, anchors, 4+nc)
-    preds = torch.cat([dbox, scores], dim=1).permute(0, 2, 1)
+    return torch.cat([dbox] + task_pairs, dim=-1)
 
-    return preds
+
+def process_rknn_end2end_results(
+    input_data: List[Tensor],
+    nc: list[int] = [80],
+    strides: tuple[int, ...] = (8, 16, 32),
+    **_ignored,
+) -> Tensor:
+    """Process RKNN end2end outputs (NCHW) into postprocessed predictions for NMS.
+
+    Args:
+        input_data: ``[reg0, cls0, reg1, cls1, …]`` in NCHW format.
+        nc: Number of classes per task head.
+        strides: Feature-map strides per detection layer.
+
+    Returns:
+        Tensor: ``(batch, num_anchors, 4 + 2 * num_tasks)`` with xyxy boxes
+            and ``(conf, class_id)`` pairs.
+    """
+    return _decode_end2end_outputs(input_data, nc=nc, strides=strides, nhwc=False)
 
 def _is_logits(scores: Tensor) -> bool:
     """Return True if *scores* look like raw logits rather than post-sigmoid probabilities.
@@ -786,76 +790,19 @@ def process_hef_dfl_results(
 
 def process_hef_end2end_results(
     input_data: List[Tensor],
-    imgsz: tuple[int, int] = (640, 640),
-    conf_thres: float = 0.01,
     nc: list[int] = [80],
     strides: tuple[int, ...] = (8, 16, 32),
+    **_ignored,
 ) -> Tensor:
-    """Process Hailo end2end model outputs (NHWC) into predictions for NMS.
-
-    This is the Hailo equivalent of :func:`process_rknn_end2end_results`.
-    Hailo outputs are in NHWC format; this function permutes them to NCHW
-    before decoding boxes with ``dist2bbox`` and applying sigmoid to scores.
+    """Process Hailo end2end outputs (NHWC) into postprocessed predictions for NMS.
 
     Args:
-        input_data: List of NHWC tensors
-            ``[reg0, cls0_t0, cls0_t1, …, reg1, cls1_t0, …]``.
-            reg shape ``(bs, h, w, 4)``, cls shape ``(bs, h, w, nc[t])``.
-        imgsz: Model input size ``(height, width)``.
-        conf_thres: Confidence threshold (kept for API consistency).
+        input_data: ``[reg0, cls0, reg1, cls1, …]`` in NHWC format.
         nc: Number of classes per task head.
-        strides: Feature-map strides for each detection layer.
+        strides: Feature-map strides per detection layer.
 
     Returns:
-        Tensor: Predictions ``(batch, num_anchors, 4 + sum(nc))``,
-            box format xyxy, scores after sigmoid.
+        Tensor: ``(batch, num_anchors, 4 + 2 * num_tasks)`` with xyxy boxes
+            and ``(conf, class_id)`` pairs.
     """
-    from ultralytics.utils.tal import dist2bbox, make_anchors
-
-    num_tasks = len(nc)
-    outputs_per_scale = 1 + num_tasks
-    nl = len(input_data) // outputs_per_scale
-    bs = input_data[0].shape[0]
-
-    regs, clss, feats = [], [], []
-
-    for i in range(nl):
-        base_idx = i * outputs_per_scale
-        # Convert NHWC → NCHW
-        reg = input_data[base_idx].permute(0, 3, 1, 2).contiguous()  # (bs, 4, h, w)
-
-        regs.append(reg.view(bs, 4, -1))  # (bs, 4, h*w)
-        feats.append(reg)
-
-        # Collect all task cls outputs for this scale
-        scale_cls = []
-        for t in range(num_tasks):
-            cls = input_data[base_idx + 1 + t].permute(0, 3, 1, 2).contiguous()
-            scale_cls.append(cls.view(bs, nc[t], -1))  # (bs, nc[t], h*w)
-        clss.append(torch.cat(scale_cls, dim=1))  # (bs, total_nc, h*w)
-
-    # Concatenate across scales
-    boxes = torch.cat(regs, dim=-1)   # (bs, 4, total_anchors)
-    scores = torch.cat(clss, dim=-1)  # (bs, total_nc, total_anchors)
-
-    # Generate anchors and strides
-    stride_tensor = torch.tensor(
-        strides[:nl],
-        device=input_data[0].device,
-        dtype=input_data[0].dtype,
-    )
-    anchors, strides_out = make_anchors(feats, stride_tensor, 0.5)
-    anchors = anchors.transpose(0, 1)       # (2, total_anchors)
-    strides_out = strides_out.transpose(0, 1)  # (1, total_anchors)
-
-    # Decode boxes: ltrb distances → xyxy coordinates
-    dbox = dist2bbox(boxes, anchors.unsqueeze(0), xywh=False, dim=1) * strides_out
-
-    # Apply sigmoid only when the model exports raw logits
-    if _is_logits(scores):
-        scores = scores.sigmoid()
-
-    # Combine and transpose: (bs, 4+nc, anchors) → (bs, anchors, 4+nc)
-    preds = torch.cat([dbox, scores], dim=1).permute(0, 2, 1)
-
-    return preds
+    return _decode_end2end_outputs(input_data, nc=nc, strides=strides, nhwc=True)
