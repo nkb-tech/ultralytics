@@ -102,6 +102,7 @@ simplify: True # (bool) ONNX: simplify model using `onnxslim`
 opset: # (int, optional) ONNX: opset version
 workspace: 4 # (int) TensorRT: workspace size (GB)
 nms: False # (bool) CoreML: add NMS
+hybrid: True # (bool) RKNN: use hybrid quantization for INT8 (two-step), False uses standard rknn.build
 
 # Hyperparameters ------------------------------------------------------------------------------------------------------
 lr0: 0.01 # (float) initial learning rate (i.e. SGD=1E-2, Adam=1E-3)

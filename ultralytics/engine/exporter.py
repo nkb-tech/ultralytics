@@ -1596,9 +1596,9 @@ class Exporter:
             # quantized_method - layer, channel, group{SIZE}.
             # See https://github.com/airockchip/rknn-toolkit2/blob/master/doc/03_Rockchip_RKNPU_API_Reference_RKNN_Toolkit2_V2.3.2_EN.pdf
             kwargs = dict(
-                quantized_algorithm='mmse',
-                quantized_method='channel',
-                quantized_dtype='w8a8',
+                quantized_algorithm='kl_divergence',
+                quantized_method='channel', # channel, layer
+                quantized_dtype='w8a8', # asymmetric_quantized-8,  asymmetric_quantized-16, etc
                 quant_img_RGB2BGR=False,
             )
         else:
@@ -1618,23 +1618,25 @@ class Exporter:
             target_platform=self.args.name,
             optimization_level=3,
             compress_weight=False,
-            enable_flash_attention=False,
+            enable_flash_attention=True,
             remove_reshape=False,
             single_core_mode=True,
             custom_string=self.pretty_name,
             dynamic_input=dynamic_input,
+            output_optimize=True,
             **kwargs,
         )
         if ret != 0:
             LOGGER.error(f'{prefix} Config setting failed! Error code: {ret}')
             return f, None
-    
+
         ret = rknn.load_onnx(model=f)
         if ret != 0:
             LOGGER.error(f'{prefix} Load model failed! Error code: {ret}')
             return f, None
 
-        if int8:
+        if int8 and self.args.hybrid:
+            LOGGER.info(f"{prefix} using hybrid quantization (two-step)")
             ret = rknn.hybrid_quantization_step1(
                 dataset=self.args.data,
                 rknn_batch_size=self.args.batch,
@@ -1650,8 +1652,30 @@ class Exporter:
                     src.rename(export_path / src.name)
 
             # Force output-layer Convs to FP16 — INT8 destroys logit precision
-            cfg_path = export_path / f"{onnx_stem}.quantization.cfg"
-            self._patch_rknn_quant_cfg(f, cfg_path, prefix)
+            # cfg_path = export_path / f"{onnx_stem}.quantization.cfg"
+            # self._patch_rknn_quant_cfg(f, cfg_path, prefix)
+
+            if check_version("rknn-toolkit2", ">=2.4.0"):
+                # >=2.4 forbids load_onnx before step2; rebuild a clean instance
+                rknn.release()
+                rknn = RKNN(
+                    verbose=self.args.verbose,
+                    verbose_file=str(export_path / 'rknn.log'),
+                )
+                rknn.config(
+                    mean_values=[[0., 0., 0.]],
+                    std_values=[[255., 255., 255.]],
+                    target_platform=self.args.name,
+                    optimization_level=3,
+                    compress_weight=False,
+                    enable_flash_attention=True,
+                    remove_reshape=False,
+                    single_core_mode=True,
+                    custom_string=self.pretty_name,
+                    dynamic_input=dynamic_input,
+                    output_optimize=True,
+                    **kwargs,
+                )
 
             ret = rknn.hybrid_quantization_step2(
                 model_input=str(export_path / f"{onnx_stem}.model"),
@@ -1663,10 +1687,10 @@ class Exporter:
                 return f, None
         else:
             ret = rknn.build(
-                do_quantization=False,
+                do_quantization=int8,
                 dataset=self.args.data,
                 rknn_batch_size=self.args.batch,
-                auto_hybrid=True if self.args.data else False,
+                auto_hybrid=False,
             )
             if ret != 0:
                 LOGGER.error(f'{prefix} Build model failed! Error code: {ret}')
