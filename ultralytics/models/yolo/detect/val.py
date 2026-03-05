@@ -143,9 +143,8 @@ class DetectionValidator(BaseValidator):
             if self.end2end:
                 preds = ops.process_rknn_end2end_results(
                     input_data=preds,
-                    imgsz=self._img_hw,
                     nc=self.nc,
-                    strides=self.model.stride if hasattr(self.model, "stride") else (8, 16, 32),
+                    strides=self.model.strides if hasattr(self.model, "strides") else (8, 16, 32),
                 )
             else:
                 preds = ops.process_rknn_dfl_results(
@@ -168,8 +167,6 @@ class DetectionValidator(BaseValidator):
                 else:
                     preds = ops.process_hef_end2end_results(
                         input_data=preds,
-                        imgsz=self._img_hw,
-                        conf_thres=self.args.conf,
                         nc=self.nc,
                     )
 

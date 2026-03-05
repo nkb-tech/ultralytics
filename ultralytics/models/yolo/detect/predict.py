@@ -155,6 +155,8 @@ class DetectionPredictor(BasePredictor):
                     preds, self.args.conf, self.args.iou,
                     agnostic=self.args.agnostic_nms or self.is_multitask,
                     max_det=self.args.max_det, classes=self.args.classes, nc=self.nc,
+                    end2end=getattr(self.model, "end2end", False),
+                    rotated=self.args.task == "obb",
                 )[0]
 
             if len(result) == 0:
@@ -200,6 +202,8 @@ class DetectionPredictor(BasePredictor):
             agnostic=self.args.agnostic_nms or self.is_multitask,
             max_det=self.args.max_det, classes=self.args.classes,
             nc=self.nc, nms_strategy=nms_strategy,
+            end2end=getattr(self.model, "end2end", False),
+            rotated=self.args.task == "obb",
         )[0]
 
     def _build_results(self, preds_list, im0s, paths, s):
@@ -246,13 +250,17 @@ class DetectionPredictor(BasePredictor):
         """Decode RKNN/HEF backend-specific prediction formats."""
         end2end = getattr(self.model, "end2end", False)
         if getattr(self.model, "rknn", False):
-            if not end2end:
+            if end2end:
+                preds = ops.process_rknn_end2end_results(
+                    input_data=preds,
+                    nc=self.nc,
+                    strides=self.model.strides if hasattr(self.model, "strides") else (8, 16, 32),
+                )
+            else:
                 preds = ops.process_rknn_dfl_results(input_data=preds, imgsz=img_hw, conf_thres=self.args.conf)
-            else:
-                preds = ops.process_rknn_end2end_results(input_data=preds, imgsz=img_hw, conf_thres=self.args.conf, nc=self.nc)
         elif getattr(self.model, "hef", False):
-            if not end2end:
-                preds = ops.process_hef_dfl_results(input_data=preds, imgsz=img_hw, conf_thres=self.args.conf)
+            if end2end:
+                preds = ops.process_hef_end2end_results(input_data=preds, nc=self.nc)
             else:
-                preds = ops.process_hef_end2end_results(input_data=preds, imgsz=img_hw, conf_thres=self.args.conf, nc=self.nc)
+                preds = ops.process_hef_dfl_results(input_data=preds, imgsz=img_hw, conf_thres=self.args.conf)
         return preds

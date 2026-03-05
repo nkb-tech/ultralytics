@@ -185,7 +185,7 @@ class AutoBackend(nn.Module):
         if int8 and fp32:
             LOGGER.warning("WARNING ⚠️ int8=True and fp32=True are mutually exclusive, setting fp32=False.")
             fp32 = False
-        stride = 32  # default stride
+        strides = (8, 16, 32)  # default per-level strides
         model, metadata = None, None
 
         # Set device
@@ -224,7 +224,7 @@ class AutoBackend(nn.Module):
         if pt:
             if hasattr(model, "kpt_shape"):
                 kpt_shape = model.kpt_shape
-            stride = max(int(model.stride.max()), 32)
+            strides = tuple(sorted(int(s) for s in model.stride))
             names = model.module.names if hasattr(model, "module") else model.names
             model.half() if fp16 else model.float()
             self.model = model
@@ -586,11 +586,13 @@ class AutoBackend(nn.Module):
             metadata = YAML.load(metadata)
         if metadata and isinstance(metadata, dict):
             for k, v in metadata.items():
-                if k in {"stride", "batch"}:
+                if k in {"batch"}:
                     metadata[k] = int(v)
-                elif k in {"imgsz", "names", "kpt_shape"} and isinstance(v, str):
+                elif k in {"imgsz", "names", "kpt_shape", "strides"} and isinstance(v, str):
                     metadata[k] = eval(v)
-            stride = metadata["stride"]
+            strides = tuple(metadata.get("strides", metadata.get("stride", (8, 16, 32))))
+            if isinstance(strides, int):
+                strides = (strides,)
             task = metadata["task"]
             batch = metadata["batch"]
             imgsz = metadata["imgsz"]
@@ -622,6 +624,7 @@ class AutoBackend(nn.Module):
             for p in model.parameters():
                 p.requires_grad = False
 
+        stride = max(strides)
         self.__dict__.update(locals())  # assign all variables to self
 
     @staticmethod

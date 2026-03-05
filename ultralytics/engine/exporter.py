@@ -529,7 +529,7 @@ class Exporter:
             "version": __version__,
             "license": "AGPL-3.0 License (https://ultralytics.com/license)",
             "docs": "https://docs.ultralytics.com",
-            "stride": int(max(model.stride)),
+            "strides": sorted(int(s) for s in model.stride),
             "task": model.task,
             "batch": self.args.batch,
             "imgsz": self.imgsz,
@@ -1497,6 +1497,72 @@ class Exporter:
         YAML.save(Path(f) / "metadata.yaml", self.metadata)  # add metadata.yaml
         return f, None
 
+    @staticmethod
+    def _patch_rknn_quant_cfg(onnx_path: str, cfg_path, prefix: str = ""):
+        """Add quantization-sensitive layers to ``custom_quantize_layers`` as float16.
+
+        INT8 quantization in the deep backbone/neck blocks accumulates error
+        that destroys the small positive detection logits while preserving the
+        bulk of negative (non-detection) values.  Cosine similarity stays high
+        (>0.999) because negatives dominate, but sigmoid confidences drop from
+        ~0.88 to ~0.003.
+
+        Layers promoted to FP16:
+
+        1. **Cls-head** (``cv3.``) — raw logits need full precision.
+        2. **Reg-head** (``one2one_cv2.``) — box regression accuracy.
+        3. **Deep backbone/neck** (``model.19/``, ``model.20/``, ``model.22/``)
+           — worst accumulated error sources that feed the detect head.
+        4. **Attention / FFN** (``/attn/``, ``/ffn/``) — quantization-sensitive
+           operations inside PSA blocks.
+
+        Sigmoid outputs are skipped (RKNN fuses them into SiLU).
+        Layers not present in ``quantize_parameters`` (fused by RKNN) are skipped.
+        """
+        import onnx
+
+        model = onnx.load(onnx_path)
+
+        _FP16_PATTERNS = ("cv3.",)
+
+        fp16_outputs = []
+        for node in model.graph.node:
+            if "Sigmoid" in node.name:
+                continue
+            if any(p in node.name for p in _FP16_PATTERNS):
+                for out in node.output:
+                    fp16_outputs.append(out)
+
+        if not fp16_outputs:
+            LOGGER.info(f"{prefix} no quantization-sensitive layers found in ONNX — skipping")
+            return
+
+        cfg_text = Path(cfg_path).read_text()
+        marker = "quantize_parameters:"
+        if marker not in cfg_text:
+            LOGGER.warning(f"{prefix} '{marker}' section not found in config — skipping")
+            return
+
+        custom_section, quant_section = cfg_text.split(marker, 1)
+
+        new_entries = []
+        for name in fp16_outputs:
+            yaml_key = f"'{name}'" if name.isdigit() else name
+            if yaml_key in custom_section:
+                continue
+            if f"\n    {yaml_key}:" not in quant_section and f"\n    {name}_int8:" not in quant_section:
+                continue
+            new_entries.append(f"    {yaml_key}: float16")
+
+        if not new_entries:
+            LOGGER.info(f"{prefix} all {len(fp16_outputs)} sensitive layers already in custom_quantize_layers")
+            return
+
+        insert_block = "\n".join(new_entries) + "\n"
+        cfg_text = custom_section + insert_block + marker + quant_section
+        Path(cfg_path).write_text(cfg_text)
+        LOGGER.info(f"{prefix} added {len(new_entries)} sensitive layers to custom_quantize_layers as float16")
+
     @try_export
     def export_rknn(self, prefix=colorstr("RKNN:")):
         """Export YOLO model to RKNN format."""
@@ -1576,12 +1642,16 @@ class Exporter:
             if ret != 0:
                 LOGGER.error(f'{prefix} Hybrid quantization step1 failed! Error code: {ret}')
                 return f, None
-            # Move generated files from CWD to export_path (hybrid_quantization_step1 outputs to CWD)
             onnx_stem = Path(f).stem
             for ext in [".model", ".data", ".quantization.cfg"]:
                 src = Path(onnx_stem + ext)
                 if src.exists():
                     src.rename(export_path / src.name)
+
+            # Force output-layer Convs to FP16 — INT8 destroys logit precision
+            cfg_path = export_path / f"{onnx_stem}.quantization.cfg"
+            self._patch_rknn_quant_cfg(f, cfg_path, prefix)
+
             ret = rknn.hybrid_quantization_step2(
                 model_input=str(export_path / f"{onnx_stem}.model"),
                 data_input=str(export_path / f"{onnx_stem}.data"),
