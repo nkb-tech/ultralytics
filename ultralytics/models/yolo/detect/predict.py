@@ -244,8 +244,6 @@ class DetectionPredictor(BasePredictor):
             s = f"\n{nl} label{'s' * (nl > 1)} saved to {self.save_dir / 'labels'}" if self.args.save_txt else ""
             LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}{s}")
 
-    # ── Helpers ────────────────────────────────────────────────────────────
-
     def _decode_backend_preds(self, preds, img_hw):
         """Decode RKNN/HEF backend-specific prediction formats."""
         end2end = getattr(self.model, "end2end", False)

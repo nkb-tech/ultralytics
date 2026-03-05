@@ -195,6 +195,7 @@ CFG_BOOL_KEYS = {  # boolean-only arguments
     "dynamic",
     "simplify",
     "nms",
+    "hybrid",
     "profile",
     "multi_scale",
     "nms",
