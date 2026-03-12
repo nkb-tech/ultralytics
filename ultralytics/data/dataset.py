@@ -61,6 +61,7 @@ class YOLODataset(BaseDataset):
         self.use_segments = task == "segment"
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
+        self.use_tags = task == "jde"
         self.data = data
         self.min_bbox = data.get("min_bbox", 10)
         self.min_imgsz = data.get("min_imgsz", 25)
@@ -100,6 +101,8 @@ class YOLODataset(BaseDataset):
                     self.label_files,
                     repeat(self.prefix),
                     repeat(self.use_keypoints),
+                    repeat(self.use_tags),
+                    repeat(1),              # n_tag_attrs for now
                     repeat(nkpt),
                     repeat(ndim),
                     repeat(self.single_cls),
@@ -107,7 +110,7 @@ class YOLODataset(BaseDataset):
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
-            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, ncpt_f, msg in pbar:
+            for im_file, lb, shape, segments, keypoint, tags, nm_f, nf_f, ne_f, ncpt_f, msg in pbar:
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
@@ -127,6 +130,9 @@ class YOLODataset(BaseDataset):
                     lb = lb[valid_mask]
                     fb += len(lb)
                     
+                    if tags is not None:
+                        tags = tags[valid_mask]
+
                     # Filter segments by the same mask
                     if segments:
                         segments = [seg for seg, valid in zip(segments, valid_mask) if valid]
@@ -142,8 +148,13 @@ class YOLODataset(BaseDataset):
                             "keypoints": keypoint,
                             "normalized": True,
                             "bbox_format": "xywh",
+                            
                         }
                     )
+                    if self.use_tags:
+                        label_entry["tags"] = tags
+
+                    x["labels"].append(label_entry)
                 # elif im_file and shape is not None:
                 #     x["labels"].append(
                 #         {
@@ -213,6 +224,38 @@ class YOLODataset(BaseDataset):
                 lb["segments"] = []
         if len_cls == 0:
             LOGGER.warning(f"WARNING ⚠️ No labels found in {cache_path}, training may not work correctly. {HELP_URL}")
+        
+        # Add tags for JDE training
+        if getattr(self, "use_tags", False):
+            import numpy as np
+
+            # 1) find max existing tag (if some labels have real track ids)
+            highest_tag = 0
+            for lb in labels:
+                t = lb.get("tags", None)
+                if t is not None and len(t):
+                    t = np.asarray(t).reshape(-1, 1)
+                    lb["tags"] = t
+                    highest_tag = max(highest_tag, int(np.max(t)))
+
+            # 2) assign unique tags where missing
+            new_start_tag = highest_tag + 1
+            for lb in labels:
+                if lb.get("tags", None) is None:
+                    N = lb["cls"].shape[0]
+                    lb["tags"] = np.arange(new_start_tag, new_start_tag + N, dtype=np.int64).reshape(N, 1)
+                    new_start_tag += N
+
+            # 3) enforce tags shape (N, K) and dtype int64 for all labels
+            for lb in labels:
+                lb["tags"] = (
+                    np.asarray(lb["tags"])
+                    .reshape(-1, lb["tags"].shape[-1] if np.asarray(lb["tags"]).ndim > 1 else 1)
+                    .astype(np.int64)
+                )
+        else:
+            for lb in labels:
+                lb.pop("tags", None)
         return labels
 
     def build_transforms(self, hyp=None):
@@ -273,21 +316,41 @@ class YOLODataset(BaseDataset):
 
     @staticmethod
     def collate_fn(batch):
-        """Collates data samples into batches."""
+        """Collates data samples into batches (key-safe)."""
         new_batch = {}
         keys = batch[0].keys()
-        values = list(zip(*[list(b.values()) for b in batch]))
-        for i, k in enumerate(keys):
-            value = values[i]
+
+        for k in keys:
+            vals = [b[k] for b in batch]  # key-safe, no reliance on dict order
+
             if k == "img":
-                value = torch.stack(value, 0)
-            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
-                value = torch.cat(value, 0)
-            new_batch[k] = value
+                new_batch[k] = torch.stack(vals, 0)
+            elif k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb", "tags"}:
+                # some entries may be missing tags -> treat as empty
+                vals = [v for v in vals if v is not None]
+                if len(vals):
+                    new_batch[k] = torch.cat(vals, 0)
+                else:
+                    new_batch[k] = None
+            else:
+                # keep as list (strings, tuples, metadata)
+                new_batch[k] = vals
+
+        # batch_idx special handling
         new_batch["batch_idx"] = list(new_batch["batch_idx"])
         for i in range(len(new_batch["batch_idx"])):
-            new_batch["batch_idx"][i] += i  # add target image index for build_targets()
+            new_batch["batch_idx"][i] += i
         new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
+
+        # Debug checks
+        # for k in ("batch_idx", "cls", "bboxes", "tags"):
+        #     if k in new_batch:
+        #         v = new_batch[k]
+        #         if isinstance(v, str):
+        #             raise TypeError(f"[COLLATE] new_batch['{k}'] is str: {v[:200]}")
+        #         if v is not None and not torch.is_tensor(v):
+        #             raise TypeError(f"[COLLATE] new_batch['{k}'] is not Tensor: {type(v)}")
+
         return new_batch
 
 

@@ -3,6 +3,7 @@
 import numpy as np
 import scipy
 from scipy.spatial.distance import cdist
+from .kalman_filter import chi2inv95
 
 from ultralytics.utils.metrics import batch_probiou, bbox_ioa
 
@@ -156,3 +157,32 @@ def fuse_score(cost_matrix: np.ndarray, detections: list) -> np.ndarray:
     det_scores = np.expand_dims(det_scores, axis=0).repeat(cost_matrix.shape[0], axis=0)
     fuse_sim = iou_sim * det_scores
     return 1 - fuse_sim  # fuse_cost
+
+def fuse_motion(kf, cost_matrix, tracks, detections, only_position=False, lambda_=0.98):
+    if cost_matrix.size == 0:
+        return cost_matrix
+    gating_dim = 2 if only_position else 4
+    gating_threshold = chi2inv95[gating_dim]
+    measurements = np.asarray([det.to_xyah() for det in detections])
+    for row, track in enumerate(tracks):
+        gating_distance = kf.gating_distance(
+            track.mean, track.covariance, measurements, only_position, metric='maha')
+        cost_matrix[row, gating_distance > gating_threshold] = np.inf
+        cost_matrix[row] = lambda_ * cost_matrix[row] + (1 - lambda_) * gating_distance
+    return cost_matrix
+
+def gate(cost_matrix, emb_cost):
+    """
+    :param tracks: list[STrack]
+    :param detections: list[BaseTrack]
+    :param metric:
+    :return: cost_matrix np.ndarray
+    """
+
+    if cost_matrix.size == 0:
+        return cost_matrix
+
+    index = emb_cost > 0.3
+    cost_matrix[index] = 1
+
+    return cost_matrix

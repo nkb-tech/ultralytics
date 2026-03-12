@@ -336,6 +336,65 @@ def _filter_bboxes(
 
     return new_bboxes[:count], new_cls[:count]
 
+@nb.jit(nopython=True, fastmath=True, cache=True)
+def _filter_bboxes_keep_idx(
+    boxes_xyxy: np.ndarray,
+    cls: np.ndarray,
+    x1: int, y1: int, x2: int, y2: int,
+    min_coverage: float
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Same as _filter_bboxes, but also returns keep_idx indices w.r.t. input arrays.
+    """
+    crop_w, crop_h = x2 - x1, y2 - y1
+    n = len(boxes_xyxy)
+
+    if n == 0:
+        return (
+            np.empty((0, 4), dtype=np.float64),
+            np.empty((0,), dtype=np.float64),
+            np.empty((0,), dtype=np.int64),
+        )
+
+    new_bboxes = np.empty((n, 4), dtype=np.float64)
+    new_cls = np.empty(n, dtype=np.float64)
+    keep_idx = np.empty(n, dtype=np.int64)
+    count = 0
+
+    for i in range(n):
+        box = boxes_xyxy[i]
+
+        inter_x1 = max(box[0], x1)
+        inter_y1 = max(box[1], y1)
+        inter_x2 = min(box[2], x2)
+        inter_y2 = min(box[3], y2)
+
+        if inter_x1 >= inter_x2 or inter_y1 >= inter_y2:
+            continue
+
+        box_area = (box[2] - box[0]) * (box[3] - box[1])
+        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+        if inter_area / (box_area + 1e-6) < min_coverage:
+            continue
+
+        # transform to crop coords
+        new_x1 = max(box[0] - x1, 0)
+        new_y1 = max(box[1] - y1, 0)
+        new_x2 = min(box[2] - x1, crop_w)
+        new_y2 = min(box[3] - y1, crop_h)
+
+        # normalized xywh
+        new_bboxes[count, 0] = (new_x1 + new_x2) / 2 / crop_w
+        new_bboxes[count, 1] = (new_y1 + new_y2) / 2 / crop_h
+        new_bboxes[count, 2] = (new_x2 - new_x1) / crop_w
+        new_bboxes[count, 3] = (new_y2 - new_y1) / crop_h
+
+        new_cls[count] = cls[i]
+        keep_idx[count] = i
+        count += 1
+
+    return new_bboxes[:count], new_cls[:count], keep_idx[:count]
+
 
 @nb.jit(nopython=True, fastmath=True, cache=True)
 def _generate_random_coords_numba(
@@ -544,6 +603,14 @@ class SAHIDataset(YOLODataset):
         else:
             crop_labels = self._transform_labels_to_crop(labels, coords, actual_h, actual_w)
 
+        if "tags" in crop_labels and crop_labels["tags"] is not None:
+            t = np.asarray(crop_labels["tags"])
+            n_tags = t.shape[0] if t.ndim >= 1 else 0
+            if n_tags != len(crop_labels["bboxes"]):
+                raise ValueError(
+                    f"[SAHI] tags length {n_tags} != bboxes length {len(crop_labels['bboxes'])}"
+                )
+
         labels.update({
             "img": crop_im,
             "ori_shape": (actual_h, actual_w),
@@ -556,6 +623,7 @@ class SAHIDataset(YOLODataset):
             "slice_idx": slice_idx,
             "slice_coords": coords,
             "is_full_image": is_full_image,
+            "tags": crop_labels.get("tags", None),
         })
 
         return self.update_labels_info(labels)
@@ -586,12 +654,19 @@ class SAHIDataset(YOLODataset):
         img_h: int,
         img_w: int,
     ) -> Dict[str, Any]:
-        """Transform labels for letterboxed full image."""
+        """Transform labels for letterboxed full image.
+        IMPORTANT: Any filtering/reordering must be applied synchronously to
+        bboxes/cls/tags/segments to keep per-instance alignment (ReID tags safety, future multihead).
+        """
         n_cls_cols = len(self.nc) if isinstance(self.nc, (list, tuple)) else 1
         
         bboxes = labels.get("bboxes", np.zeros((0, 4), dtype=np.float32))
         cls = labels.get("cls", np.zeros((0, n_cls_cols), dtype=np.float32))
         segments = labels.get("segments", [])
+
+        tags = labels.get("tags", None)
+        if tags is not None and not isinstance(tags, np.ndarray):
+            tags = np.array(tags)
 
         if not isinstance(bboxes, np.ndarray):
             bboxes = np.array(bboxes, dtype=np.float32) if bboxes is not None and len(bboxes) > 0 else np.zeros((0, 4), dtype=np.float32)
@@ -604,10 +679,13 @@ class SAHIDataset(YOLODataset):
             cls = cls.reshape(-1, n_cls_cols) if len(cls) > 0 else np.zeros((0, n_cls_cols), dtype=np.float32)
 
         if len(bboxes) == 0:
+            if tags is not None:
+                tags = tags.astype(np.int64, copy=False).reshape(-1)
             return {
                 "bboxes": np.zeros((0, 4), dtype=np.float32),
-                "cls": cls.astype(np.float32),
+                "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
                 "segments": [],
+                "tags": tags,
             }
 
         ratio, (pad_w, pad_h) = ratio_pad
@@ -628,10 +706,13 @@ class SAHIDataset(YOLODataset):
                     "bboxes": np.zeros((0, 4), dtype=np.float32),
                     "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
                     "segments": [],
+                    "tags": np.zeros((0,), dtype=np.int64) if tags is not None else None,
                 }
-            
+            # Apply SAME indices to all per-instance arrays
             bboxes = bboxes[valid_indices]
             cls = cls[valid_indices]
+            if tags is not None:
+                tags = tags[valid_indices]
         else:
             new_segments = []
 
@@ -646,6 +727,7 @@ class SAHIDataset(YOLODataset):
             "bboxes": new_bboxes.astype(np.float32),
             "cls": cls.astype(np.float32),
             "segments": new_segments,
+            "tags": tags,
         }
 
 
@@ -665,6 +747,10 @@ class SAHIDataset(YOLODataset):
         cls = labels.get("cls", np.array([]))
         segments = labels.get("segments", [])
 
+        tags = labels.get("tags", None)
+        if tags is not None and not isinstance(tags, np.ndarray):
+            tags = np.array(tags)   
+
         if not isinstance(bboxes, np.ndarray):
             bboxes = np.array(bboxes) if bboxes is not None and len(bboxes) > 0 else np.zeros((0, 4))
         if not isinstance(cls, np.ndarray):
@@ -678,6 +764,7 @@ class SAHIDataset(YOLODataset):
                 "bboxes": np.zeros((0, 4), dtype=np.float32),
                 "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
                 "segments": [],
+                "tags": tags,
             }
 
         if bboxes.ndim == 1:
@@ -706,6 +793,7 @@ class SAHIDataset(YOLODataset):
                     "bboxes": np.zeros((0, 4), dtype=np.float32),
                     "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
                     "segments": [],
+                    "tags": np.zeros((0,), dtype=np.int64) if tags is not None else None,
                 }
             
             # Transform only valid bboxes to crop coordinates
@@ -727,30 +815,53 @@ class SAHIDataset(YOLODataset):
                 new_bboxes[i, 3] = (new_y2 - new_y1) / crop_h
             
             new_cls = cls[valid_indices].astype(np.float32)
+
+            if tags is not None:
+                tags = tags[valid_indices]
+
+            return {
+                "bboxes": new_bboxes.astype(np.float32),
+                "cls": new_cls.astype(np.float32),
+                "segments": new_segments,
+                "tags": tags,
+            }
             
         else:
-            # Detection only or segments don't match bboxes - use numba-accelerated bbox filtering
+            # Detection-only or segments don't match bboxes
             boxes_xyxy = _xywh_to_xyxy(bboxes.astype(np.float64), img_h, img_w)
             cls_flat = cls[:, 0].astype(np.float64) if cls.ndim > 1 else cls.astype(np.float64)
-            
-            new_bboxes, filtered_cls = _filter_bboxes(
+
+            new_bboxes, _, keep_idx = _filter_bboxes_keep_idx(
                 boxes_xyxy, cls_flat, x1, y1, x2, y2, self.min_object_coverage
             )
-            
+
             if len(new_bboxes) == 0:
                 return {
                     "bboxes": np.zeros((0, 4), dtype=np.float32),
                     "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
                     "segments": [],
+                    "tags": np.zeros((0,), dtype=np.int64) if tags is not None else None,
                 }
-            
+
+            # keep_idx относится к исходным bboxes/cls/tags
+            cls_kept = cls[keep_idx]  # работает для [N,1] и [N,T]
+
+            if tags is not None:
+                tags = tags[keep_idx]
+
             new_bboxes = new_bboxes.astype(np.float32)
-            # Restore multi-column cls if needed
-            if n_cls_cols > 1:
-                new_cls = np.zeros((len(filtered_cls), n_cls_cols), dtype=np.float32)
-                new_cls[:, 0] = filtered_cls
-            else:
-                new_cls = filtered_cls.reshape(-1, 1).astype(np.float32)
+
+            # cls к (N, n_cls_cols)
+            new_cls = cls_kept.astype(np.float32)
+            if new_cls.ndim == 1:
+                new_cls = new_cls.reshape(-1, 1)
+
+            # если dataset хранил cls как 1 колонку, а задач больше (multihead)
+            if new_cls.shape[1] != n_cls_cols and new_cls.shape[1] == 1 and n_cls_cols > 1:
+                tmp = np.zeros((len(new_cls), n_cls_cols), dtype=np.float32)
+                tmp[:, 0] = new_cls[:, 0]
+                new_cls = tmp
+
             new_segments = []
 
         # Format outputs
@@ -760,12 +871,14 @@ class SAHIDataset(YOLODataset):
                 "bboxes": np.zeros((0, 4), dtype=np.float32),
                 "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
                 "segments": [],
+                "tags": np.zeros((0,), dtype=np.int64) if tags is not None else None,
             }
-        
+
         return {
             "bboxes": new_bboxes,
             "cls": new_cls,
             "segments": new_segments,
+            "tags": tags,
         }
 
 

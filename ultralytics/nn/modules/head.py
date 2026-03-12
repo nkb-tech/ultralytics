@@ -344,7 +344,130 @@ class Detect(nn.Module):
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
 
+class JDE(Detect):
+    """JDE head: box + cls + embedding in one forward_head pass."""
 
+    def __init__(self, nc, embed_dim, reg_max=16, end2end=False, ch=()):
+        super().__init__(
+            nc=[nc] if isinstance(nc, int) else nc,
+            reg_max=reg_max,
+            end2end=end2end,
+            ch=ch,
+        )
+
+        if end2end:
+            raise NotImplementedError("JDE stage-1 supports end2end=False only.")
+
+        self.embed_dim = int(embed_dim)
+        self.nc_det = sum(self.nc) if isinstance(self.nc, (list, tuple)) else int(self.nc)
+
+        # final inference tensor channels: 4 decoded box + sum(nc) cls + embed_dim
+        # raw head outputs still use reg_max*4 + sum(nc) + embed_dim
+        self.no = self.reg_max * 4 + self.nc_det + self.embed_dim
+
+        c4 = max(ch[0] // 4, self.embed_dim) if len(ch) else self.embed_dim
+        self.cv4 = nn.ModuleList(
+            self._make_head(self.head_mode, c, c4, self.embed_dim) for c in ch
+        )
+
+    @property
+    def one2many(self) -> dict:
+        """Returns one-to-many heads including embedding head."""
+        return dict(box_head=self.cv2, cls_head=self.cv3, emb_head=self.cv4)
+
+    def forward_head(
+        self,
+        x: list[Tensor],
+        box_head: nn.ModuleList | None = None,
+        cls_head: nn.ModuleList | None = None,
+        emb_head: nn.ModuleList | None = None,
+    ) -> dict[str, Tensor] | list[Tensor]:
+        """Forward pass through box/classification/embedding heads in one pass."""
+        if box_head is None or cls_head is None or emb_head is None:
+            return dict()
+
+        # RKNN path: keep raw per-scale outputs
+        if self.export and self.format == "rknn":
+            y = []
+            for i in range(self.nl):
+                y.append(box_head[i](x[i]))
+                for task_head in cls_head:
+                    cls = task_head[i](x[i]).sigmoid_()
+                    cls_sum = cls.sum(dim=1, keepdim=True).clamp_(0, 1)
+                    y.append(cls)
+                    y.append(cls_sum)
+                y.append(emb_head[i](x[i]))
+            return y
+
+        bs = x[0].shape[0]
+
+        boxes = torch.cat(
+            [box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)],
+            dim=-1,
+        )
+
+        scores_list = []
+        for task_head in cls_head:
+            task_scores = torch.cat(
+                [task_head[i](x[i]).view(bs, -1, x[i].shape[-2] * x[i].shape[-1]) for i in range(self.nl)],
+                dim=-1,
+            )
+            scores_list.append(task_scores)
+        scores = torch.cat(scores_list, dim=1)  # (bs, sum(nc), A)
+
+        embeds = torch.cat(
+            [emb_head[i](x[i]).view(bs, self.embed_dim, -1) for i in range(self.nl)],
+            dim=-1,
+        )  # (bs, D, A)
+
+        return dict(boxes=boxes, scores=scores, embeds=embeds, feats=x)
+
+    def forward(self, x: list[Tensor]):
+        preds = self.forward_head(x, **self.one2many)
+
+        # Keep same overall behavior as current Detect API
+        if self.training or (self.export and self.format == "rknn"):
+            return preds
+
+        y = self._inference(preds)
+        return y if self.export else (y, preds)
+
+    @disable_dynamo
+    def _inference(self, x: dict[str, Tensor]) -> Tensor:
+        """Decode boxes/classes and append normalized embeddings."""
+        shape = x["feats"][0].shape  # BCHW
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (t.transpose(0, 1) for t in make_anchors(x["feats"], self.stride, 0.5))
+            self.shape = shape
+
+        box = x["boxes"]     # (bs, reg_max*4, A)
+        cls = x["scores"]    # (bs, sum(nc), A)
+        emb = x["embeds"]    # (bs, D, A)
+
+        if self.export and self.format in {"tflite", "edgetpu"}:
+            grid_h, grid_w = shape[2], shape[3]
+            grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
+            norm = self.strides / (self.stride[0] * grid_size)
+            dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
+        else:
+            dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
+
+        emb = F.normalize(emb, p=2, dim=1)
+
+        return torch.cat((dbox, cls.sigmoid(), emb), 1)
+
+    def bias_init(self):
+        """Initialize JDE head biases."""
+        super().bias_init()
+        for a in self.cv4:
+            if hasattr(a[-1], "bias") and a[-1].bias is not None:
+                a[-1].bias.data.zero_()
+
+    def fuse(self) -> None:
+        """Remove one2many heads for inference optimization if needed."""
+        self.cv2 = self.cv3 = self.cv4 = None
+
+        
 class Segment(Detect):
     """YOLO Segment head for segmentation models with multitask support.
 

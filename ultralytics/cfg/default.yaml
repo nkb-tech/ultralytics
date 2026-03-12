@@ -185,6 +185,9 @@ cfg: # (str, optional) for overriding defaults.yaml
 # Tracker settings ------------------------------------------------------------------------------------------------------
 tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yaml]
 
+# JDE settings ---------------------------------------------------------------------------------------------------------
+jde: False  # (bool) enable joint detection + embedding training (sets task='jde')
+
 # Distillation settings -------------------------------------------------------------------------------------------------
 teacher: None #  None | (str) path to teacher model
 temperature: 3.0 # (float) temperature for softening logits

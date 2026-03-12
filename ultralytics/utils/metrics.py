@@ -1689,3 +1689,212 @@ class OBBMetrics(SimpleClass):
     def curves_results(self):
         """Returns a list of curves for accessing specific metrics curves."""
         return []
+
+class ReIDMetrics(SimpleClass):
+    """
+    Class for computing evaluation metrics for person re-identification models.
+    """
+
+    def __init__(self, conf=0.1):
+        """Initializes a ReIDMetrics instance for computing evaluation metrics for person re-identification models."""
+        self.conf = conf
+        self.embeds = []
+        self.tags = []
+
+        self.hota = 0.0
+        self.mota = 0.0
+        self.idf1 = 0.0
+
+    def process_batch(self, preds, matched_tags):
+        """
+        Process a batch of predictions and matched tags to compute ReID metrics.
+        Args:
+            preds (List[torch.Tensor]): A list of tensors containing the predictions for each image in the batch.
+            matched_tags (List[torch.Tensor]): A list of tensors containing the matched tags for each image in the batch.
+        """
+        # Flatten and extract batch predictions and targets
+        flatten_preds = torch.cat(preds)
+        confidences = flatten_preds[:, 4]
+        embeds = flatten_preds[:, 6:]
+        tags = torch.cat(matched_tags)
+
+        # Filter predictions and targets based on confidence and foreground mask
+        fg_mask = tags > 0  # Only consider positive matches
+        conf_mask = confidences > self.conf # Only consider confident predictions
+        tags = tags[fg_mask & conf_mask]  # First tag filter
+        embeds = embeds[fg_mask & conf_mask]  # First embedding filter
+
+        # Filter predictions and targets based on multiplicity
+        multiplicity_mask = torch.bincount(tags)[tags] > 1
+        tags = tags[multiplicity_mask]  # Filter tags
+        embeds = embeds[multiplicity_mask]  # Filter embeddings
+
+        # Normalize embeddings for computing metrics
+        embeds = F.normalize(embeds, p=2, dim=1)
+
+        # Store embeddings and tags for computing metrics
+        self.embeds.append(embeds)
+        self.tags.append(tags)
+
+    def get_metrics(self):
+        """
+        Get the ReID metrics for the current epoch.
+        Returns:
+            Dict[str, float]: A dictionary containing the ReID metrics for the current epoch.
+        """
+        # Concatenate and convert to numpy arrays
+        embeds = torch.cat(self.embeds).cpu().detach().numpy()
+        tags = torch.cat(self.tags).cpu().detach().numpy()
+
+        # Compute distance matrix and positive and negative distances
+        pos_cos, neg_cos, cos_distmat = self.compute_distmat(embeds, tags, distance="cosine")
+        pos_euc, neg_euc, euc_distmat= self.compute_distmat(embeds, tags, distance="euclidean")
+        # TODO: way too slow, we do not need the matrix, maybe we can compute it on the fly
+        #pos_snr, neg_snr, snr_distmat = self.compute_distmat(embeds, tags, distance="snr")
+
+        # Compute Rank-1 and Rank-5 accuracy as well as mAP
+        r1_acc, r5_acc, mean_ap = self.calculate_r1_r5_mAP(cos_distmat, tags)
+
+        # Compute separation ratios
+        cos_separation_ratio = neg_cos / pos_cos
+        euc_separation_ratio = neg_euc / pos_euc
+        #snr_separation_ratio = neg_snr / pos_snr
+
+        # Compute Silhouette, Davies Bouldin and Calinski Harabasz scores
+        cos_silhouette_score = skm.silhouette_score(cos_distmat, tags, metric='precomputed')
+        euc_silhouette_score = skm.silhouette_score(euc_distmat, tags, metric='precomputed')
+        davies_bouldin_score = skm.davies_bouldin_score(embeds, tags)
+        calinski_harabasz_score = skm.calinski_harabasz_score(embeds, tags)
+
+        metrics = {
+            "val/pos_cos": pos_cos,
+            "val/neg_cos": neg_cos,
+            "val/pos_euc": pos_euc,
+            "val/neg_euc": neg_euc,
+            #"val/pos_snr": pos_snr,
+            #"val/neg_snr": neg_snr,
+            "val/cos_sep_ratio": cos_separation_ratio,
+            "val/euc_sep_ratio": euc_separation_ratio,
+            #"val/snr_sep_ratio": snr_separation_ratio,
+            "val/cos_silhouette": cos_silhouette_score,
+            "val/euc_silhouette": euc_silhouette_score,
+            "val/davies_bouldin": davies_bouldin_score,
+            "val/calinski_harabasz": calinski_harabasz_score,
+            "val/r1_acc": r1_acc,
+            "val/r5_acc": r5_acc,
+            "val/mean_ap": mean_ap,
+            "val/hota": self.hota,
+            "val/mota": self.mota,
+            "val/idf1": self.idf1,
+        }
+
+        # Reset embeddings and tags for the next epoch
+        self.embeds = []
+        self.tags = []
+        return metrics
+
+    def set_trackeval_metrics(self, hota, mota, idf1):
+        """
+        Set the TrackEval metrics for the current epoch.
+        Args:
+            hota (float): The High Order Tracking Accuracy (HOTA) score.
+            mota (float): The Multiple Object Tracking Accuracy (MOTA) score.
+            idf1 (float): The Identity F1 (IDF1) score.
+        """
+        self.hota = hota
+        self.mota = mota
+        self.idf1 = idf1
+
+    @staticmethod
+    def compute_distmat(embeddings, labels, distance="cosine"):
+        """
+        Compute the distance matrix for an epoch of embeddings.
+        Args:
+            embeddings (numpy.ndarray): Embeddings of shape (num_samples, embedding_dim).
+            labels (numpy.ndarray): Labels of shape (num_samples,).
+            distance (str): The distance metric to use, either "cosine", "euclidean" or "snr".
+        Returns:
+            pos_dist (float): The average distance between positive pairs.
+            neg_dist (float): The average distance between negative pairs.
+            distmat (numpy.ndarray): The distance matrix of shape (num_samples, num_samples).
+        """
+        # Step 1: Compute pairwise distance matrix
+        if distance == "cosine":
+            distmat = skm.pairwise_distances(embeddings, metric="cosine")
+        elif distance == "euclidean":
+            distmat = skm.pairwise_distances(embeddings, metric="euclidean")
+        elif distance == "snr":
+            distmat = snr_distance(embeddings)
+        else:
+            raise ValueError(f"Invalid distance metric: {distance}")
+
+        # Step 2: Create a mask for positive pairs (same label) and exclude self-similarity
+        labels_equal = labels[:, None] == labels[None, :]
+        not_self = ~np.eye(len(labels), dtype=bool)
+        pos_mask = labels_equal & not_self
+
+        # Step 3: Create a mask for negative pairs (different label)
+        neg_mask = ~labels_equal
+
+        # Step 4: Compute average similarity/distance for positive and negative pairs
+        pos_dist = distmat[pos_mask].mean()
+        neg_dist = distmat[neg_mask].mean()
+
+        return pos_dist, neg_dist, distmat
+
+    @staticmethod
+    def calculate_r1_r5_mAP(cosine_distance, labels):
+        #TODO: slightly different from r1_and_r5_acc in forth decimal
+        """
+        Calculate Rank-1, Rank-5 accuracy and mean Average Precision (mAP) using a precomputed cosine similarity matrix.
+
+        Parameters:
+        - cosine_distance: 2D numpy array with cosine distances between embeddings.
+        - labels: 1D array with true identity labels for each sample.
+
+        Returns:
+        - rank_1_accuracy: Rank-1 accuracy as a float.
+        - rank_5_accuracy: Rank-5 accuracy as a float.
+        - mean_ap: Mean Average Precision (mAP) as a float.
+        """
+        # Convert cosine distance to similarity
+        similarity_matrix = 1 - cosine_distance  # Cosine similarity = 1 - cosine distance
+
+        # Exclude self-similarity (diagonal) by setting it to a very low value
+        np.fill_diagonal(similarity_matrix, -np.inf)
+
+        # Get indices of sorted similarities for each query (all samples, sorted by similarity)
+        sorted_indices = np.argsort(-similarity_matrix, axis=1)  # Descending order
+
+        # Extract the labels of the sorted indices for each sample
+        sorted_labels = labels[sorted_indices]
+
+        # Initialize metrics
+        num_samples = labels.shape[0]
+        rank_1_matches = 0
+        rank_5_matches = 0
+        ap_list = []
+
+        for i in range(num_samples):
+            # Extract the sorted labels excluding self (by skipping the first match if needed)
+            relevant = (sorted_labels[i] == labels[i])  # Boolean array of relevant matches (same identity)
+            relevant[i] = False  # Exclude self-match
+
+            # Calculate Rank-1 and Rank-5
+            if relevant[0]:  # Check if the first match is correct (Rank-1)
+                rank_1_matches += 1
+            if np.any(relevant[:5]):  # Check within the top-5 matches
+                rank_5_matches += 1
+
+            # Calculate AP for the i-th sample
+            ranks = np.arange(1, num_samples + 1)
+            precision_at_k = np.cumsum(relevant) / ranks
+            ap = np.sum(precision_at_k * relevant) / np.sum(relevant) if np.sum(relevant) > 0 else 0
+            ap_list.append(ap)
+
+        # Final metrics
+        rank_1_accuracy = rank_1_matches / num_samples
+        rank_5_accuracy = rank_5_matches / num_samples
+        mean_ap = np.mean(ap_list)
+
+        return rank_1_accuracy, rank_5_accuracy, mean_ap

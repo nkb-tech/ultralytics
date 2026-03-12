@@ -26,6 +26,7 @@ from ultralytics.utils.loss import (
     v8OBBLoss,
     v8PoseLoss,
     v8SegmentationLoss,
+    v8JDELoss,
 )
 from ultralytics.utils.ops import make_divisible
 from ultralytics.utils.plotting import feature_visualization
@@ -56,6 +57,7 @@ from ultralytics.nn.backbone.rmt import *
 from ultralytics.nn.backbone.pkinet import *
 from ultralytics.nn.backbone.mobilenetv4 import *
 from ultralytics.nn.backbone.starnet import *
+from ultralytics.nn.modules.head import JDE
 
 try:
     import thop
@@ -494,6 +496,15 @@ class PoseModel(DetectionModel):
         )
         return E2EPoseLoss(self, v8PoseLoss, **kwargs) if getattr(self, "end2end", False) else v8PoseLoss(self, **kwargs)
 
+class JDEModel(DetectionModel):
+    """YOLO Joint Detection and Embedding model (Detect + embeddings)."""
+
+    def __init__(self, cfg="yolo11s-jde.yaml", ch=3, nc=None, verbose=True):
+        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
+
+    def init_criterion(self, weights=None, **kwargs):
+        # weights/kwargs приходят из Trainer в новых версиях ultralytics
+        return v8JDELoss(self)
 
 class ClassificationModel(BaseModel):
     """YOLOv8 classification model."""
@@ -1257,7 +1268,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                    Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM,
                    Detect_DyHead_Prune, Detect_LSCD, Detect_TADDH, Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH,
                    Pose, Pose26, Pose_LSCD, Pose_TADDH, OBB, OBB26, OBB_LSCD, OBB_TADDH, Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH,
-                   Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect, v10Pose, v10Segment):
+                   Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect, v10Pose, v10Segment, JDE):
             args.extend([reg_max, end2end, [ch[x] for x in f]])
             m.legacy = legacy
             if m in (Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Segment_LADH, Segment_LSCSBD):
@@ -1506,7 +1517,7 @@ def guess_model_task(model):
         model (nn.Module | dict): PyTorch model or model configuration in YAML format.
 
     Returns:
-        (str): Task of the model ('detect', 'segment', 'classify', 'pose').
+        (str): Task of the model ('detect', 'segment', 'classify', 'pose', 'jde').
 
     Raises:
         SyntaxError: If the task of the model could not be determined.
@@ -1525,6 +1536,8 @@ def guess_model_task(model):
             return "pose"
         if "obb" in m:  # matches obb, obb26
             return "obb"
+        if "jde" in m:
+            return "jde"
 
     # Guess from model cfg
     if isinstance(model, dict):
@@ -1551,6 +1564,8 @@ def guess_model_task(model):
                 return "obb"
             elif isinstance(m, (Detect, WorldDetect, v10Detect)):
                 return "detect"
+            elif isinstance(m, JDE):
+                return "jde"
 
     # Guess from model filename
     if isinstance(model, (str, Path)):
@@ -1565,10 +1580,12 @@ def guess_model_task(model):
             return "obb"
         elif "detect" in model.parts:
             return "detect"
+        elif "-jde" in model.stem or "jde" in model.parts:
+            return "jde"
 
     # Unable to determine task from model
     LOGGER.warning(
         "WARNING ⚠️ Unable automatically guess model task, assuming 'task=detect'. "
-        "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify','pose' or 'obb'."
+        "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify','pose', 'obb' or 'jde'."
     )
     return "detect"  # assume detect
