@@ -316,22 +316,24 @@ class BaseTrainer:
         batch_size = self.batch_size // max(world_size, 1)
         self.train_loader = self.get_dataloader(self.trainset, batch_size=batch_size, rank=LOCAL_RANK, mode="train")
         if RANK in {-1, 0}:
-            # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
-            self.test_loader = self.get_dataloader(
-                dataset_path=self.testset,
-                batch_size=batch_size if self.args.task == "obb" else batch_size * 2,
-                rank=-1,
-                mode="val",
-            )
-            self.validator = self.get_validator()
-            self.validator.data = self.data
-            self.validator.init_metrics(unwrap_model(self.model))
-            metrics = self.validator.metrics
-            if isinstance(metrics, list):
-                metric_keys = metrics[0].keys + self.label_loss_items(prefix="val")
-            else:
-                metric_keys = metrics.keys + self.label_loss_items(prefix="val")
-            self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
+            self.metrics = {}
+            if self.args.val:
+                # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
+                self.test_loader = self.get_dataloader(
+                    dataset_path=self.testset,
+                    batch_size=batch_size if self.args.task == "obb" else batch_size * 2,
+                    rank=-1,
+                    mode="val",
+                )
+                self.validator = self.get_validator()
+                self.validator.data = self.data
+                self.validator.init_metrics(unwrap_model(self.model))
+                metrics = self.validator.metrics
+                if isinstance(metrics, list):
+                    metric_keys = metrics[0].keys + self.label_loss_items(prefix="val")
+                else:
+                    metric_keys = metrics.keys + self.label_loss_items(prefix="val")
+                self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
             self.ema = ModelEMA(self.model)
             if self.args.plots:
                 self.plot_training_labels()
@@ -566,7 +568,7 @@ class BaseTrainer:
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
 
                 # Validation
-                if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
+                if self.validator and (self.args.val or final_epoch or self.stopper.possible_stop or self.stop):
                     self.metrics, self.fitness = self.validate()
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
                 self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
@@ -863,7 +865,7 @@ class BaseTrainer:
             if f.exists():
                 if f is self.last:
                     ckpt = strip_optimizer(f)
-                elif f is self.best:
+                elif f is self.best and self.validator is not None:
                     k = "train_results"  # update best.pt train_metrics from last.pt
                     strip_optimizer(f, updates={k: ckpt[k]} if k in ckpt else None)
                     LOGGER.info(f"\nValidating {f}...")

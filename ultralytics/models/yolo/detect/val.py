@@ -621,10 +621,11 @@ class DetectionValidator(BaseValidator):
             self.sahi_enabled = False
             self.sahi_aggregator = None
 
+        workers = min(self.args.workers, 4) if isinstance(dataset, SAHIDataset) else self.args.workers
         return build_dataloader(
             dataset,
             batch_size,
-            self.args.workers,
+            workers,
             shuffle=False,
             rank=-1,
             drop_last=self.args.compile,

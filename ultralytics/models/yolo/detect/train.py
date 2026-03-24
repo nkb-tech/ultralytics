@@ -11,6 +11,7 @@ import numpy as np
 import torch.nn as nn
 
 from ultralytics.data import build_dataloader, build_yolo_dataset
+from ultralytics.data.sahi_dataset import SAHIDataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel, yaml_model_load
@@ -64,10 +65,17 @@ class DetectionTrainer(BaseTrainer):
         if getattr(dataset, "rect", False) and shuffle:
             LOGGER.warning("WARNING ⚠️ 'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
             shuffle = False
+        workers = (
+            self.args.workers
+            if mode == "train"
+            else min(self.args.workers, 4)
+            if isinstance(dataset, SAHIDataset)
+            else self.args.workers * 2
+        )
         return build_dataloader(
             dataset,
             batch=batch_size,
-            workers=self.args.workers if mode == "train" else self.args.workers * 2,
+            workers=workers,
             shuffle=shuffle,
             rank=rank,
             drop_last=self.args.compile and mode == "train",
@@ -75,10 +83,9 @@ class DetectionTrainer(BaseTrainer):
 
     def preprocess_batch(self, batch):
         """Preprocesses a batch of images by scaling and converting to float."""
-        batch["img"] = batch["img"].to(self.device, non_blocking=True).float()
-        # Normalize based on bit depth from config
         bit_depth = getattr(self.args, 'image_bit_depth', 8)
-        batch["img"] /= 65_535.0 if bit_depth == 16 else 255.0
+        scale = 1.0 / 65_535.0 if bit_depth == 16 else 1.0 / 255.0
+        batch["img"] = batch["img"].to(self.device, non_blocking=True, dtype=torch.float32).mul_(scale)
         if self.args.multi_scale:
             imgs = batch["img"]
             sz = (

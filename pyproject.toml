@@ -87,6 +87,7 @@ dependencies = [
     "numba",
     "imaug @ git+https://github.com/imaug/imaug.git",
     "fastquadtree>=2.0.0",  # spatial index for NMM (non-max merging) with SAHI
+    "kernels>=0.11.0",  # Triton-fused Newton-Schulz kernels for Muon optimizer (requires CUDA)
 ]
 
 # Optional dependencies ------------------------------------------------------------------------------------------------
@@ -105,9 +106,8 @@ dev = [
     "mkdocs-macros-plugin>=1.0.5"  # duplicating content (i.e. export tables) in multiple places
 ]
 export = [
-    "onnx>=1.12.0,<1.17.0", # ONNX export; rknn-toolkit2 2.3.2 uses onnx.mapping removed in 1.17+
-    "onnx==1.16.1; platform_machine == 'aarch64'",  # rknn-toolkit2 2.3.2 requires onnx==1.16.1; onnx 1.17+ removes onnx.mapping
-    "protobuf==3.20.3; platform_machine == 'aarch64'",  # rknn-toolkit2 2.3.2 requires protobuf==3.20.3; v4+ UPB backend removes FieldDescriptor.label
+    "onnx==1.16.1",  # rknn-toolkit2 2.3.2 uses onnx.mapping (removed in onnx 1.17+); pin on all platforms—RKNN export often runs on x86_64 hosts
+    "protobuf==3.20.3",  # rknn-toolkit2 2.3.2 / onnx 1.16 helper: protobuf 4+ UPB FieldDescriptor has no .label (strip_doc_string); pin on all platforms for host RKNN export
     "coremltools>=7.0; platform_system != 'Windows' and python_version <= '3.11'", # CoreML supported on macOS and Linux
     "scikit-learn>=1.3.2; platform_system != 'Windows' and python_version <= '3.11'", # CoreML k-means quantization
     "openvino>=2024.0.0", # OpenVINO export
