@@ -84,7 +84,7 @@ class Detect(nn.Module):
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
     # Head mode: "legacy" (Conv), "efficient" (DWConv), "accurate" (Conv2)
-    head_mode = "legacy"
+    head_mode = "accurate"
 
     def __init__(
         self,
