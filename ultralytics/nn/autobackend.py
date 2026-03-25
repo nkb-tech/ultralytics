@@ -625,6 +625,15 @@ class AutoBackend(nn.Module):
                 p.requires_grad = False
 
         stride = max(strides)
+        # Detect(P2,P3,P4) reports strides (4,8,16) but the backbone/PAN still runs at P5/32. LetterBox and
+        # check_imgsz must use a stride ≥ deepest backbone downsampling or FPN Concat sizes diverge (e.g. 24 vs 23).
+        if pt:
+            from ultralytics.nn.tasks import DetectionModel, Ensemble
+
+            _m = model[0] if isinstance(model, Ensemble) and len(model) else model
+            if isinstance(_m, DetectionModel):
+                stride = max(stride, 32)
+
         self.__dict__.update(locals())  # assign all variables to self
 
     @staticmethod
