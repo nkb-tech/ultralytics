@@ -360,9 +360,11 @@ class BaseTrainer:
         if world_size > 1:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
-        # Weighted loss
         clf_loss_weights = None
-        if self.args.weighted_loss:
+        use_clf_weights = self.args.weighted_loss or (
+            self.args.task == "detect" and getattr(self.args, "clf_loss_weights", None) is not None
+        )
+        if use_clf_weights:
             if self.args.task == "classify":
                 clf_loss_weights = self.train_loader.dataset.calculate_weights(0.5)
                 clf_loss_weights = torch.tensor(clf_loss_weights, device=self.device, dtype=torch.float)
