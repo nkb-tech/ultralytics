@@ -894,7 +894,6 @@ class SAHIDataset(YOLODataset):
         mix image requires a full-resolution decode from disk, creating a 4x I/O multiplier
         that starves the GPU. SAHI crops already provide spatial diversity."""
         if self.augment:
-            LOGGER.info(f"{colorstr('SAHIDataset')}: Mosaic/MixUp disabled for SAHI.")
             hyp = copy(hyp)
             hyp.mosaic = 0.0
             hyp.mixup = 0.0

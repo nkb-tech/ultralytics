@@ -199,7 +199,7 @@ class WiseIoULoss(torch.nn.Module):
         x = q * Lambda
         return 3 * x * torch.exp(-x ** 2) * piou_v1
 
-    def _iterpiou(self, interp_coe=0.98):
+    def _interpiou(self, interp_coe=0.98):
         b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
         b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
         bi_x1, bi_y1, bi_x2, bi_y2 = ((1 - interp_coe) * b1_x1 + interp_coe * b2_x1,
@@ -219,7 +219,7 @@ class WiseIoULoss(torch.nn.Module):
 
     def _d_iterpiou(self, interp_coe=0.98, lv=0.6, hv=0.9):
         interp_coe = (1 - self['iou'].detach()).clamp(min=lv, max=hv)
-        return self._iterpiou(interp_coe)
+        return self._interpiou(interp_coe)
 
     def __repr__(self):
         return f'{self.__name__}(iou_mean={self.iou_mean.item():.3f})'
@@ -394,10 +394,10 @@ def bbox_iou(
 
     # IoU
     iou = inter / union
-    if ciou or diou or giou or eiou or siou or shapeiou or piouv1 or piouv2:
+    if ciou or diou or giou or eiou or siou or shapeiou or piouv1 or piouv2 or interpiou:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
-        if ciou or diou or eiou or siou or piouv1 or piouv2 or shapeiou:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+        if ciou or diou or eiou or siou or piouv1 or piouv2 or shapeiou or interpiou:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
             c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
             rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center dist ** 2
             if ciou:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
@@ -910,7 +910,16 @@ def compute_ap(recall, precision):
 
 
 def ap_per_class(
-    tp, conf, pred_cls, target_cls, plot=False, on_plot=None, save_dir=Path(), names={}, eps=1e-16, prefix=""
+    tp,
+    conf,
+    pred_cls,
+    target_cls,
+    plot=False,
+    on_plot=None,
+    save_dir=Path(),
+    names={},
+    eps=1e-16,
+    prefix="",
 ):
     """
     Computes the average precision per class for object detection evaluation.
