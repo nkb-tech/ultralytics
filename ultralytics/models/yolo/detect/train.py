@@ -122,6 +122,9 @@ class DetectionTrainer(BaseTrainer):
         if isinstance(cfg, (str, Path)):
             cfg = yaml_model_load(cfg)
 
+        if getattr(self.args, "hierarchical", False):
+            cfg["hierarchical"] = True
+
         model = DetectionModel(
             cfg,
             nc=[1] if self.args.single_cls else self.data["nc"],

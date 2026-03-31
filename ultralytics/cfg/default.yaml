@@ -56,6 +56,13 @@ nwd_loss: False # (bool) Whether to use Wasserstein Distance loss for BBox Regre
 use_wiseiou: False # (bool) Whether to use Wise IoU loss for BBox Regression
 iou_ratio: 0.5 # (float) The ratio of the IoU loss to the Wasserstein Distance loss for BBox Regression
 
+# Hierarchical detection (hYOLO / multitask nc list + Detect fusion) ---------------------------------------------------
+hierarchical: False # (bool) training flag: inject hierarchical:true into model yaml when building from weights
+hierarchical_assign:  # (bool | null) null = auto-enable per-level assigner when head has hierarchical=True
+dependency_loss: False # (bool) parent-child penalty (requires child_parent_map JSON)
+child_parent_map:  # (str, optional) path to JSON: level -> {child_cls_idx: parent_cls_idx}
+regul_alpha: 1.0 # (float) dependency penalty scale (paper uses tuned alpha, e.g. 20–50)
+
 # Val/Test settings ----------------------------------------------------------------------------------------------------
 val: True # (bool) validate/test during training
 split: val # (str) dataset split to use for validation, i.e. 'val', 'test' or 'train'
@@ -77,6 +84,7 @@ visualize: False # (bool) visualize model features
 augment: False # (bool) apply image augmentation to prediction sources
 agnostic_nms: True # (bool) class-agnostic NMS
 nms_strategy: usual # (str) NMS strategy: 'usual' (standard NMS), 'nmm' (non-max merging), 'nmm_greedy' (greedy NMM, faster); NMM useful for SAHI
+nms_multitask_conf: task0 # (str) multitask only: task0 | min | prod — joint conf for prefilter & NMS (min/prod of per-task max-class scores)
 classes: # (int | list[int], optional) filter results by class, i.e. classes=0, or classes=[0,2,3]
 retina_masks: False # (bool) use high-resolution segmentation masks
 embed: # (list[int], optional) return feature vectors/embeddings from given layers

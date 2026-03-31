@@ -84,7 +84,9 @@ class Detect(nn.Module):
     anchors = torch.empty(0)  # init
     strides = torch.empty(0)  # init
     # Head mode: "legacy" (Conv), "efficient" (DWConv), "accurate" (Conv2)
-    head_mode = "legacy"
+    head_mode = "accurate"
+    # Default for unpickled / legacy checkpoints (see hierarchical property)
+    _hierarchical = False
 
     def __init__(
         self,
@@ -92,6 +94,8 @@ class Detect(nn.Module):
         reg_max: int = 16,
         end2end: bool = False,
         ch: Tuple[int, ...] = (),
+        hierarchical: bool = False,
+        head_mode: str | None = None,
     ):
         """Initialize the YOLO detection layer with specified number of classes and channels.
 
@@ -100,6 +104,10 @@ class Detect(nn.Module):
             reg_max (int): Maximum number of DFL channels.
             end2end (bool): Whether to use end-to-end NMS-free detection.
             ch (tuple): Tuple of channel sizes from backbone feature maps.
+            hierarchical (bool): Enable late cross-level feature fusion (hYOLO Detect4 style).
+                When True and len(nc) > 1, each level processes backbone features independently,
+                then a 1x1 fusion conv refines level k output using level k-1 class logits.
+            head_mode (str, optional): Override class default ``Detect.head_mode`` ("legacy" | "efficient" | "accurate").
         """
         super().__init__()
         self.nc = list(nc)  # list of class counts per task
@@ -108,6 +116,9 @@ class Detect(nn.Module):
         self.no = self.reg_max * 4 + sum(nc)  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
         self._end2end = end2end
+        self._hierarchical = hierarchical and len(nc) > 1
+        if head_mode is not None:
+            self.head_mode = head_mode
 
         # Channel dimensions
         c2 = max((16, ch[0] // 4, self.reg_max * 4))
@@ -117,16 +128,36 @@ class Detect(nn.Module):
         self.cv2 = nn.ModuleList(self._make_head(self.head_mode, x, c2, 4 * self.reg_max) for x in ch)
 
         # Build classification heads (cv3) - nested: outer=tasks, inner=scales
+        # All levels process backbone features independently (same structure)
         self.cv3 = nn.ModuleList(
             nn.ModuleList(self._make_head(self.head_mode, x, c3[i], nc[i]) for x in ch)
             for i in range(len(nc))
         )
+
+        # Hierarchical late fusion: 1x1 conv that merges current level + previous level class logits
+        if self._hierarchical:
+            self.cv3_fuse = nn.ModuleList(
+                nn.ModuleList(
+                    nn.Conv2d(nc[i] + nc[i - 1], nc[i], 1) for _ in ch
+                )
+                for i in range(1, len(nc))
+            )
 
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
         if end2end:
             self.one2one_cv2 = copy.deepcopy(self.cv2)
             self.one2one_cv3 = copy.deepcopy(self.cv3)
+            if self._hierarchical:
+                self.one2one_cv3_fuse = copy.deepcopy(self.cv3_fuse)
+
+    @property
+    def hierarchical(self) -> bool:
+        """Whether hierarchical late fusion is enabled; safe for legacy pickled heads."""
+        d = self.__dict__
+        if "_hierarchical" in d:
+            return bool(d["_hierarchical"])
+        return bool(d.get("hierarchical", False))
 
     @staticmethod
     def _make_head(head_mode: str, c_in: int, c_mid: int, c_out: int) -> nn.Module:
@@ -202,10 +233,8 @@ class Detect(nn.Module):
                 y.append(box_head[i](x[i]))
                 for task_head in cls_head:
                     if self.end2end:
-                        # end2end: raw cls outputs (no sigmoid, no cls_sum)
                         y.append(task_head[i](x[i]))
                     else:
-                        # non-end2end: cls with sigmoid + cls_sum for objectness
                         cls = task_head[i](x[i]).sigmoid_()
                         cls_sum = cls.sum(dim=1, keepdim=True).clamp_(0, 1)
                         y.append(cls)
@@ -215,13 +244,42 @@ class Detect(nn.Module):
         bs = x[0].shape[0]
         boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
 
-        # Concatenate all task scores
-        scores_list = []
-        for task_head in cls_head:  # iterate over tasks
-            task_scores = torch.cat([task_head[i](x[i]).view(bs, -1, x[i].shape[-2] * x[i].shape[-1]) 
-                                     for i in range(self.nl)], dim=-1)
-            scores_list.append(task_scores)
-        scores = torch.cat(scores_list, dim=1)  # (bs, sum(nc), num_anchors)
+        if self.hierarchical:
+            # hYOLO Detect4: fuse 1x1 takes concat(current_raw_logits, prev_raw_logits),
+            # not the previous level's fused output (see hyolo Detect4 forward).
+            is_one2one = hasattr(self, "one2one_cv3") and cls_head is self.one2one_cv3
+            fuse_heads = (
+                getattr(self, "one2one_cv3_fuse", None) if is_one2one
+                else getattr(self, "cv3_fuse", None)
+            )
+            scores_list = []
+            prev_raw = None
+            for task_idx, task_head in enumerate(cls_head):
+                feat_maps = []
+                raw_maps = []
+                for i in range(self.nl):
+                    raw = task_head[i](x[i])
+                    raw_maps.append(raw)
+                    if task_idx > 0 and fuse_heads is not None:
+                        feat = fuse_heads[task_idx - 1][i](torch.cat([raw, prev_raw[i]], dim=1))
+                    else:
+                        feat = raw
+                    feat_maps.append(feat)
+                task_scores = torch.cat(
+                    [fm.view(bs, -1, fm.shape[-2] * fm.shape[-1]) for fm in feat_maps], dim=-1
+                )
+                scores_list.append(task_scores)
+                prev_raw = raw_maps
+            scores = torch.cat(scores_list, dim=1)
+        else:
+            scores_list = []
+            for task_head in cls_head:
+                task_scores = torch.cat(
+                    [task_head[i](x[i]).view(bs, -1, x[i].shape[-2] * x[i].shape[-1]) for i in range(self.nl)],
+                    dim=-1,
+                )
+                scores_list.append(task_scores)
+            scores = torch.cat(scores_list, dim=1)
 
         return dict(boxes=boxes, scores=scores, feats=x)
 
@@ -243,7 +301,20 @@ class Detect(nn.Module):
             return preds
         y = self._inference(preds["one2one"] if self.end2end else preds)
         if self.end2end:
-            y = self.postprocess(y.permute(0, 2, 1), self.max_det, self.nc)
+            # Single-task: NMS-free head uses flat top-k postprocess -> (B, max_det, 6).
+            # Multitask (hierarchical): flat argmax over concat logits is wrong for per-level
+            # GT/metrics; keep BCN (B, 4+sum(nc), anchors) for standard multitask NMS.
+            if len(self.nc) == 1:
+                y = self.postprocess(y.permute(0, 2, 1), self.max_det, self.nc)
+            else:
+                # _inference returns xyxy for end2end (decode_bboxes uses xywh=False),
+                # but downstream BCN NMS expects xywh in channels 0-3. Convert here so
+                # every consumer (predict, val, SAHI aggregator) gets a consistent format.
+                from ultralytics.utils.ops import xyxy2xywh
+
+                boxes_xyxy = y[:, :4, :].permute(0, 2, 1).contiguous()
+                boxes_xywh = xyxy2xywh(boxes_xyxy).permute(0, 2, 1).contiguous()
+                y = torch.cat([boxes_xywh, y[:, 4:, :]], dim=1)
         return y if self.export else (y, preds)
 
     @disable_dynamo
@@ -343,6 +414,8 @@ class Detect(nn.Module):
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
+        if hasattr(self, "cv3_fuse"):
+            self.cv3_fuse = None
 
 
 class Segment(Detect):

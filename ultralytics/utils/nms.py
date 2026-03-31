@@ -11,6 +11,24 @@ from ultralytics.utils.metrics import batch_probiou, box_iou, box_intersection
 from ultralytics.utils.ops import xywh2xyxy
 
 
+def _nms_multitask_scores(
+    x: torch.Tensor, num_tasks: int, nms_multitask_conf: str, *, from_logits: bool
+) -> torch.Tensor:
+    """NMS ranking score from multitask row [box, conf0, cls0, conf1, cls1, ...]."""
+    conf0 = x[:, 4]
+    if num_tasks <= 1 or nms_multitask_conf == "task0":
+        return conf0
+    cols = [x[:, 4 + 2 * t] for t in range(num_tasks)]
+    if from_logits:
+        cols = [torch.sigmoid(c) for c in cols]
+    task_s = torch.stack(cols, dim=1)
+    if nms_multitask_conf == "min":
+        return task_s.min(1)[0]
+    if nms_multitask_conf == "prod":
+        return task_s.prod(1)
+    return conf0
+
+
 def non_max_suppression(
     prediction,
     conf_thres: float = 0.25,
@@ -28,6 +46,7 @@ def non_max_suppression(
     end2end: bool = False,
     return_idxs: bool = False,
     nms_strategy: str = "usual",  # "usual" (NMS), "nmm", "nmm_greedy"
+    nms_multitask_conf: str = "task0",  # task0 | min | prod (multitask only)
 ):
     """Perform non-maximum suppression (NMS) on prediction results.
 
@@ -52,6 +71,8 @@ def non_max_suppression(
         end2end (bool): End-to-end model (no NMS needed).
         return_idxs (bool): Return indices of kept detections.
         nms_strategy (str): "usual" for NMS, "nmm" or "nmm_greedy" for non-maximum merging (useful for SAHI).
+        nms_multitask_conf (str): For ``len(nc) > 1``: ``task0`` — legacy (first-task logits for filter/NMS score);
+            ``min`` / ``prod`` — combine per-task max-class sigmoids across heads (closer to joint confidence).
 
     Returns:
         list[torch.Tensor]: Detections per image with shape (N, 4 + 2*num_tasks + extra).
@@ -59,6 +80,7 @@ def non_max_suppression(
     """
     assert 0 <= conf_thres <= 1, f"Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0"
     assert 0 <= iou_thres <= 1, f"Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0"
+    assert nms_multitask_conf in {"task0", "min", "prod"}, f"Invalid nms_multitask_conf={nms_multitask_conf}"
 
     if isinstance(prediction, (list, tuple)):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
         prediction = prediction[0]  # select only inference output
@@ -73,12 +95,35 @@ def non_max_suppression(
     # Disambiguate from BCN (batch, channels, anchors): in postprocessed, last dim (cols) < dim 1 (N);
     # in BCN, last dim (anchors) > dim 1 (channels).
     n_cols = prediction.shape[-1]
-    is_postprocessed = ((n_cols == 4 + 2 * num_tasks) and n_cols < prediction.shape[1]) or end2end
+    # BCN: (batch, 4+total_nc, anchors) — never treat as end2end-compact (even if model.end2end).
+    ch_bcn = 4 + total_nc
+    is_bcn = (
+        prediction.dim() == 3
+        and prediction.shape[1] == ch_bcn
+        and prediction.shape[2] > prediction.shape[1]
+    )
+    is_postprocessed = (not is_bcn) and (
+        ((n_cols == 4 + 2 * num_tasks) and n_cols < prediction.shape[1]) or end2end
+    )
 
     if is_postprocessed:
+        # Layout is [xyxy, conf0, cls0, ...] with width 4 + 2*k; k may differ from len(nc)
+        # when end2end=True (often k=1, shape [N,6]) while nc is still multitask.
+        extra = n_cols - 4
+        if extra >= 2 and extra % 2 == 0:
+            post_num_tasks = extra // 2
+        else:
+            post_num_tasks = 1
+        nc_post = nc[:post_num_tasks] if len(nc) >= post_num_tasks else nc
+
         output = []
         for pred in prediction:
-            pred = pred[pred[:, 4] > conf_thres]
+            if post_num_tasks > 1 and nms_multitask_conf != "task0":
+                task_confs = torch.stack([pred[:, 4 + 2 * t] for t in range(post_num_tasks)], dim=1)
+                comb = task_confs.min(1)[0] if nms_multitask_conf == "min" else task_confs.prod(1)
+                pred = pred[comb > conf_thres]
+            else:
+                pred = pred[pred[:, 4] > conf_thres]
             if classes is not None:
                 pred = pred[(pred[:, 5:6] == classes).any(1)]
             if len(pred) == 0:
@@ -86,18 +131,18 @@ def non_max_suppression(
                 continue
 
             boxes = pred[:, :4]
-            scores = pred[:, 4]
+            scores = _nms_multitask_scores(pred, post_num_tasks, nms_multitask_conf, from_logits=False)
 
             # Class offset: unique per combination of all task classes
             if agnostic:
                 c = torch.zeros(len(pred), 1, device=pred.device)
-            elif num_tasks > 1:
+            elif post_num_tasks > 1:
                 unique_id = pred[:, 5].view(-1, 1).clone()
-                multiplier = nc[0]
-                for t in range(1, num_tasks):
+                multiplier = nc_post[0]
+                for t in range(1, post_num_tasks):
                     task_cls_col = pred[:, 5 + 2 * t]
                     unique_id = unique_id + task_cls_col.view(-1, 1) * multiplier
-                    multiplier *= nc[t]
+                    multiplier *= nc_post[t]
                 c = unique_id * max_wh
             else:
                 c = pred[:, 5].view(-1, 1) * max_wh
@@ -129,8 +174,22 @@ def non_max_suppression(
     extra = prediction.shape[1] - total_nc - 4
     mi = 4 + total_nc
 
-    # Candidate filtering by first task confidence
-    xc = prediction[:, 4:4 + nc[0]].amax(1) > conf_thres
+    # Candidate prefilter: first-task logits (legacy) or joint sigmoid over tasks
+    if num_tasks > 1 and nms_multitask_conf != "task0":
+        offset = 0
+        parts = []
+        for nc_i in nc:
+            logits = prediction[:, 4 + offset : 4 + offset + nc_i, :]
+            parts.append(logits.sigmoid().amax(1))
+            offset += nc_i
+        stacked = torch.stack(parts, dim=1)
+        xc = (
+            stacked.min(1)[0] > conf_thres
+            if nms_multitask_conf == "min"
+            else stacked.prod(1) > conf_thres
+        )
+    else:
+        xc = prediction[:, 4 : 4 + nc[0]].amax(1) > conf_thres
     xinds = torch.arange(prediction.shape[-1], device=prediction.device).expand(bs, -1)[..., None]
 
     time_limit = 2.0 + max_time_img * bs
@@ -185,8 +244,15 @@ def non_max_suppression(
                 clss.append(j_i.float())
                 offset += nc_i
 
-            # Filter by first task confidence
-            conf_mask = confs[0].view(-1) > conf_thres
+            if num_tasks > 1 and nms_multitask_conf != "task0":
+                S = torch.cat([torch.sigmoid(c) for c in confs], dim=1)
+                conf_mask = (
+                    S.min(1)[0] > conf_thres
+                    if nms_multitask_conf == "min"
+                    else S.prod(1) > conf_thres
+                )
+            else:
+                conf_mask = confs[0].view(-1) > conf_thres
             box = box[conf_mask]
             mask = mask[conf_mask]
             confs = [c[conf_mask] for c in confs]
@@ -199,6 +265,7 @@ def non_max_suppression(
 
         conf = x[:, 4]
         j = x[:, 5]
+        scores = _nms_multitask_scores(x, num_tasks, nms_multitask_conf, from_logits=True)
 
         # Filter by class
         if classes is not None:
@@ -207,17 +274,19 @@ def non_max_suppression(
             if return_idxs:
                 xk = xk[filt]
             conf, j = x[:, 4], x[:, 5]
+            scores = _nms_multitask_scores(x, num_tasks, nms_multitask_conf, from_logits=True)
 
         # Check shape
         n = x.shape[0]
         if not n:
             continue
         if n > max_nms:
-            filt = conf.argsort(descending=True)[:max_nms]
+            filt = scores.argsort(descending=True)[:max_nms]
             x = x[filt]
             if return_idxs:
                 xk = xk[filt]
             conf, j = x[:, 4], x[:, 5]
+            scores = _nms_multitask_scores(x, num_tasks, nms_multitask_conf, from_logits=True)
 
         # NMS class offsets
         if agnostic:
@@ -233,7 +302,6 @@ def non_max_suppression(
         else:
             c = j.view(-1, 1) * max_wh
 
-        scores = conf
         if rotated:
             boxes = torch.cat((x[:, :2] + c, x[:, 2:4], x[:, -1:]), dim=-1)
             i = TorchNMS.fast_nms(boxes, scores, iou_thres, iou_func=batch_probiou)
@@ -268,7 +336,6 @@ def non_max_suppression(
             break
 
     return (output, keepi) if return_idxs else output
-
 
 def _nmm_core(
     predictions: torch.Tensor,

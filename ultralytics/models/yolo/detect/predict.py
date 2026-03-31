@@ -51,6 +51,7 @@ class DetectionPredictor(BasePredictor):
                 classes=self.args.classes,
                 end2end=getattr(self.model, "end2end", False),
                 rotated=self.args.task == "obb",
+                nms_multitask_conf=getattr(self.args, "nms_multitask_conf", "task0"),
             )
 
         if not isinstance(orig_imgs, list):
@@ -157,6 +158,7 @@ class DetectionPredictor(BasePredictor):
                     max_det=self.args.max_det, classes=self.args.classes, nc=self.nc,
                     end2end=getattr(self.model, "end2end", False),
                     rotated=self.args.task == "obb",
+                    nms_multitask_conf=getattr(self.args, "nms_multitask_conf", "task0"),
                 )[0]
 
             if len(result) == 0:
@@ -204,6 +206,7 @@ class DetectionPredictor(BasePredictor):
             nc=self.nc, nms_strategy=nms_strategy,
             end2end=getattr(self.model, "end2end", False),
             rotated=self.args.task == "obb",
+            nms_multitask_conf=getattr(self.args, "nms_multitask_conf", "task0"),
         )[0]
 
     def _build_results(self, preds_list, im0s, paths, s):

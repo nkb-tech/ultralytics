@@ -745,28 +745,28 @@ class SAHIDataset(YOLODataset):
             new_cls = cls[valid_indices].astype(np.float32)
             
         else:
-            # Detection only or segments don't match bboxes - use numba-accelerated bbox filtering
+            # Detection only or segments don't match bboxes - use numba-accelerated bbox filtering.
+            # IMPORTANT: keep full multitask class rows (L0,L1,L2,...) after filtering.
             boxes_xyxy = _xywh_to_xyxy(bboxes.astype(np.float64), img_h, img_w)
-            cls_flat = cls[:, 0].astype(np.float64) if cls.ndim > 1 else cls.astype(np.float64)
-            
-            new_bboxes, filtered_cls = _filter_bboxes(
-                boxes_xyxy, cls_flat, x1, y1, x2, y2, self.min_object_coverage
+            row_ids = np.arange(len(bboxes), dtype=np.float64)
+
+            new_bboxes, kept_row_ids = _filter_bboxes(
+                boxes_xyxy, row_ids, x1, y1, x2, y2, self.min_object_coverage
             )
-            
+
             if len(new_bboxes) == 0:
                 return {
                     "bboxes": np.zeros((0, 4), dtype=np.float32),
                     "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
                     "segments": [],
                 }
-            
+
             new_bboxes = new_bboxes.astype(np.float32)
-            # Restore multi-column cls if needed
-            if n_cls_cols > 1:
-                new_cls = np.zeros((len(filtered_cls), n_cls_cols), dtype=np.float32)
-                new_cls[:, 0] = filtered_cls
+            kept_row_ids = kept_row_ids.astype(np.int64)
+            if cls.ndim == 1:
+                new_cls = cls[kept_row_ids].reshape(-1, 1).astype(np.float32)
             else:
-                new_cls = filtered_cls.reshape(-1, 1).astype(np.float32)
+                new_cls = cls[kept_row_ids].astype(np.float32)
             new_segments = []
 
         # Format outputs

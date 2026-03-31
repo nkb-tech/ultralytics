@@ -205,6 +205,7 @@ class DetectionValidator(BaseValidator):
             end2end=self.end2end,
             rotated=self.args.task == "obb",
             multi_label=True,
+            nms_multitask_conf=getattr(self.args, "nms_multitask_conf", "task0"),
         )
         return [self._tensor_to_pred_dict(x) for x in outputs]
 
@@ -405,6 +406,7 @@ class DetectionValidator(BaseValidator):
                 max_det=self.args.max_det,
                 nc=self.nc,
                 nms_strategy=self.nms_strategy,
+                nms_multitask_conf=getattr(self.args, "nms_multitask_conf", "task0"),
             )
             aggregated_pred = self._tensor_to_pred_dict(nms_results[0])
 
