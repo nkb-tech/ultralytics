@@ -285,8 +285,10 @@ class PPLoss(nn.Module):
         self.reduction = reduction
         self.class_weight = weight
         
-        self.register_buffer('mu', torch.tensor([32.0, 64.0, 128.0]))
-        self.register_buffer('sigma', torch.tensor([16.0, 32.0, 64.0]))
+        # mu = 4 * stride (optimal object size for each FPN level)
+        # sigma = 2 * stride (spread of the Gaussian prior)
+        self.register_buffer('mu', torch.tensor([4.0 * s for s in self.strides]))
+        self.register_buffer('sigma', torch.tensor([2.0 * s for s in self.strides]))
         
         if verbose:
             LOGGER.info(f"{colorstr('PP Loss')}: Initialized with {num_levels} FPN levels")
@@ -532,7 +534,7 @@ class BboxLoss(nn.Module):
             )
             return loss_dfl.sum() / target_scores_sum
         else:
-            return torch.tensor(0.0).to(pred_dist.device)
+            return torch.tensor(0.0, device=pred_dist.device)
 
     def forward(
         self,

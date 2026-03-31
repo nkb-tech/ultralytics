@@ -73,6 +73,8 @@ from .block import (
     FullPADTunnel,
     DSC3k2,
     MobileOneBlock,
+    LDown,
+    IRDCB,
 )
 from .conv import (
     CBAM,
@@ -218,4 +220,6 @@ __all__ = (
     "FullPADTunnel",
     "DSC3k2",
     "TorchVision",
+    "IRDCB",
+    "LDown",
 )

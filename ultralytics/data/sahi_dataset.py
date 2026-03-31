@@ -1,13 +1,16 @@
 from functools import lru_cache
 from multiprocessing.pool import ThreadPool
-from copy import deepcopy
+from copy import copy, deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import numba as nb
 
 from PIL import Image
 
+import cv2
+
 from ultralytics.utils import NUM_THREADS, LOGGER, TQDM, colorstr
+from ultralytics.utils.patches import imread
 from .augment import Compose, Format, LetterBox, v8_transforms
 from .dataset import YOLODataset
 
@@ -486,7 +489,7 @@ class SAHIDataset(YOLODataset):
         sampling_rate: float = 1.0,
         min_object_coverage: float = 0.3,
         object_crop_prob: float = 0.7,
-        buffer_size: int = 8,
+        buffer_size: int = 50,
         *args,
         **kwargs,
     ):
@@ -507,15 +510,29 @@ class SAHIDataset(YOLODataset):
         # during cache_images() — we need original resolution for cropping
         kwargs["sahi"] = True
 
-        # Warn about RAM usage: SAHI caches full-resolution images
+        # BaseDataset cache='ram'/'low-ram' is constructed before dataloader workers are spawned.
+        # For SAHI this caches full-resolution source images and can be inherited by every worker,
+        # causing extreme host RAM usage on large datasets.
         cache_val = kwargs.get("cache", None)
-        if cache_val == "ram" or cache_val is True:
+        cache_mode = "ram" if cache_val is True else cache_val.lower() if isinstance(cache_val, str) else cache_val
+        if cache_mode in {"ram", "low-ram"}:
             LOGGER.warning(
-                "WARNING ⚠️ SAHI + cache='ram' stores full-resolution images in RAM. "
-                "Consider cache='low-ram' for SAHI to save memory."
+                f"WARNING ⚠️ SAHI + cache='{cache_mode}' preloads full-resolution images before worker fork and can "
+                "multiply RAM usage across dataloader workers. Disabling base image cache for SAHI and relying on "
+                "the per-worker image buffer instead."
             )
+            kwargs["cache"] = None
 
         super().__init__(img_path=img_path, *args, **kwargs)
+
+        # SAHI uses its own per-worker _worker_image_cache and overrides load_image,
+        # so the base class buffer/ims storage is unnecessary and wastes ~50-100 GB RAM.
+        self.max_buffer_length = 0
+        self.buffer = []
+        self.ims = [None] * self.ni
+        self.im_hw0 = [None] * self.ni
+        self.im_hw = [None] * self.ni
+
         self._cache_image_shapes()
         self.slice_indices = self._precompute_slices()
         
@@ -526,7 +543,6 @@ class SAHIDataset(YOLODataset):
         # Per-worker image cache (initialized lazily)
         self._worker_image_cache: Optional[Dict[int, np.ndarray]] = None
         self._worker_id: Optional[int] = None
-        self._cache_size_bytes: int = 0
 
         self._log_config()
 
@@ -882,38 +898,50 @@ class SAHIDataset(YOLODataset):
         }
 
 
+    def load_image(self, i, rect_mode=True):
+        """Load image without writing into BaseDataset's self.ims/self.buffer.
+        SAHI uses its own per-worker _worker_image_cache instead."""
+        f = self.im_files[i]
+        fn = self.npy_files[i]
+        if fn.exists():
+            try:
+                im = np.load(fn)
+            except Exception as e:
+                LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
+                fn.unlink(missing_ok=True)
+                im = imread(f)
+        else:
+            im = imread(f)
+        if im is None:
+            raise FileNotFoundError(f"Image Not Found {f}")
+        h0, w0 = im.shape[:2]
+        if im.ndim == 2:
+            im = np.repeat(im[:, :, None], 3, axis=2)
+        elif im.ndim == 3 and im.shape[2] == 4:
+            im = cv2.cvtColor(im, cv2.COLOR_BGRA2BGR)
+        return im, (h0, w0), im.shape[:2]
+
     def _get_cached_image(self, img_idx: int) -> np.ndarray:
-        """Get image with per-worker LRU caching and memory-aware eviction."""
+        """Get image with a per-worker cache and FIFO eviction by entry count."""
         import torch
         
         worker_info = torch.utils.data.get_worker_info()
         current_worker_id = worker_info.id if worker_info else -1
         
-        # Reset cache if worker changed
         if self._worker_image_cache is None or self._worker_id != current_worker_id:
             self._worker_image_cache = {}
             self._worker_id = current_worker_id
-            self._cache_size_bytes = 0
         
         if img_idx in self._worker_image_cache:
             return self._worker_image_cache[img_idx]
         
         im, _, _ = self.load_image(img_idx)
-        if im is None:
-            raise FileNotFoundError(f"Image not found: {self.im_files[img_idx]}")
         
-        im_size = im.nbytes
-        
-        # FIFO eviction - evict until we have room
         while len(self._worker_image_cache) >= self._buffer_size:
             oldest_key = next(iter(self._worker_image_cache))
-            old_im = self._worker_image_cache.pop(oldest_key)
-            self._cache_size_bytes -= old_im.nbytes
-            del old_im
+            del self._worker_image_cache[oldest_key]
         
         self._worker_image_cache[img_idx] = im
-        self._cache_size_bytes += im_size
-        
         return im
 
     def _precompute_slices(self) -> List[Tuple[int, int, Tuple[int, int, int, int]]]:
@@ -975,8 +1003,14 @@ class SAHIDataset(YOLODataset):
         return bboxes.astype(np.float64)
 
     def build_transforms(self, hyp: Optional[Any] = None) -> Compose:
-        """Build augmentation transforms."""
+        """Build augmentation transforms. Mosaic/MixUp are disabled for SAHI because each
+        mix image requires a full-resolution decode from disk, creating a 4x I/O multiplier
+        that starves the GPU. SAHI crops already provide spatial diversity."""
         if self.augment:
+            hyp = copy(hyp)
+            hyp.mosaic = 0.0
+            hyp.mixup = 0.0
+            hyp.copy_paste = 0.0
             transforms = v8_transforms(dataset=self, imgsz=self.crop_size, hyp=hyp, stretch=False)
         else:
             transforms = Compose([LetterBox(new_shape=(self.crop_size, self.crop_size), scaleup=False)])

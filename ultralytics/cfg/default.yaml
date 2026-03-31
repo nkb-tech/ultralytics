@@ -229,5 +229,4 @@ full_image_prob: 0.0  # probability, that full image will be resize to crop size
 keep_sahi_images: False
 min_object_coverage: 0.3      # (float) minimum fraction of object area that must be in crop to keep it
 object_crop_prob: 0.7         # (float) probability to center crop on an object (for random_crop strategy)
-buffer_size: 50               # (int) max images in memory buffer
-crop_usage_threshold: 0.8     # (float) evict image from buffer after this fraction of its crops used
+buffer_size: 50               # (int) max full-resolution images per worker in the SAHI image cache

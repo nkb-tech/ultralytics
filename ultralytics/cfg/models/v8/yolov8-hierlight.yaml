@@ -1,0 +1,84 @@
+# HierLight-YOLO Configuration
+# Supports N/S/M variants via --scale CLI argument
+
+# Number of classes (VisDrone has 10 classes)
+nc: 80
+
+scales: # model compound scaling constants, i.e. 'model=yolov8n.yaml' will call yolov8.yaml with scale 'n'
+  # [depth, width, max_channels]
+  n: [0.33, 0.25, 1024]  # YOLOv8n summary: 225 layers,  3157200 parameters,  3157184 gradients,   8.9 GFLOPs
+  s: [0.33, 0.50, 1024]  # YOLOv8s summary: 225 layers, 11166560 parameters, 11166544 gradients,  28.8 GFLOPs
+  m: [0.67, 0.75, 768]   # YOLOv8m summary: 295 layers, 25902640 parameters, 25902624 gradients,  79.3 GFLOPs
+
+# Backbone
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]]           # 0-P1/2
+  
+  - [-1, 1, Conv, [128, 3, 2]]           # 1-P2/4
+  - [-1, 1, C2f, [128, True]]            # 2
+  
+  - [-1, 1, Conv, [256, 3, 2]]          # 3-P3/8
+  - [-1, 1, C2f, [256, True]]           # 4
+  
+  - [-1, 1, Conv, [512, 3, 2]]          # 5-P4/16
+  - [-1, 1, C2f, [512, True]]           # 6
+  
+  - [-1, 1, LDown, [1024, 3, 2]]         # 7-P5/32 (lightweight downsample at the end)
+  - [-1, 1, IRDCB, [1024, 2]]            # 8 (lightweight refinement)
+  - [-1, 1, SPPF, [1024, 5]]             # 9
+
+# Head - HEPAN Neck (Hierarchical Extended Path Aggregation Network)
+# Explicitly implements the paper's Neck 2a with:
+# 1. HFCC: Channel compression (1x1 Conv) for all scales
+# 2. Top-down pathway: P5→P4→P3→P2 (Upsample + Concat + C2f)
+# 3. Bottom-up pathway: N2→P3→P4→P5 (Conv + Concat + IRDCB) with dense skips
+head:
+  # ===== HFCC: Hierarchical Feature Channel Compression (1x1 Conv) =====
+  - [2, 1, Conv, [64, 1, 1]]                      # 10 - P2 compressed (128→64)
+  - [4, 1, Conv, [128, 1, 1]]                     # 11 - P3 compressed (256→128)
+  - [6, 1, Conv, [256, 1, 1]]                     # 12 - P4 compressed (512→256)
+  - [9, 1, Conv, [512, 1, 1]]                     # 13 - P5 compressed (1024→512)
+  
+  # ===== Top-down pathway: P5 → P4 → P3 → P2 =====
+  # P5 → P4
+  - [13, 1, nn.Upsample, [None, 2, 'nearest']]    # 14 - Upsample P5_comp (512, h/16→h/8)
+  - [[-1, 12], 1, Concat, [1]]                    # 15 - Concat P5up(512) + P4_comp(256) = 768→256
+  - [-1, 1, C2f, [256, 1]]                        # 16 - N4 fusion
+  
+  # P4 → P3
+  - [16, 1, nn.Upsample, [None, 2, 'nearest']]    # 17 - Upsample N4 (256, h/8→h/4)
+  - [[-1, 11], 1, Concat, [1]]                    # 18 - Concat N4up(256) + P3_comp(128) = 384→128
+  - [-1, 1, C2f, [128, 1]]                        # 19 - N3 fusion
+  
+  # P3 → P2
+  - [19, 1, nn.Upsample, [None, 2, 'nearest']]    # 20 - Upsample N3 (128, h/4→h/2)
+  - [[-1, 10], 1, Concat, [1]]                    # 21 - Concat N3up(128) + P2_comp(64) = 192→64
+  - [-1, 1, C2f, [64, 1]]                         # 22 - N2 fusion
+  
+  # ===== Bottom-up pathway: N2 → P3 → P4 → P5 with dense skips =====
+  # N2 → P3
+  - [-1, 1, Conv, [128, 3, 2]]                    # 23 - Downsample N2 (64→128, h/2→h/4)
+  - [[-1, 19], 1, Concat, [1]]                    # 24 - Concat N2down(128) + N3(128) = 256→128
+  - [-1, 1, IRDCB, [128, 2]]                      # 25 - P3_out
+  
+  # P3 → P4 with dense skip (N2→P4)
+  - [-1, 1, Conv, [256, 3, 2]]                    # 26 - Downsample P3_out (128→256, h/4→h/8)
+  - [22, 1, Conv, [64, 3, 4]]                     # 27 - N2 Conv-downsample to P4 resolution (h/2→h/8)
+  - [[26, 16, 27], 1, Concat, [1]]                # 28 - Concat P3down + N4 + N2→P4
+  - [-1, 1, IRDCB, [256, 2]]                      # 29 - P4_out
+  
+  # P4 → P5 with dense skip (N3→P5)
+  - [-1, 1, Conv, [512, 3, 2]]                    # 30 - Downsample P4_out (256→512, h/8→h/16)
+  - [19, 1, Conv, [128, 3, 4]]                    # 31 - N3 Conv-downsample to P5 resolution (h/4→h/16)
+  - [[30, 13, 31], 1, Concat, [1]]                # 32 - Concat P4down + P5_comp + N3→P5
+  - [-1, 1, IRDCB, [512, 2]]                      # 33 - P5_out
+  
+  # ===== Small Object Detection Head (P2 at 160×160) =====
+  # Per paper 3.3: Upsample P3_out (80×80) to 160×160 and concat with backbone P2
+  - [25, 1, nn.Upsample, [None, 2, 'nearest']]    # 34 - Upsample P3_out (128, 80×80→160×160)
+  - [[-1, 2], 1, Concat, [1]]                     # 35 - Concat P3_up(128) + P2_backbone(128) = 256→128
+  - [-1, 1, C2f, [128, 1]]                        # 36 - P2_small fused (160×160)
+  
+  # Detection head on [P2_small, P3_out, P4_out, P5_out]
+  - [[36, 25, 29, 33], 1, Detect, [nc]]  # Detect on [P2_small(160×160), P3_out(80×80), P4_out(40×40), P5_out(20×20)]

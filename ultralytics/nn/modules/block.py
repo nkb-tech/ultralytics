@@ -97,6 +97,8 @@ __all__ = (
     "TorchVision",
     "DownsampleConv",
     "MobileOneBlock",
+    "LDown",
+    "IRDCB",
 )
 
 
@@ -2624,3 +2626,106 @@ class MobileOneBlock(nn.Module):
         if hasattr(self, "id_tensor"):
             self.__delattr__("id_tensor")
         self.deploy = True
+
+
+class IRDCB(nn.Module):
+    """
+    Inverted Residual Depthwise Convolution Block
+    HierLight-YOLO: A Hierarchical and Lightweight Object Detection Network for UAV Photography
+    
+    Pattern per paper:
+    - Conv 1x1 (compress)
+    - N x DCB blocks (expand/filter/compress with conditional residual)
+    - Concat all intermediate features (skip aggregation)
+    - Conv 1x1 (expand to c2)
+    - Optional residual to input if c1 == c2
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        n (int): Number of DCB blocks to stack
+        t (int): Expansion factor inside DCB
+        shortcut (bool): Use residual connection when c1==c2
+    """
+    def __init__(self, c1, c2, n=2, t=2, shortcut=True, *args, **kwargs):
+        super().__init__()
+        
+        # Hidden channels after initial compression
+        self.c = int(c2 // 2)
+        self.n = int(n)
+        
+        # Initial 1x1 conv to compress channels
+        self.cv1 = Conv(c1, self.c, 1, 1)
+        
+        # N depthwise convolution blocks (ModuleList for skip aggregation)
+        self.blocks = nn.ModuleList([DCB(self.c, t) for _ in range(self.n)])
+        
+        # Final 1x1 conv to expand back after concatenation of (n+1) branches
+        self.cv2 = Conv(self.c * (self.n + 1), c2, 1, 1)
+        
+        # Residual connection when dimensions match
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        residual = x
+        x = self.cv1(x)
+        feats = [x]
+        for blk in self.blocks:
+            x = blk(x)
+            feats.append(x)
+        x = torch.cat(feats, dim=1)
+        x = self.cv2(x)
+        return x + residual if self.add else x
+
+
+class DCB(nn.Module):
+    """
+    Depthwise Convolution Block (used inside IRDCB)
+    HierLight-YOLO: A Hierarchical and Lightweight Object Detection Network for UAV Photography
+    
+    Implements the expand-filter-compress pattern:
+    1. Expand: 1x1 conv increases channels by factor t
+    2. Filter: Two 3x3 depthwise convs for spatial filtering
+    3. Compress: 1x1 conv reduces back to original channels
+    
+    Args:
+        c (int): Number of channels.
+        t (int): Expansion factor.
+    """
+
+    def __init__(self, c, t=2, add=True):
+        super().__init__()
+        c_exp = int(c * t)
+        self.cv1 = Conv(c, c_exp, 1, 1)
+        self.dw1 = DWConv(c_exp, c_exp, k=3, s=1)
+        self.dw2 = DWConv(c_exp, c_exp, k=3, s=1)
+        self.cv2 = Conv(c_exp, c, 1, 1)
+        self.add = add
+
+    def forward(self, x):
+        out = self.cv2(self.dw2(self.dw1(self.cv1(x))))
+        return x + out if self.add else out
+
+
+class LDown(nn.Module):
+    """
+    Lightweight Downsample Module
+    
+    Efficiently reduces spatial dimensions and channel capacity through:
+    1. Depthwise convolution for spatial downsampling
+    2. 1x1 convolution for channel compression
+    
+    Args:
+        c1 (int): Input channels (auto-provided by YOLO parser)
+        c2 (int): Output channels
+        k (int): Kernel size (default: 3)
+        s (int): Stride for downsampling (default: 2)
+    """
+
+    def __init__(self, c1, c2, k=3, s=2):
+        super().__init__()
+        self.dw = DWConv(c1, c1, k=k, s=s)
+        self.pw = Conv(c1, c2, k=1, s=1)
+
+    def forward(self, x):
+        return self.pw(self.dw(x))

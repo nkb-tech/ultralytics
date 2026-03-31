@@ -261,16 +261,9 @@ def build_yolo_dataset(
             "crop_size": cfg.crop_size,
             "overlap_ratio": cfg.overlap_ratio,
             "sampling_rate": cfg.sampling_rate,
-            "crop_threshold": getattr(cfg, "crop_threshold", 1024),
-            "bg_crop_prob": getattr(cfg, "bg_crop_prob", 0.4),
-            "scale_range": getattr(cfg, "scale_range", (1, 1)),
-            "erosion_factor": getattr(cfg, "erosion_factor", 0.0),
-            "full_image_prob": getattr(cfg, "full_image_prob", 0.0),
-            "keep_sahi_images": getattr(cfg, "keep_sahi_images", False),
             "min_object_coverage": getattr(cfg, "min_object_coverage", 0.3),
             "object_crop_prob": getattr(cfg, "object_crop_prob", 0.7),
             "buffer_size": getattr(cfg, "buffer_size", 50),
-            "crop_usage_threshold": getattr(cfg, "crop_usage_threshold", 0.8),
         }
     
     return dataset(
@@ -385,12 +378,15 @@ def build_dataloader(
         )
       
     has_batch_sampler = kwargs.get("batch_sampler") is not None
+    prefetch_factor = (4 if shuffle else 1) if (is_sahi and nw > 0) else (4 if nw > 0 else None)
+
     return InfiniteDataLoader(
         dataset=dataset,
         batch_size=1 if has_batch_sampler else batch,
         shuffle=False if has_batch_sampler else (shuffle and kwargs.get("sampler") is None),
         num_workers=nw,
-        prefetch_factor=4 if nw > 0 else None,  # increase over default 2
+        prefetch_factor=prefetch_factor,
+        persistent_workers=nw > 0,
         pin_memory=nd > 0 and pin_memory,
         collate_fn=getattr(dataset, "collate_fn", None),
         worker_init_fn=seed_worker,
