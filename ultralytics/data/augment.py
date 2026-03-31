@@ -3114,7 +3114,7 @@ def crop_transforms(dataset, imgsz: int, hyp, stretch=False):
     )
 
     mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, pre_transform=crop_or_resize)
-    pre_transform = Compose([crop_or_resize, mosaic, affine]) # , crop_albu ,affine
+    pre_transform = Compose([crop_or_resize, mosaic, affine])
     
     misc = Compose(
         [

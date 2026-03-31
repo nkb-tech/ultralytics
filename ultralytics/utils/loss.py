@@ -26,18 +26,22 @@ from ultralytics.utils.torch_utils import autocast, disable_dynamo
 
 from .metrics import bbox_iou, probiou, WiseIoULoss, wasserstein_loss
 
-from pytorch_metric_learning import miners, distances, losses, reducers
-
 class MetricLearningLoss(nn.Module):
     def __init__(self):
         super(MetricLearningLoss, self).__init__()
+        try:
+            from pytorch_metric_learning import losses, miners
+        except ImportError as e:
+            raise ModuleNotFoundError(
+                "JDE training requires pytorch-metric-learning. Install it with: pip install pytorch-metric-learning"
+            ) from e
         self.mining_func = miners.BatchEasyHardMiner(pos_strategy='hard', neg_strategy='semihard')
         self.loss_func = losses.TripletMarginLoss(margin=0.075)
         self.confidence_threshold = 1
 
     def forward(self, embeddings, tags, confidences=None, normalize=False):
         # Select only the embeddings and tags for confidences on top X%
-        if confidences is not None and self.confidence_threshold<1:
+        if confidences is not None and self.confidence_threshold < 1:
             top_k = int(self.confidence_threshold * len(confidences))
             _, indices = torch.topk(confidences, top_k, largest=True)
             embeddings = embeddings[indices]
@@ -48,7 +52,6 @@ class MetricLearningLoss(nn.Module):
         # Sample triplets and calculate loss
         indices_tuples = self.mining_func(embeddings, tags)
         loss = self.loss_func(embeddings, tags, indices_tuples)
-        #loss = self.loss_func(embeddings, tags)
         return loss
 
 
@@ -827,8 +830,12 @@ class v8JDELoss:
             cls_det = cls_det[:, :1]
         cls_det = cls_det.view(-1, 1)
 
-        tags_det = batch["tags"].to(device, non_blocking=True).long().view(-1, 1)
         bboxes_det = batch["bboxes"].to(device, non_blocking=True).float().view(-1, 4)  # normalized xywh
+        tags_batch = batch.get("tags", None)
+        if tags_batch is None:
+            tags_det = torch.zeros((bboxes_det.shape[0], 1), device=device, dtype=torch.long)
+        else:
+            tags_det = tags_batch.to(device, non_blocking=True).long().view(-1, 1)
 
         # ---- head outputs -> (B,A,C) ----
         B = feats[0].shape[0]
@@ -875,7 +882,7 @@ class v8JDELoss:
         target_bboxes = self.assigner.get_bboxes(gt_bboxes, target_gt_idx, fg_mask)
         _, target_scores = self.assigner.get_scores(gt_labels, target_gt_idx, fg_mask, num_classes=self.nc)
         target_scores = target_scores.to(dtype)
-        target_scores_sum = max(target_scores.sum(), 1)
+        target_scores_sum = target_scores.sum().clamp_min(1.0)
 
         # ---- losses ----
         loss = torch.zeros(4, device=device)
@@ -1141,7 +1148,18 @@ class v8DetectionLoss:
         self, preds: dict[str, torch.Tensor] | tuple[torch.Tensor, dict[str, torch.Tensor]]
     ) -> dict[str, torch.Tensor]:
         """Parse model predictions to extract features."""
-        return preds[1] if isinstance(preds, tuple) else preds
+        if isinstance(preds, tuple):
+            return preds[1]
+        if isinstance(preds, list):
+            # Backward compatibility for callers that pass raw per-level tensors.
+            # Each tensor shape: (B, reg_max*4 + sum(nc), H, W)
+            feats = preds
+            bs = feats[0].shape[0]
+            box_ch = self.reg_max * 4
+            boxes = torch.cat([f[:, :box_ch].view(bs, box_ch, -1) for f in feats], dim=-1)
+            scores = torch.cat([f[:, box_ch:].view(bs, -1, f.shape[-2] * f.shape[-1]) for f in feats], dim=-1)
+            return {"boxes": boxes, "scores": scores, "feats": feats}
+        return preds
 
     def __call__(
         self,

@@ -7,6 +7,8 @@ from .kalman_filter import chi2inv95
 
 from ultralytics.utils.metrics import batch_probiou, bbox_ioa
 
+EMB_GATE_THRESHOLD = 0.3
+
 try:
     import lap  # for linear_assignment
 
@@ -80,7 +82,7 @@ def iou_distance(atracks: list, btracks: list) -> np.ndarray:
         >>> btracks = [np.array([5, 5, 15, 15]), np.array([25, 25, 35, 35])]
         >>> cost_matrix = iou_distance(atracks, btracks)
     """
-    if atracks and isinstance(atracks[0], np.ndarray) or btracks and isinstance(btracks[0], np.ndarray):
+    if (atracks and isinstance(atracks[0], np.ndarray)) or (btracks and isinstance(btracks[0], np.ndarray)):
         atlbrs = atracks
         btlbrs = btracks
     else:
@@ -126,8 +128,6 @@ def embedding_distance(tracks: list, detections: list, metric: str = "cosine") -
     if cost_matrix.size == 0:
         return cost_matrix
     det_features = np.asarray([track.curr_feat for track in detections], dtype=np.float32)
-    # for i, track in enumerate(tracks):
-    # cost_matrix[i, :] = np.maximum(0.0, cdist(track.smooth_feat.reshape(1,-1), det_features, metric))
     track_features = np.asarray([track.smooth_feat for track in tracks], dtype=np.float32)
     cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))  # Normalized features
     return cost_matrix
@@ -172,17 +172,12 @@ def fuse_motion(kf, cost_matrix, tracks, detections, only_position=False, lambda
     return cost_matrix
 
 def gate(cost_matrix, emb_cost):
-    """
-    :param tracks: list[STrack]
-    :param detections: list[BaseTrack]
-    :param metric:
-    :return: cost_matrix np.ndarray
-    """
+    """Gate association cost matrix using an embedding distance threshold."""
 
     if cost_matrix.size == 0:
         return cost_matrix
 
-    index = emb_cost > 0.3
+    index = emb_cost > EMB_GATE_THRESHOLD
     cost_matrix[index] = 1
 
     return cost_matrix

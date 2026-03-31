@@ -1,3 +1,7 @@
+"""JDE prediction pipeline built on top of the generic BasePredictor."""
+
+from typing import Any
+
 from ultralytics.engine.results import Results
 from ultralytics.engine.predictor import BasePredictor
 from ultralytics.utils import DEFAULT_CFG, ops
@@ -8,7 +12,7 @@ class JDEPredictor(BasePredictor):
         super().__init__(cfg, overrides, _callbacks)
         self.args.task = "jde"
 
-    def postprocess(self, preds, img, orig_imgs):
+    def postprocess(self, preds: Any, img, orig_imgs):
         # preds can be (y, preds_dict)
         if isinstance(preds, (tuple, list)):
             preds = preds[0]
@@ -28,7 +32,7 @@ class JDEPredictor(BasePredictor):
 
         results = []
         for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0]):
-            # pred cant be empty
+            # pred may be empty for images with no detections
             if pred is not None and pred.shape[0]:
                 pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
 
@@ -38,8 +42,7 @@ class JDEPredictor(BasePredictor):
                 names=self.model.names,
                 boxes=pred[:, :6] if pred is not None else pred,
             )
-            EMBED_DIM = 128
-            r.embeds = pred[:, -EMBED_DIM:]
+            r.embeds = pred[:, 6:] if pred is not None else pred
             results.append(r)
 
         return results

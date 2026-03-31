@@ -307,6 +307,8 @@ class DetectionModel(BaseModel):
 
         # Define model
         ch = self.yaml["ch"] = self.yaml.get("ch", ch)  # input channels
+        if isinstance(self.yaml.get("nc"), int):
+            self.yaml["nc"] = [self.yaml["nc"]]
         if nc and nc != self.yaml["nc"]:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
@@ -1142,6 +1144,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     max_channels = float("inf")
     legacy = d.get("legacy", False)  # backward compatibility for v3/v5/v8/v9 models
     nc, act, scales = (d.get(x) for x in ("nc", "activation", "scales"))
+    if isinstance(nc, int):
+        nc = [nc]
+        d["nc"] = nc
     end2end = d.get("end2end", False)  # default to False for models without end2end config
     reg_max = d.get("reg_max", 16)
     depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
@@ -1482,7 +1487,7 @@ def yaml_model_load(path):
 
     nc = d.get("nc", None)
     if isinstance(nc, int):
-        d["nc"] = [nc]
+        d["nc"] = nc
     elif isinstance(nc, list):
         d["nc"] = nc  # Already a list (multihead format)
     else:

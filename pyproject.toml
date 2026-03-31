@@ -87,6 +87,7 @@ dependencies = [
     "numba",
     "imaug @ git+https://github.com/imaug/imaug.git",
     "fastquadtree>=2.0.0",  # spatial index for NMM (non-max merging) with SAHI
+    "pytorch-metric-learning>=2.8.1",  # JDE metric learning loss
 ]
 
 # Optional dependencies ------------------------------------------------------------------------------------------------

@@ -225,6 +225,13 @@ class Detect(nn.Module):
 
         return dict(boxes=boxes, scores=scores, feats=x)
 
+    def pre_forward(self, x: list[Tensor]) -> list[Tensor]:
+        """Backward-compatible helper returning per-level raw head features."""
+        return [
+            torch.cat([self.cv2[i](x[i])] + [task_head[i](x[i]) for task_head in self.cv3], 1)
+            for i in range(self.nl)
+        ]
+
     def forward(
         self, x: list[Tensor]
     ) -> dict[str, Tensor] | Tensor | tuple[Tensor, dict[str, Tensor]]:

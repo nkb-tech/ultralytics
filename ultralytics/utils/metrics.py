@@ -831,6 +831,10 @@ def smooth(y, f=0.05):
 def plot_pr_curve(px, py, ap, save_dir=Path("pr_curve.png"), names={}, on_plot=None):
     """Plots a precision-recall curve."""
     fig, ax = plt.subplots(1, 1, figsize=(9, 6), tight_layout=True)
+    if len(py) == 0:
+        LOGGER.warning(f"WARNING ⚠️ skipping PR curve plot due to empty precision arrays: {save_dir}")
+        plt.close(fig)
+        return
     py = np.stack(py, axis=1)
 
     if 0 < len(names) < 21:  # display per-class legend if < 21 classes
@@ -856,6 +860,10 @@ def plot_pr_curve(px, py, ap, save_dir=Path("pr_curve.png"), names={}, on_plot=N
 def plot_mc_curve(px, py, save_dir=Path("mc_curve.png"), names={}, xlabel="Confidence", ylabel="Metric", on_plot=None):
     """Plots a metric-confidence curve."""
     fig, ax = plt.subplots(1, 1, figsize=(9, 6), tight_layout=True)
+    if len(py) == 0:
+        LOGGER.warning(f"WARNING ⚠️ skipping {ylabel}-confidence curve due to empty metric arrays: {save_dir}")
+        plt.close(fig)
+        return
 
     if 0 < len(names) < 21:  # display per-class legend if < 21 classes
         for i, y in enumerate(py):
@@ -1705,6 +1713,17 @@ class ReIDMetrics(SimpleClass):
         self.mota = 0.0
         self.idf1 = 0.0
 
+    @staticmethod
+    def _get_sklearn_metrics():
+        """Lazily import sklearn metrics to avoid hard import-time dependency."""
+        try:
+            from sklearn import metrics as skm
+        except ImportError as e:
+            raise ModuleNotFoundError(
+                "ReIDMetrics requires scikit-learn. Install it with: pip install scikit-learn"
+            ) from e
+        return skm
+
     def process_batch(self, preds, matched_tags):
         """
         Process a batch of predictions and matched tags to compute ReID metrics.
@@ -1712,25 +1731,32 @@ class ReIDMetrics(SimpleClass):
             preds (List[torch.Tensor]): A list of tensors containing the predictions for each image in the batch.
             matched_tags (List[torch.Tensor]): A list of tensors containing the matched tags for each image in the batch.
         """
+        if not preds or not matched_tags:
+            return
+
         # Flatten and extract batch predictions and targets
         flatten_preds = torch.cat(preds)
         confidences = flatten_preds[:, 4]
         embeds = flatten_preds[:, 6:]
-        tags = torch.cat(matched_tags)
+        tags = torch.cat(matched_tags).long()
 
         # Filter predictions and targets based on confidence and foreground mask
         fg_mask = tags > 0  # Only consider positive matches
         conf_mask = confidences > self.conf # Only consider confident predictions
         tags = tags[fg_mask & conf_mask]  # First tag filter
         embeds = embeds[fg_mask & conf_mask]  # First embedding filter
+        if tags.numel() == 0:
+            return
 
         # Filter predictions and targets based on multiplicity
         multiplicity_mask = torch.bincount(tags)[tags] > 1
         tags = tags[multiplicity_mask]  # Filter tags
         embeds = embeds[multiplicity_mask]  # Filter embeddings
+        if tags.numel() == 0:
+            return
 
         # Normalize embeddings for computing metrics
-        embeds = F.normalize(embeds, p=2, dim=1)
+        embeds = torch.nn.functional.normalize(embeds, p=2, dim=1)
 
         # Store embeddings and tags for computing metrics
         self.embeds.append(embeds)
@@ -1742,6 +1768,28 @@ class ReIDMetrics(SimpleClass):
         Returns:
             Dict[str, float]: A dictionary containing the ReID metrics for the current epoch.
         """
+        if not self.embeds or not self.tags:
+            return {
+                "val/pos_cos": 0.0,
+                "val/neg_cos": 0.0,
+                "val/pos_euc": 0.0,
+                "val/neg_euc": 0.0,
+                "val/cos_sep_ratio": 0.0,
+                "val/euc_sep_ratio": 0.0,
+                "val/cos_silhouette": 0.0,
+                "val/euc_silhouette": 0.0,
+                "val/davies_bouldin": 0.0,
+                "val/calinski_harabasz": 0.0,
+                "val/r1_acc": 0.0,
+                "val/r5_acc": 0.0,
+                "val/mean_ap": 0.0,
+                "val/hota": self.hota,
+                "val/mota": self.mota,
+                "val/idf1": self.idf1,
+            }
+
+        skm = self._get_sklearn_metrics()
+
         # Concatenate and convert to numpy arrays
         embeds = torch.cat(self.embeds).cpu().detach().numpy()
         tags = torch.cat(self.tags).cpu().detach().numpy()
@@ -1818,13 +1866,15 @@ class ReIDMetrics(SimpleClass):
             neg_dist (float): The average distance between negative pairs.
             distmat (numpy.ndarray): The distance matrix of shape (num_samples, num_samples).
         """
+        skm = ReIDMetrics._get_sklearn_metrics()
+
         # Step 1: Compute pairwise distance matrix
         if distance == "cosine":
             distmat = skm.pairwise_distances(embeddings, metric="cosine")
         elif distance == "euclidean":
             distmat = skm.pairwise_distances(embeddings, metric="euclidean")
         elif distance == "snr":
-            distmat = snr_distance(embeddings)
+            raise NotImplementedError("distance='snr' is not implemented.")
         else:
             raise ValueError(f"Invalid distance metric: {distance}")
 

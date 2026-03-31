@@ -138,22 +138,18 @@ class YOLODataset(BaseDataset):
                         segments = [seg for seg, valid in zip(segments, valid_mask) if valid]
 
                     cls_cols = lb[:, :1] if self.single_cls else lb[:, 0:-4]
-                    x["labels"].append(
-                        {
-                            "im_file": im_file,
-                            "shape": shape,
-                            "cls": cls_cols,
-                            "bboxes": lb[:, -4:],
-                            "segments": segments,
-                            "keypoints": keypoint,
-                            "normalized": True,
-                            "bbox_format": "xywh",
-                            
-                        }
-                    )
+                    label_entry = {
+                        "im_file": im_file,
+                        "shape": shape,
+                        "cls": cls_cols,
+                        "bboxes": lb[:, -4:],
+                        "segments": segments,
+                        "keypoints": keypoint,
+                        "normalized": True,
+                        "bbox_format": "xywh",
+                    }
                     if self.use_tags:
                         label_entry["tags"] = tags
-
                     x["labels"].append(label_entry)
                 # elif im_file and shape is not None:
                 #     x["labels"].append(
