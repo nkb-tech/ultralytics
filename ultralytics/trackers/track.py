@@ -10,9 +10,10 @@ from ultralytics.utils.checks import check_yaml
 
 from .bot_sort import BOTSORT
 from .byte_tracker import BYTETracker
+from .jde_tracker import JDETracker
 
 # A mapping of tracker types to corresponding tracker classes
-TRACKER_MAP = {"bytetrack": BYTETracker, "botsort": BOTSORT}
+TRACKER_MAP = {"bytetrack": BYTETracker, "botsort": BOTSORT, "jdetracker": JDETracker}
 
 
 def on_predict_start(predictor: object, persist: bool = False) -> None:
@@ -24,7 +25,7 @@ def on_predict_start(predictor: object, persist: bool = False) -> None:
         persist (bool): Whether to persist the trackers if they already exist.
 
     Raises:
-        AssertionError: If the tracker_type is not 'bytetrack' or 'botsort'.
+        AssertionError: If the tracker_type is unsupported.
 
     Examples:
         Initialize trackers for a predictor object:
@@ -37,8 +38,9 @@ def on_predict_start(predictor: object, persist: bool = False) -> None:
     tracker = check_yaml(predictor.args.tracker)
     cfg = IterableSimpleNamespace(**YAML.load(tracker))
 
-    if cfg.tracker_type not in {"bytetrack", "botsort"}:
-        raise AssertionError(f"Only 'bytetrack' and 'botsort' are supported for now, but got '{cfg.tracker_type}'")
+    if cfg.tracker_type not in TRACKER_MAP:
+        supported = ", ".join(sorted(TRACKER_MAP))
+        raise AssertionError(f"Only [{supported}] are supported for now, but got '{cfg.tracker_type}'")
 
     trackers = []
     for _ in range(predictor.dataset.bs):
@@ -77,7 +79,13 @@ def on_predict_postprocess_end(predictor: object, persist: bool = False) -> None
         det = (predictor.results[i].obb if is_obb else predictor.results[i].boxes).cpu().numpy()
         if len(det) == 0:
             continue
-        tracks = tracker.update(det, im0s[i])
+        if isinstance(tracker, JDETracker):
+            embeds = getattr(predictor.results[i], "embeds", None)
+            if embeds is not None and torch.is_tensor(embeds):
+                embeds = embeds.detach().cpu().numpy()
+            tracks = tracker.update(det, im0s[i], features=embeds)
+        else:
+            tracks = tracker.update(det, im0s[i])
         if len(tracks) == 0:
             continue
         idx = tracks[:, -1].astype(int)

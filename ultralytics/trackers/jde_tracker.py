@@ -143,6 +143,14 @@ class JDETracker(object):
         output_stracks = np.asarray([x.result for x in self.tracked_stracks if x.is_activated], dtype=np.float32)
         return output_stracks
 
+    def reset(self):
+        """Reset tracker state when source sequence changes."""
+        self.tracked_stracks = []
+        self.lost_stracks = []
+        self.removed_stracks = []
+        self.frame_id = 0
+        STrack.reset_id()
+
 
 def joint_stracks(tlista, tlistb):
     exists = {}
