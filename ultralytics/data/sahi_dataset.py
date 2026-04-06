@@ -451,28 +451,30 @@ class SAHIDataset(YOLODataset):
         # during cache_images() — we need original resolution for cropping
         kwargs["sahi"] = True
 
-        # BaseDataset cache='ram'/'low-ram' is constructed before dataloader workers are spawned.
-        # For SAHI this caches full-resolution source images and can be inherited by every worker,
-        # causing extreme host RAM usage on large datasets.
+        # cache='low-ram' / 'disk' / 'ram': keep BaseDataset caching (JPEG bytes, npy, or decoded tensors).
+        # Previously SAHI forced cache=None and cleared self.ims, so low-ram never actually applied.
         cache_val = kwargs.get("cache", None)
         cache_mode = "ram" if cache_val is True else cache_val.lower() if isinstance(cache_val, str) else cache_val
-        if cache_mode in {"ram", "low-ram"}:
+        if cache_mode == "ram":
             LOGGER.warning(
-                f"WARNING ⚠️ SAHI + cache='{cache_mode}' preloads full-resolution images before worker fork and can "
-                "multiply RAM usage across dataloader workers. Disabling base image cache for SAHI and relying on "
-                "the per-worker image buffer instead."
+                "WARNING ⚠️ SAHI + cache='ram' keeps every source image decoded in memory (often 50–100+ GB for large "
+                "datasets). Prefer cache='low-ram' (JPEG in RAM) or cache='disk' if you hit OOM."
             )
-            kwargs["cache"] = None
+        elif cache_mode == "low-ram":
+            LOGGER.info(
+                f"{colorstr('SAHIDataset')}: cache='low-ram' — full-res sources as JPEG bytes in RAM; decode on load "
+                f"(per-worker LRU up to {buffer_size} decoded images)."
+            )
 
         super().__init__(img_path=img_path, *args, **kwargs)
 
-        # SAHI uses its own per-worker _worker_image_cache and overrides load_image,
-        # so the base class buffer/ims storage is unnecessary and wastes ~50-100 GB RAM.
-        self.max_buffer_length = 0
-        self.buffer = []
-        self.ims = [None] * self.ni
-        self.im_hw0 = [None] * self.ni
-        self.im_hw = [None] * self.ni
+        # Without base cache, clear ims/buffer so we only hit disk + per-worker LRU (old behavior).
+        if not self.cache:
+            self.max_buffer_length = 0
+            self.buffer = []
+            self.ims = [None] * self.ni
+            self.im_hw0 = [None] * self.ni
+            self.im_hw = [None] * self.ni
 
         self._cache_image_shapes()
         self.slice_indices = self._precompute_slices()
@@ -786,8 +788,9 @@ class SAHIDataset(YOLODataset):
 
 
     def load_image(self, i, rect_mode=True):
-        """Load image without writing into BaseDataset's self.ims/self.buffer.
-        SAHI uses its own per-worker _worker_image_cache instead."""
+        """Load image; use BaseDataset cache (ram / low-ram / disk) when enabled."""
+        if self.cache:
+            return super().load_image(i, rect_mode)
         f = self.im_files[i]
         fn = self.npy_files[i]
         if fn.exists():

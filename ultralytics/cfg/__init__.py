@@ -321,6 +321,16 @@ def check_cfg(cfg, hard=True):
     """
     for k, v in cfg.items():
         if v is not None:  # None values may be from optional args
+                    # scale can be float or tuple (min, max) for RandomPerspective in augment.py
+            if k == "scale" and isinstance(v, (tuple, list)) and len(v) == 2:
+                try:
+                    cfg[k] = (float(v[0]), float(v[1]))
+                except (TypeError, ValueError):
+                    if hard:
+                        raise TypeError(
+                            f"'{k}={v}' is invalid. '{k}' must be float or tuple of two floats (e.g. (0.95, 1.0))"
+                        )
+                continue  # skip CFG_FRACTION_KEYS check for tuple scale
             if k in CFG_FLOAT_KEYS and not isinstance(v, (int, float)):
                 if hard:
                     raise TypeError(

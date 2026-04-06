@@ -1143,7 +1143,13 @@ class RandomPerspective:
         """
         self.degrees = degrees
         self.translate = translate
-        self.scale = scale
+        # Support tuple (min, max) for explicit scale range, or float for symmetric [1-s, 1+s]
+        if isinstance(scale, (tuple, list)):
+            self.scale_range = (float(scale[0]), float(scale[1]))
+            self.scale = max(abs(scale[0] - 1), abs(scale[1] - 1))  # for backward compat attribute access
+        else:
+            self.scale = scale
+            self.scale_range = None
         self.shear = shear
         self.perspective = perspective
         self.border = border  # mosaic border
@@ -1191,7 +1197,10 @@ class RandomPerspective:
         R = np.eye(3, dtype=np.float32)
         a = random.uniform(-self.degrees, self.degrees)
         # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
-        s = random.uniform(1 - self.scale, 1 + self.scale)
+        if self.scale_range is not None:
+            s = random.uniform(self.scale_range[0], self.scale_range[1])
+        else:
+            s = random.uniform(1 - self.scale, 1 + self.scale)
         # s = 2 ** random.uniform(-scale, scale)
         R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
 

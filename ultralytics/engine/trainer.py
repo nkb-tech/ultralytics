@@ -418,7 +418,7 @@ class BaseTrainer:
 
         # Initialize criterion
         if world_size > 1:
-            criterion = self.model.module.init_criterion(wclf_loss_weights=clf_loss_weights)
+            criterion = self.model.module.init_criterion(clf_loss_weights=clf_loss_weights)
             self.model.module.criterion = criterion
         else:
             criterion = self.model.init_criterion(clf_loss_weights=clf_loss_weights)
@@ -457,7 +457,9 @@ class BaseTrainer:
 
             self.model.train()
             if RANK != -1:
-                self.train_loader.sampler.set_epoch(epoch)
+                sampler = getattr(self.train_loader, "sampler", None)
+                if sampler is not None and hasattr(sampler, "set_epoch"):
+                    sampler.set_epoch(epoch)
             pbar = enumerate(self.train_loader)
             # Update dataloader attributes (optional)
             if epoch == (self.epochs - self.args.close_mosaic):
