@@ -211,7 +211,11 @@ def select_device(device="", batch=0, newline=False, verbose=True):
         if "," in device:
             device = ",".join([x for x in device.split(",") if x])  # remove sequential commas, i.e. "0,,1" -> "0,1"
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-        os.environ["CUDA_VISIBLE_DEVICES"] = device  # set environment variable - must be before assert is_available()
+        # If CUDA was already masked (e.g. script/shell set CUDA_VISIBLE_DEVICES before import torch),
+        # do not overwrite: a new value would be interpreted as physical GPU indices and break the mask.
+        prior_masked = visible is not None and str(visible).strip() != ""
+        if not prior_masked:
+            os.environ["CUDA_VISIBLE_DEVICES"] = device  # set environment variable - must be before assert is_available()
         if not (torch.cuda.is_available() and torch.cuda.device_count() >= len(device.split(","))):
             LOGGER.info(s)
             install = (
