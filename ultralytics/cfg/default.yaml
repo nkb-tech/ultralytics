@@ -49,7 +49,7 @@ mask_ratio: 4 # (int) mask downsample ratio (segment train only)
 # Classification
 dropout: 0.0 # (float) use dropout regularization (classify train only)
 weighted_loss: False # Whether to use weighted loss with weight=1/sqrt(n_samples)
-clf_loss_fn: "bce" # (str) classification loss function, choices=[bce, vfl, qfl]
+clf_loss_fn: "bce" # (str | list[str]) classification loss function per task head, choices=[bce, vfl, qfl, ecm, pp, ppqfl, focal]. Single string applies to all heads; list sets per-head loss (e.g. ["qfl", "bce", "bce"]).
 clf_loss_weights:  # (list[list[float]] | None) Class weights for weighted classification loss. If None or invalid, weights are auto-calculated from class distribution. Example: [0.1, 0.3, 0.5, ...]
 iou_loss_fn: "piouv2" # (str) IoU loss function, choices=[wiou, eiou, giou, diou, ciou, siou, shapeiou, piouv1, piouv2]
 nwd_loss: False # (bool) Whether to use Wasserstein Distance loss for BBox Regression

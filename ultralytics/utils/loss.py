@@ -702,7 +702,7 @@ class v8DetectionLoss:
         tal_topk: int = 10,
         tal_topk2: int | None = None,
         clf_loss_weights: list[list[float]] | None = None,
-        clf_loss_fn: str = "qfl",
+        clf_loss_fn: str | list[str] = "qfl",
         iou_loss_fn: str = "ciou",
         nwd_loss: bool = False,
         use_wiseiou: bool = False,
@@ -716,6 +716,9 @@ class v8DetectionLoss:
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings.
 
         Args:
+            clf_loss_fn: Classification loss function(s). Either a single string applied to all tasks,
+                or a list of strings specifying the loss per task head (e.g. ``["qfl", "bce", "bce"]``).
+                Choices: ``bce``, ``vfl``, ``qfl``, ``ecm``, ``pp``, ``ppqfl``, ``focal``.
             hierarchical_assign: If True, use one TaskAlignedAssigner per hierarchy level (hYOLO-style).
                 If None, enable when the Detect head has ``hierarchical=True`` and ``len(nc) > 1``.
                 If False, always use a single assigner on task 0 (legacy multitask behavior).
@@ -727,6 +730,14 @@ class v8DetectionLoss:
         self.nc: list[int] = m.nc if isinstance(m.nc, list) else [m.nc]
         self.n_tasks = len(self.nc)
         assert self.n_tasks >= 1, "nc must be at least 1."
+
+        # Normalize clf_loss_fn to a per-task list
+        if isinstance(clf_loss_fn, str):
+            clf_loss_fn_list = [clf_loss_fn] * self.n_tasks
+        else:
+            clf_loss_fn_list = list(clf_loss_fn)
+            if len(clf_loss_fn_list) < self.n_tasks:
+                clf_loss_fn_list.extend([clf_loss_fn_list[-1]] * (self.n_tasks - len(clf_loss_fn_list)))
         
         # Per-task classification loss weights
         self.clf_loss_weights = [
@@ -740,41 +751,13 @@ class v8DetectionLoss:
         # Initialize classification loss functions for each task
         cls_losses = []
         for i in range(self.n_tasks):
-            if clf_loss_fn == "bce":
-                cls_losses.append(BCELoss(reduction="none", weight=self.clf_loss_weights[i]))
-            elif clf_loss_fn == "vfl":
-                cls_loss_fn = VarifocalLoss
-                cls_losses.append(cls_loss_fn(weight=self.clf_loss_weights[i]))
-            elif clf_loss_fn == "qfl":
-                cls_loss_fn = QualityFocalLoss
-                cls_losses.append(cls_loss_fn(weight=self.clf_loss_weights[i]))
-            elif clf_loss_fn == "ecm":
-                cls_losses.append(EffectiveClassMarginLoss(
-                    num_classes=self.nc[i],
-                    reduction='none',
-                    weight=self.clf_loss_weights[i]
-                ))
-            elif clf_loss_fn == "pp":
-                cls_losses.append(PPLoss(
-                    num_levels=len(m.stride),
-                    strides=m.stride.tolist(),
-                    reduction='none',
-                    weight=self.clf_loss_weights[i],
-                    verbose=verbose,
-                ))
-            elif clf_loss_fn == "ppqfl":
-                cls_losses.append(PPQualityFocalLoss(
-                    num_levels=len(m.stride),
-                    strides=m.stride.tolist(),
-                    weight=self.clf_loss_weights[i],
-                    verbose=verbose,
-                ))
-            elif clf_loss_fn == "focal":
-                cls_losses.append(FocalLoss())
-            else:
-                raise ValueError(f"Unknown classification loss function: {clf_loss_fn}")
+            cls_losses.append(self._build_cls_loss(
+                clf_loss_fn_list[i], self.clf_loss_weights[i], self.nc[i], m, verbose,
+            ))
         self.cls_losses = nn.ModuleList(cls_losses)
-        self.cls_losses.to(device)  # Move loss modules (buffers) to model device
+        self.cls_losses.to(device)
+
+        self.clf_loss_fn_list = clf_loss_fn_list
 
         # Also keep standard BCE for compatibility
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
@@ -833,7 +816,8 @@ class v8DetectionLoss:
         ).to(device)
         
         if verbose:
-            LOGGER.info(f"{colorstr('Using losses')}: {clf_loss_fn} loss & {iou_loss_fn} loss.")
+            clf_desc = clf_loss_fn_list if len(set(clf_loss_fn_list)) > 1 else clf_loss_fn_list[0]
+            LOGGER.info(f"{colorstr('Using losses')}: {clf_desc} cls loss & {iou_loss_fn} box loss.")
         
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
@@ -885,6 +869,44 @@ class v8DetectionLoss:
                 if child_idx < self.nc[level]:
                     parent_indices[child_idx] = int(parent_idx)
             self.child_parent_maps[level] = parent_indices
+
+    @staticmethod
+    def _build_cls_loss(name: str, weight, nc: int, detect_module, verbose: bool = True):
+        """Build a single classification loss module by name.
+
+        Args:
+            name: Loss function name (bce, vfl, qfl, ecm, pp, ppqfl, focal).
+            weight: Per-class weight tensor for this task.
+            nc: Number of classes for this task.
+            detect_module: The Detect head module (used by pp/ppqfl for stride info).
+            verbose: Whether to log details.
+        """
+        if name == "bce":
+            return BCELoss(reduction="none", weight=weight)
+        if name == "vfl":
+            return VarifocalLoss(weight=weight)
+        if name == "qfl":
+            return QualityFocalLoss(weight=weight)
+        if name == "ecm":
+            return EffectiveClassMarginLoss(num_classes=nc, reduction="none", weight=weight)
+        if name == "pp":
+            return PPLoss(
+                num_levels=len(detect_module.stride),
+                strides=detect_module.stride.tolist(),
+                reduction="none",
+                weight=weight,
+                verbose=verbose,
+            )
+        if name == "ppqfl":
+            return PPQualityFocalLoss(
+                num_levels=len(detect_module.stride),
+                strides=detect_module.stride.tolist(),
+                weight=weight,
+                verbose=verbose,
+            )
+        if name == "focal":
+            return FocalLoss()
+        raise ValueError(f"Unknown classification loss function: {name}")
 
     def _compute_dependency_penalty(
         self,
@@ -1228,7 +1250,7 @@ class v8SegmentationLoss(v8DetectionLoss):
         tal_topk: int = 10,
         tal_topk2: int | None = None,
         clf_loss_weights: list[list[float]] | None = None,
-        clf_loss_fn: str = "bce",
+        clf_loss_fn: str | list[str] = "bce",
         iou_loss_fn: str = "ciou",
         nwd_loss: bool = False,
         use_wiseiou: bool = False,
