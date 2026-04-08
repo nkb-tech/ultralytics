@@ -20,6 +20,13 @@ from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
 from ultralytics.utils.plotting import plot_images
 
 
+SIZE_RANGES = {
+    "s": (0, 32**2),
+    "m": (32**2, 96**2),
+    "l": (96**2, float("inf")),
+}
+
+
 class DetectionValidator(BaseValidator):
     """Detection validator with multitask, SAHI, end2end, and RKNN support.
 
@@ -30,6 +37,7 @@ class DetectionValidator(BaseValidator):
         end2end (bool): Whether model uses end-to-end (NMS-free) detection.
         sahi_enabled (bool): Whether SAHI mode is active.
         metrics (list[DetMetrics]): Per-task metrics instances.
+        size_metrics (dict[str, list[DetMetrics]]): Per-size per-task metrics (s/m/l).
         confusion_matrices (list[ConfusionMatrix]): Per-task confusion matrices.
     """
 
@@ -88,6 +96,12 @@ class DetectionValidator(BaseValidator):
             for names in self.names
         ]
         self.confusion_matrices = [ConfusionMatrix(nc=nc_i) for nc_i in self.nc]
+
+        # Per-size (small/medium/large) per-task metrics
+        self.size_metrics = {
+            sz: [DetMetrics(save_dir=self.save_dir, names=names) for names in self.names]
+            for sz in SIZE_RANGES
+        }
 
         self.seen = 0
         self.jdict = []
@@ -328,6 +342,15 @@ class DetectionValidator(BaseValidator):
             nl = len(cls)
             no_pred = predn["cls_0"].shape[0] == 0
 
+            # Pre-compute IoU once (reused across tasks and size buckets)
+            iou = box_iou(pbatch["bboxes"], predn["bboxes"]) if nl and not no_pred else None
+
+            # GT areas in pixel coords for per-size metrics
+            gt_areas = None
+            if nl:
+                bboxes = pbatch["bboxes"]
+                gt_areas = (bboxes[:, 2] - bboxes[:, 0]) * (bboxes[:, 3] - bboxes[:, 1])
+
             for t in range(self.num_tasks):
                 gt_cls = cls[:, t]
                 stat = {
@@ -343,7 +366,7 @@ class DetectionValidator(BaseValidator):
                     stat["conf"] = predn[f"conf_{t}"]
                     stat["pred_cls"] = predn[f"cls_{t}"]
                     if nl:
-                        stat.update(self._process_batch(predn, pbatch, task=t))
+                        stat.update(self._process_batch(predn, pbatch, task=t, iou=iou))
                     else:
                         stat["tp"] = np.zeros((predn["cls_0"].shape[0], self.niou), dtype=bool)
 
@@ -355,6 +378,9 @@ class DetectionValidator(BaseValidator):
                         gt_bboxes=pbatch["bboxes"],
                         gt_cls=gt_cls,
                     )
+
+            # Per-size metrics (small / medium / large)
+            self._update_size_metrics(predn, cls, iou, gt_areas, no_pred, nl)
 
             if no_pred:
                 continue
@@ -385,6 +411,47 @@ class DetectionValidator(BaseValidator):
         for img_key in self.sahi_aggregator.get_completed_images():
             self._process_complete_image(img_key)
             self.sahi_aggregator.cleanup_image(img_key)
+
+    def _update_size_metrics(self, predn, cls, iou, gt_areas, no_pred, nl):
+        """Update per-size (small/medium/large) metrics for one image.
+
+        Args:
+            predn (dict[str, torch.Tensor]): Prepared predictions.
+            cls (torch.Tensor): GT class labels (M, num_tasks).
+            iou (torch.Tensor | None): Pre-computed IoU matrix (M_gt, N_pred).
+            gt_areas (torch.Tensor | None): GT box areas in pixel coords, shape (M,).
+            no_pred (bool): True if there are no predictions.
+            nl (int): Number of GT labels.
+        """
+        for sz, (lo, hi) in SIZE_RANGES.items():
+            if gt_areas is not None:
+                smask = (gt_areas >= lo) & (gt_areas < hi)
+            else:
+                smask = None
+            n_sz = int(smask.sum()) if smask is not None else 0
+
+            for t in range(self.num_tasks):
+                gt_cls_t = cls[:, t] if cls.dim() > 1 else cls
+                sz_stat = {
+                    "target_cls": gt_cls_t[smask] if n_sz else gt_cls_t[:0],
+                    "target_img": gt_cls_t[smask].unique() if n_sz else gt_cls_t[:0].unique(),
+                }
+
+                if no_pred:
+                    sz_stat["conf"] = torch.zeros(0, device=self.device)
+                    sz_stat["pred_cls"] = torch.zeros(0, device=self.device)
+                    sz_stat["tp"] = np.zeros((0, self.niou), dtype=bool)
+                elif n_sz and iou is not None:
+                    sz_stat["conf"] = predn[f"conf_{t}"]
+                    sz_stat["pred_cls"] = predn[f"cls_{t}"]
+                    tp_sz = self.match_predictions(predn[f"cls_{t}"], gt_cls_t[smask], iou[smask])
+                    sz_stat["tp"] = tp_sz.cpu().numpy()
+                else:
+                    sz_stat["conf"] = predn[f"conf_{t}"]
+                    sz_stat["pred_cls"] = predn[f"cls_{t}"]
+                    sz_stat["tp"] = np.zeros((predn[f"cls_{t}"].shape[0], self.niou), dtype=bool)
+
+                self.size_metrics[sz][t].update_stats(sz_stat)
 
     def _process_complete_image(self, img_key):
         """Process a complete SAHI image: aggregate, NMS, compute metrics."""
@@ -467,8 +534,13 @@ class DetectionValidator(BaseValidator):
                 ], 1) if npr > 0 else None
                 self.confusion_matrices[t].process_batch(detections=det, gt_bboxes=gt_bboxes_xyxy, gt_cls=gt_cls_t)
 
+        # Per-size metrics for SAHI images
+        iou_sahi = box_iou(gt_bboxes_xyxy, aggregated_pred["bboxes"]) if nl and npr > 0 else None
+        gt_areas = (gt_bboxes_xyxy[:, 2] - gt_bboxes_xyxy[:, 0]) * (gt_bboxes_xyxy[:, 3] - gt_bboxes_xyxy[:, 1]) if nl else None
+        self._update_size_metrics(aggregated_pred, gt_cls, iou_sahi, gt_areas, npr == 0, nl)
+
     def _process_batch(
-        self, preds: dict[str, torch.Tensor], batch: dict[str, Any], task: int = 0
+        self, preds: dict[str, torch.Tensor], batch: dict[str, Any], task: int = 0, iou: torch.Tensor | None = None,
     ) -> dict[str, np.ndarray]:
         """Compute true positive matrix. Aligns with upstream (preds, batch) -> dict.
 
@@ -476,6 +548,7 @@ class DetectionValidator(BaseValidator):
             preds (dict[str, torch.Tensor]): Prediction dict with bboxes, cls_{task}.
             batch (dict[str, Any]): Batch dict with bboxes, cls (M, num_tasks) or (M,).
             task (int): Task index.
+            iou (torch.Tensor | None): Pre-computed IoU matrix (M_gt, N_pred). Computed if None.
 
         Returns:
             (dict[str, np.ndarray]): Dictionary with 'tp' key (numpy array of shape (N, niou)).
@@ -486,7 +559,8 @@ class DetectionValidator(BaseValidator):
         if gt_cls.shape[0] == 0 or pred_cls.shape[0] == 0:
             return {"tp": np.zeros((pred_cls.shape[0], self.niou), dtype=bool)}
 
-        iou = box_iou(batch["bboxes"], preds["bboxes"])
+        if iou is None:
+            iou = box_iou(batch["bboxes"], preds["bboxes"])
         return {"tp": self.match_predictions(pred_cls, gt_cls, iou).cpu().numpy()}
 
     def finalize_metrics(self, *args, **kwargs):
@@ -518,6 +592,9 @@ class DetectionValidator(BaseValidator):
     def gather_stats(self) -> None:
         """Gather stats from all GPUs (multitask: per-task stats)."""
         stats_to_gather = [m.stats for m in self.metrics]
+        size_stats_to_gather = {
+            sz: [sm.stats for sm in sms] for sz, sms in self.size_metrics.items()
+        }
         if RANK == 0:
             gathered = [None] * dist.get_world_size()
             dist.gather_object(stats_to_gather, gathered, dst=0)
@@ -528,6 +605,19 @@ class DetectionValidator(BaseValidator):
                         for k in merged:
                             merged[k].extend(rank_stats[t].get(k, []))
                 m.stats = merged
+
+            # Gather per-size stats
+            sz_gathered = [None] * dist.get_world_size()
+            dist.gather_object(size_stats_to_gather, sz_gathered, dst=0)
+            for sz, sms in self.size_metrics.items():
+                for t, sm in enumerate(sms):
+                    merged = {k: [] for k in sm.stats}
+                    for rank_data in sz_gathered:
+                        if rank_data and sz in rank_data and t < len(rank_data[sz]):
+                            for k in merged:
+                                merged[k].extend(rank_data[sz][t].get(k, []))
+                    sm.stats = merged
+
             gathered_jdict = [None] * dist.get_world_size()
             dist.gather_object(self.jdict, gathered_jdict, dst=0)
             self.jdict = []
@@ -536,10 +626,14 @@ class DetectionValidator(BaseValidator):
             self.seen = len(self.dataloader.dataset)
         else:
             dist.gather_object(stats_to_gather, None, dst=0)
+            dist.gather_object(size_stats_to_gather, None, dst=0)
             dist.gather_object(self.jdict, None, dst=0)
             self.jdict = []
             for m in self.metrics:
                 m.clear_stats()
+            for sms in self.size_metrics.values():
+                for sm in sms:
+                    sm.clear_stats()
 
     def get_stats(self):
         """Compute and return per-task metrics statistics."""
@@ -562,6 +656,14 @@ class DetectionValidator(BaseValidator):
         if fitness_values:
             results["fitness"] = np.mean(fitness_values)
 
+        # Per-size metrics (small / medium / large)
+        for sz in SIZE_RANGES:
+            for i, sm in enumerate(self.size_metrics[sz]):
+                prefix = f"task{i}_" if self.num_tasks > 1 else ""
+                sm.process()
+                results[f"{prefix}m/mAP50_{sz}(B)"] = sm.box.map50
+                results[f"{prefix}m/mAP50-95_{sz}(B)"] = sm.box.map
+
         return results
 
     def print_results(self) -> None:
@@ -574,6 +676,16 @@ class DetectionValidator(BaseValidator):
             LOGGER.info(pf % (label, self.seen, self.nt_per_class[i].sum(), *m.mean_results()))
             if self.nt_per_class[i].sum() == 0:
                 LOGGER.warning(f"no labels found in {label} set, cannot compute metrics without labels")
+
+        # Per-size summary
+        size_labels = {"s": "small(<32²)", "m": "medium(<96²)", "l": "large(≥96²)"}
+        for i in range(self.num_tasks):
+            label = f"task{i}" if self.num_tasks > 1 else "all"
+            parts = []
+            for sz in SIZE_RANGES:
+                sm = self.size_metrics[sz][i]
+                parts.append(f"{size_labels[sz]}={sm.box.map50:.3f}/{sm.box.map:.3f}")
+            LOGGER.info(f"{'':>22s} {label} mAP50/50-95 by size: {', '.join(parts)}")
 
         # Per-class results (SegmentMetrics has no .stats; use getattr for compatibility)
         for t in range(self.num_tasks):
