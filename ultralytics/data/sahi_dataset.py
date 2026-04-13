@@ -404,21 +404,20 @@ def cached_grid_count(img_h: int, img_w: int, crop_h: int, crop_w: int, overlap_
 
 
 class SAHIDataset(YOLODataset):
-    """
-    SAHI-enabled YOLO dataset for small object detection.
-    
-    Splits large images into overlapping crops for training/validation.
-    During validation, also includes letterboxed full image for large object detection.
-    
+    """SAHI-enabled YOLO dataset that splits large images into overlapping crops.
+
+    Supports mosaic/mixup on crops with minimal RAM overhead. Each crop is fetched via the
+    per-worker LRU cache, so mixing augmentations only cost extra JPEG decodes from memory.
+
     Args:
-        img_path: Path to images directory
-        cut_strategy: "grid" for deterministic slicing, "random" for object-centered crops
-        crop_size: Size of each crop (square)
-        overlap_ratio: Overlap between adjacent crops (0-1)
-        sampling_rate: Fraction of grid crops to sample (for random strategy)
-        min_object_coverage: Minimum fraction of object area in crop to keep it
-        object_crop_prob: Probability to center crop on object (for random strategy)
-        buffer_size: Per-worker image cache size
+        img_path (str): Path to images directory.
+        cut_strategy (str): "grid" for deterministic slicing, "random" for object-centered crops.
+        crop_size (int): Square crop side length.
+        overlap_ratio (float): Overlap between adjacent grid crops (0-1).
+        sampling_rate (float): Fraction of grid positions to sample (random strategy).
+        min_object_coverage (float): Minimum object area fraction in crop to keep label.
+        object_crop_prob (float): Probability to center crop on an object (random strategy).
+        buffer_size (int): Per-worker decoded image cache size.
     """
 
     def __init__(
@@ -434,7 +433,6 @@ class SAHIDataset(YOLODataset):
         *args,
         **kwargs,
     ):
-        # Normalize strategy name
         self.cut_strategy = "random" if cut_strategy in ("random_crop", "random") else cut_strategy
         self.crop_size = crop_size
         self.overlap_ratio = overlap_ratio
@@ -444,42 +442,34 @@ class SAHIDataset(YOLODataset):
         self.use_slicing = (self.cut_strategy == "grid")
         self._epoch = 0
         self._buffer_size = buffer_size
-        
         self.image_shapes: Dict[int, Tuple[int, int]] = {}
 
-        # sahi=True MUST be passed to super() so load_image() does NOT resize
-        # during cache_images() — we need original resolution for cropping
+        # sahi=True prevents load_image() from resizing — we need original resolution for cropping
         kwargs["sahi"] = True
 
-        # cache='low-ram' / 'disk' / 'ram': keep BaseDataset caching (JPEG bytes, npy, or decoded tensors).
-        # Previously SAHI forced cache=None and cleared self.ims, so low-ram never actually applied.
         cache_val = kwargs.get("cache", None)
         cache_mode = "ram" if cache_val is True else cache_val.lower() if isinstance(cache_val, str) else cache_val
         if cache_mode == "ram":
             LOGGER.warning(
-                "WARNING ⚠️ SAHI + cache='ram' keeps every source image decoded in memory (often 50–100+ GB for large "
-                "datasets). Prefer cache='low-ram' (JPEG in RAM) or cache='disk' if you hit OOM."
-            )
-        elif cache_mode == "low-ram":
-            LOGGER.info(
-                f"{colorstr('SAHIDataset')}: cache='low-ram' — full-res sources as JPEG bytes in RAM; decode on load "
-                f"(per-worker LRU up to {buffer_size} decoded images)."
+                "WARNING ⚠️ SAHI + cache='ram' keeps every source image decoded in memory. "
+                "Prefer cache='low-ram' or cache='disk'."
             )
 
         super().__init__(img_path=img_path, *args, **kwargs)
 
-        # Without base cache, clear ims/buffer so we only hit disk + per-worker LRU (old behavior).
+        # Without base cache, clear decoded images but keep buffer for mosaic sampling
         if not self.cache:
-            self.max_buffer_length = 0
-            self.buffer = []
             self.ims = [None] * self.ni
             self.im_hw0 = [None] * self.ni
             self.im_hw = [None] * self.ni
 
         self._cache_image_shapes()
         self.slice_indices = self._precompute_slices()
-        
-        # Sort by image index for better cache locality
+
+        # Re-size buffer for slice count (base class sized it for image count)
+        if self.augment:
+            self.max_buffer_length = min(len(self.slice_indices), self.batch_size * 8, 1000)
+
         if self.use_slicing:
             self.slice_indices.sort(key=lambda x: x[0])
 
@@ -524,6 +514,12 @@ class SAHIDataset(YOLODataset):
         """Get crop image and transformed labels for a slice index."""
         img_idx, slice_idx, coords = self.slice_indices[index]
         x1, y1, x2, y2 = coords
+
+        # Track slice indices in buffer for mosaic/mixup sampling
+        if self.augment:
+            self.buffer.append(index)
+            if len(self.buffer) >= self.max_buffer_length:
+                self.buffer.pop(0)
 
         im = self._get_cached_image(img_idx)
         actual_h, actual_w = im.shape[:2]
@@ -665,8 +661,6 @@ class SAHIDataset(YOLODataset):
             "cls": cls.astype(np.float32),
             "segments": new_segments,
         }
-
-
 
     def _transform_labels_to_crop(
         self,
@@ -812,25 +806,24 @@ class SAHIDataset(YOLODataset):
         return im, (h0, w0), im.shape[:2]
 
     def _get_cached_image(self, img_idx: int) -> np.ndarray:
-        """Get image with a per-worker cache and FIFO eviction by entry count."""
+        """Get decoded image from per-worker LRU cache, loading on miss."""
         import torch
-        
+
         worker_info = torch.utils.data.get_worker_info()
-        current_worker_id = worker_info.id if worker_info else -1
-        
-        if self._worker_image_cache is None or self._worker_id != current_worker_id:
+        wid = worker_info.id if worker_info else -1
+
+        if self._worker_image_cache is None or self._worker_id != wid:
             self._worker_image_cache = {}
-            self._worker_id = current_worker_id
-        
+            self._worker_id = wid
+
         if img_idx in self._worker_image_cache:
             return self._worker_image_cache[img_idx]
-        
+
         im, _, _ = self.load_image(img_idx)
-        
+
         while len(self._worker_image_cache) >= self._buffer_size:
-            oldest_key = next(iter(self._worker_image_cache))
-            del self._worker_image_cache[oldest_key]
-        
+            del self._worker_image_cache[next(iter(self._worker_image_cache))]
+
         self._worker_image_cache[img_idx] = im
         return im
 
@@ -893,14 +886,8 @@ class SAHIDataset(YOLODataset):
         return bboxes.astype(np.float64)
 
     def build_transforms(self, hyp: Optional[Any] = None) -> Compose:
-        """Build augmentation transforms. Mosaic/MixUp are disabled for SAHI because each
-        mix image requires a full-resolution decode from disk, creating a 4x I/O multiplier
-        that starves the GPU. SAHI crops already provide spatial diversity."""
+        """Build augmentation transforms including mosaic/mixup on SAHI crops."""
         if self.augment:
-            hyp = copy(hyp)
-            hyp.mosaic = 0.0
-            hyp.mixup = 0.0
-            hyp.copy_paste = 0.0
             transforms = v8_transforms(dataset=self, imgsz=self.crop_size, hyp=hyp, stretch=False)
         else:
             transforms = Compose([LetterBox(new_shape=(self.crop_size, self.crop_size), scaleup=False)])
@@ -946,8 +933,6 @@ class SAHIDataset(YOLODataset):
         LOGGER.info("\n".join(lines))
 
 
-# ==================== Random Crop Generation ====================
-
 def _generate_random_coords(
     img_h: int,
     img_w: int,
@@ -957,12 +942,7 @@ def _generate_random_coords(
     object_crop_prob: float,
     seed: int,
 ) -> List[Tuple[int, int, int, int]]:
-    """
-    Generate random crop coordinates, biased towards objects.
-    
-    Wrapper that pre-generates random values for numba-accelerated core.
-    """
-    # Pre-generate all random values with numpy (numba-compatible)
+    """Generate random crop coordinates biased towards objects."""
     rng = np.random.default_rng(seed)
     random_vals = rng.random(num_crops)
     box_indices = rng.integers(0, max(1, len(bboxes)), size=num_crops)

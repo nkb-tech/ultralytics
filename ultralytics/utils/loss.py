@@ -712,6 +712,7 @@ class v8DetectionLoss:
         child_parent_map: str | None = None,
         regul_alpha: float = 1.0,
         hierarchical_assign: bool | None = None,
+        task_loss_weights: list[float] | None = None,
     ):  # model must be de-paralleled
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings.
 
@@ -820,6 +821,22 @@ class v8DetectionLoss:
             LOGGER.info(f"{colorstr('Using losses')}: {clf_desc} cls loss & {iou_loss_fn} box loss.")
         
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+
+        # Per-task cls loss weights (higher weight = more gradient for that task).
+        # Normalized so sum == n_tasks to preserve total cls loss magnitude.
+        if task_loss_weights is not None and self.n_tasks > 1:
+            assert len(task_loss_weights) == self.n_tasks, (
+                f"task_loss_weights length {len(task_loss_weights)} != n_tasks {self.n_tasks}"
+            )
+            tw_sum = sum(task_loss_weights)
+            self.task_loss_weights = [w * self.n_tasks / tw_sum for w in task_loss_weights]
+            if verbose:
+                LOGGER.info(
+                    f"{colorstr('Task Loss Weights')}: raw={task_loss_weights}, "
+                    f"normalized={[round(w, 3) for w in self.task_loss_weights]}"
+                )
+        else:
+            self.task_loss_weights = [1.0] * self.n_tasks
 
         # Hierarchical dependency loss
         self.dependency_loss = dependency_loss and self.n_tasks > 1
@@ -1053,9 +1070,10 @@ class v8DetectionLoss:
                     offset,
                     task_idx,
                 )
-                task_cls_loss = task_cls_loss + dep_penalty * self.regul_alpha
+                # Clamp penalty so it cannot exceed base cls loss magnitude
+                task_cls_loss = task_cls_loss + (dep_penalty * self.regul_alpha).clamp(max=task_cls_loss.detach())
 
-            loss[1] += task_cls_loss
+            loss[1] += task_cls_loss * self.task_loss_weights[task_idx]
             per_task.append(
                 {
                     "norm_m": norm_m,
@@ -1183,9 +1201,10 @@ class v8DetectionLoss:
                     offset,
                     task_idx,
                 )
-                task_cls_loss = task_cls_loss + dep_penalty * self.regul_alpha
+                # Clamp penalty so it cannot exceed base cls loss magnitude
+                task_cls_loss = task_cls_loss + (dep_penalty * self.regul_alpha).clamp(max=task_cls_loss.detach())
 
-            loss[1] += task_cls_loss
+            loss[1] += task_cls_loss * self.task_loss_weights[task_idx]
 
             prev_target_scores_task = target_scores_task
             offset += n_cls_task

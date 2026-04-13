@@ -428,6 +428,7 @@ class DetectionModel(BaseModel):
             child_parent_map=getattr(self.args, "child_parent_map", None),
             regul_alpha=getattr(self.args, "regul_alpha", 1.0),
             hierarchical_assign=getattr(self.args, "hierarchical_assign", None),
+            task_loss_weights=getattr(self.args, "task_loss_weights", None),
         )
 
         return E2ELoss(self, v8DetectionLoss, **kwargs) if getattr(self, "end2end", False) else v8DetectionLoss(self, **kwargs)

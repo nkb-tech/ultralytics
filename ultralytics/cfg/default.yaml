@@ -62,6 +62,7 @@ hierarchical_assign:  # (bool | null) null = auto-enable per-level assigner when
 dependency_loss: False # (bool) parent-child penalty (requires child_parent_map JSON)
 child_parent_map:  # (str, optional) path to JSON: level -> {child_cls_idx: parent_cls_idx}
 regul_alpha: 1.0 # (float) dependency penalty scale (paper uses tuned alpha, e.g. 20–50)
+task_loss_weights:  # (list[float] | None) per-task cls loss weights for hierarchical training. Higher weight = more gradient. Example: [5.0, 1.5, 1.0] prioritizes task 0.
 
 # Val/Test settings ----------------------------------------------------------------------------------------------------
 val: True # (bool) validate/test during training
