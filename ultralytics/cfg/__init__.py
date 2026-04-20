@@ -32,16 +32,13 @@ from ultralytics.utils import (
 
 # Define valid tasks and modes
 MODES = {"train", "val", "predict", "export", "track", "benchmark", "compress"}
-TASKS = {"detect", "segment", "classify", "pose", "obb", "jde"}
+TASKS = {"detect", "segment", "classify", "pose", "obb"}
 TASK2DATA = {
     "detect": "coco8.yaml",
     "segment": "coco8-seg.yaml",
     "classify": "imagenet10",
     "pose": "coco8-pose.yaml",
     "obb": "dota8.yaml",
-    "jde": "coco8.yaml",
-   
-     
 }
 TASK2MODEL = {
     "detect": "yolo11n.pt",
@@ -49,7 +46,6 @@ TASK2MODEL = {
     "classify": "yolo11n-cls.pt",
     "pose": "yolo11n-pose.pt",
     "obb": "yolo11n-obb.pt",
-    "jde": "yolov11n-seg.pt",
 }
 TASK2METRIC = {
     "detect": "metrics/mAP50-95(B)",
@@ -109,6 +105,7 @@ CFG_FLOAT_KEYS = {  # integer or float arguments, i.e. x=2 and x=2.0
     "box",
     "cls",
     "dfl",
+    "reid",
     "degrees",
     "shear",
     "time",
@@ -129,7 +126,6 @@ CFG_FRACTION_KEYS = {  # fractional float arguments with 0.0<=values<=1.0
     "hsv_s",
     "hsv_v",
     "translate",
-    "scale",
     "perspective",
     "flipud",
     "fliplr",
@@ -163,6 +159,7 @@ CFG_INT_KEYS = {  # integer-only arguments
     "min_bbox",
     "min_imgsz",
     "max_plot_batches",
+    "reid_dim",
 }
 CFG_BOOL_KEYS = {  # boolean-only arguments
     "save",
@@ -275,10 +272,6 @@ def get_cfg(cfg: Union[str, Path, Dict, SimpleNamespace] = DEFAULT_CFG_DICT, ove
         check_dict_alignment(cfg, overrides)
         cfg = {**cfg, **overrides}  # merge cfg and overrides dicts (prefer overrides)
 
-    # --- JDE toggle: jde=True forces task='jde'
-    if cfg.get("jde", False):
-        cfg["task"] = "jde"
-        
     # Special handling for numeric project/name
     for k in "project", "name":
         if k in cfg and isinstance(cfg[k], (int, float)):
@@ -322,6 +315,22 @@ def check_cfg(cfg, hard=True):
         - None values are ignored as they may be from optional arguments.
         - Fraction keys are checked to be within the range [0.0, 1.0].
     """
+    if "scale" in cfg and cfg["scale"] is not None:
+        v = cfg["scale"]
+        if isinstance(v, (list, tuple)):
+            if len(v) != 2 or not all(isinstance(x, (int, float)) for x in v):
+                raise TypeError(
+                    f"'scale={v}' must be a list/tuple of 2 numbers (i.e. 'scale=[0.6, 1.0]')"
+                )
+            cfg["scale"] = list(v)
+        elif not isinstance(v, (int, float)):
+            if hard:
+                raise TypeError(
+                    f"'scale={v}' is of invalid type {type(v).__name__}. "
+                    f"Valid 'scale' types are int, float, or list (i.e. 'scale=0.5' or 'scale=[0.6, 1.0]')"
+                )
+            cfg["scale"] = float(v)
+
     for k, v in cfg.items():
         if v is not None:  # None values may be from optional args
             if k in CFG_FLOAT_KEYS and not isinstance(v, (int, float)):

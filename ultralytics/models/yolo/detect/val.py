@@ -216,11 +216,11 @@ class DetectionValidator(BaseValidator):
         dev = x.device
         n = x.shape[0]
         out = {"bboxes": x[:, :4]}
-        if x.shape[1] == 6:
-            # End2end: [x1,y1,x2,y2, conf, cls]
+        if self.end2end:
+            # End2end: [x1,y1,x2,y2, conf, cls, (embeds...)]
             out["conf_0"] = x[:, 4].flatten()
             out["cls_0"] = x[:, 5].long().float().flatten()
-            out["extra"] = torch.empty((n, 0), device=dev)
+            out["extra"] = x[:, 6:] if x.shape[1] > 6 else torch.empty((n, 0), device=dev)
         else:
             # Multitask: [box, conf0, cls0, conf1, cls1, ..., extra]
             for t in range(self.num_tasks):

@@ -463,6 +463,7 @@ class Exporter:
         model = model.fuse()
         head_mode = 'legacy'
         end2end = False
+        embed_dim = 0
         for m in model.modules():
             if isinstance(m, (Detect, RTDETRDecoder)):  # includes all Detect subclasses like Segment, Pose, OBB
                 m.dynamic = self.args.dynamic
@@ -471,9 +472,20 @@ class Exporter:
                 m.max_det = self.args.max_det
                 head_mode = getattr(m, "head_mode", "legacy")
                 end2end = getattr(m, "end2end", False)
+                embed_dim = getattr(m, "embed_dim", 0)
                 if self.args.nms and m.end2end:
                     LOGGER.warning(
                         "WARNING ⚠️ Your model is already end2end, no need to include nms inside the graph."
+                    )
+                    self.args.nms = False
+                # JDE + nms=True: TensorRT EfficientNMS plugin can't return extra tensors;
+                # CoreML NMS pipeline only supports confidence+coordinates outputs.
+                # ONNX nms=True now supported (PostDetectONNXNMS returns (dets, embeds)).
+                # OpenVINO / TF SavedModel / TFLite / TFjs use NMSModel which handles embeds as extras.
+                if self.args.nms and embed_dim > 0 and (engine or coreml):
+                    LOGGER.warning(
+                        f"WARNING ⚠️ In-graph 'nms=True' not supported for Re-ID embeddings with format='{self.args.format}'. "
+                        "Forcing 'nms=False' — run NMS externally and gather embeddings by index."
                     )
                     self.args.nms = False
                 if not isinstance(m, RTDETRDecoder) and self.args.nms and (onnx or engine):
@@ -542,7 +554,9 @@ class Exporter:
             "dtype": "uint8" if self.args.int8 else "float16" if self.args.half else "float32",
             "head_mode": head_mode,
             "end2end": end2end,
+            "embed_dim": embed_dim,
         }  # model metadata
+        self.has_embeds = embed_dim > 0
         if model.task == "pose":
             self.metadata["kpt_shape"] = model.model[-1].kpt_shape
 
@@ -650,7 +664,7 @@ class Exporter:
     @try_export
     def export_onnx(self, prefix=colorstr("ONNX:")):
         """YOLOv8 ONNX export."""
-        requirements = ["onnx>=1.12.0"]
+        requirements = ["onnx>=1.12.0,<1.17.0"]
         if self.args.simplify:
             requirements += ["onnxslim", "onnxscript", "onnxruntime" + ("-gpu" if torch.cuda.is_available() else "")]
         check_requirements(requirements)
@@ -660,7 +674,20 @@ class Exporter:
         LOGGER.info(f"\n{prefix} starting export with onnx {onnx.__version__} opset {opset_version}...")
         f = str(self.file.with_suffix(".onnx"))
 
-        if not self.args.nms:
+        if self.rknn:
+            y = self.model(self.im)
+            if isinstance(y, dict):
+                output_names = list(y.keys())
+            elif isinstance(y, (tuple, list)):
+                output_names = []
+                for item in y:
+                    if isinstance(item, dict):
+                        output_names.extend(item.keys())
+                    else:
+                        output_names.append(f"output_{len(output_names)}")
+            else:
+                output_names = ["outputs"]
+        elif not self.args.nms:
             if isinstance(self.model, SegmentationModel):
                 output_names = ["outputs", "proto"]
             else:
@@ -669,7 +696,12 @@ class Exporter:
             if isinstance(self.model, SegmentationModel):
                 output_names = ["indices", "outputs", "proto"]
             else:
-                output_names = ["num_dets", "bboxes", "scores", "labels"] if self.engine else ["output"]
+                if self.engine:
+                    output_names = ["num_dets", "bboxes", "scores", "labels"]
+                else:
+                    output_names = ["output"]
+                    if self.has_embeds:
+                        output_names.append("embeds")
 
         # Set shapes
         dynamic = dict()
@@ -690,7 +722,8 @@ class Exporter:
 
                 elif isinstance(self.model, DetectionModel):
                     if self.args.dynamic:
-                        dynamic["outputs"] = {0: "batch", 2: "anchors"}  # shape(1, 84, 8400)
+                        # shape(B, 4 + sum(nc) [+ embed_dim], A)
+                        dynamic["outputs"] = {0: "batch", 2: "anchors"}
             else:
                 # FIXME incorrect behaviour
                 if isinstance(self.model, SegmentationModel):
@@ -712,7 +745,9 @@ class Exporter:
                     elif self.onnx:
                         shapes["output"] = ["topk" if self.args.dynamic else self.args.batch, 7]
                         if self.args.dynamic:
-                            dynamic["output"] = {0: "num_boxes"}  # shape(num_boxes, 7), 7 = 1(batch_index) + 6
+                            dynamic["output"] = {0: "num_boxes"}  # shape(num_boxes, 7)
+                            if self.has_embeds:
+                                dynamic["embeds"] = {0: "num_boxes"}
                     else:
                         dynamic["output"] = {0: "batch"}
 
@@ -1778,16 +1813,23 @@ class Exporter:
         output1.name = "output"
         output1.description = "Coordinates of detected objects, class labels, and confidence score"
         output1.associatedFiles = [label_file]
+        extra_outputs = []
         if self.model.task == "segment":
             output2 = schema.TensorMetadataT()
             output2.name = "output"
             output2.description = "Mask protos"
             output2.associatedFiles = [label_file]
+            extra_outputs.append(output2)
+        if self.metadata.get("embed_dim", 0) > 0:
+            output_emb = schema.TensorMetadataT()
+            output_emb.name = "embeds"
+            output_emb.description = f"Re-ID embeddings (dim={self.metadata['embed_dim']})"
+            extra_outputs.append(output_emb)
 
         # Create subgraph info
         subgraph = schema.SubGraphMetadataT()
         subgraph.inputTensorMetadata = [input_meta]
-        subgraph.outputTensorMetadata = [output1, output2] if self.model.task == "segment" else [output1]
+        subgraph.outputTensorMetadata = [output1] + extra_outputs
         model_meta.subgraphMetadata = [subgraph]
 
         b = flatbuffers.Builder(0)
@@ -1942,11 +1984,18 @@ class IOSDetectModel(torch.nn.Module):
 
     def forward(self, x):
         """Normalize predictions of object detection model with input size-dependent factors."""
-        xywh, cls = self.model(x)[0].transpose(0, 1).split((4, self.nc), 1)
+        pred = self.model(x)[0].transpose(0, 1)  # (A, C)
+        embed_dim = getattr(self.model.model[-1], "embed_dim", 0)
+        if embed_dim > 0:
+            xywh, cls, emb = pred.split((4, self.nc, embed_dim), 1)
+        else:
+            xywh, cls = pred.split((4, self.nc), 1)
         if self.mlprogram and self.nc % 80 != 0:  # NMS bug https://github.com/ultralytics/ultralytics/issues/22309
-            pad_length = int(((self.nc + 79) // 80) * 80) - self.nc  # pad class length to multiple of 80
+            pad_length = int(((self.nc + 79) // 80) * 80) - self.nc
             cls = torch.nn.functional.pad(cls, (0, pad_length, 0, 0), "constant", 0)
 
+        if embed_dim > 0:
+            return cls, xywh * self.normalize, emb
         return cls, xywh * self.normalize
 
 

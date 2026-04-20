@@ -26,18 +26,30 @@ from ultralytics.utils.torch_utils import autocast, disable_dynamo
 
 from .metrics import bbox_iou, probiou, WiseIoULoss, wasserstein_loss
 
+
 class MetricLearningLoss(nn.Module):
-    def __init__(self):
-        super(MetricLearningLoss, self).__init__()
+    """Self-supervised Re-ID embedding loss using triplet margin with hard mining.
+
+    Based on the YOLO-JDE approach described in https://arxiv.org/abs/2501.13710
+    """
+
+    def __init__(
+        self, 
+        margin: float = 0.075, 
+        confidence_threshold: float = 1,
+        pos_strategy: str = 'hard',
+        neg_strategy: str = 'semihard',
+    ):
+        super().__init__()
         try:
             from pytorch_metric_learning import losses, miners
         except ImportError as e:
             raise ModuleNotFoundError(
-                "JDE training requires pytorch-metric-learning. Install it with: pip install pytorch-metric-learning"
+                "Re-ID training requires pytorch-metric-learning. Install it with: pip install pytorch-metric-learning"
             ) from e
-        self.mining_func = miners.BatchEasyHardMiner(pos_strategy='hard', neg_strategy='semihard')
-        self.loss_func = losses.TripletMarginLoss(margin=0.075)
-        self.confidence_threshold = 1
+        self.mining_func = miners.BatchEasyHardMiner(pos_strategy=pos_strategy, neg_strategy=neg_strategy)
+        self.loss_func = losses.TripletMarginLoss(margin=margin)
+        self.confidence_threshold = confidence_threshold
 
     def forward(self, embeddings, tags, confidences=None, normalize=False):
         # Select only the embeddings and tags for confidences on top X%
@@ -715,217 +727,6 @@ class KeypointLoss(nn.Module):
         e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)
         return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
 
-class v8JDELoss:
-    """Loss for one-pass JDE head returning preds dict with keys: 'boxes', 'scores', 'embeds', 'feats'."""
-
-    def __init__(self, model, tal_topk=10):
-        device = next(model.parameters()).device
-        self.device = device
-        self.hyp = model.args
-
-        m = model.model[-1]  # JDE() head
-        self.stride = m.stride
-
-        self.nc = int(sum(m.nc)) if isinstance(m.nc, (list, tuple)) else int(m.nc)
-        self.embed_dim = int(m.embed_dim)
-        self.reg_max = int(m.reg_max)
-        self.use_dfl = self.reg_max > 1
-
-        self.bce = nn.BCEWithLogitsLoss(reduction="none")
-        self.assigner = TaskAlignedAssigner(topk=tal_topk, alpha=0.5, beta=6.0)
-        self.bbox_loss = BboxLoss(self.reg_max).to(device)
-        self.proj = torch.arange(self.reg_max, dtype=torch.float, device=device)
-        self.embed_loss = MetricLearningLoss().to(device)
-
-    @staticmethod
-    def _unwrap_preds(preds):
-        """Val may pass (y, preds_dict). Train passes preds_dict directly."""
-        if isinstance(preds, tuple):
-            for p in preds:
-                if isinstance(p, dict):
-                    return p
-        return preds
-
-    @staticmethod
-    def _cat_level_or_tensor(x, B, C_expected):
-        """
-        x: Tensor (B,C,A) or (B,A,C), OR list of levels [(B,C,H,W) or (B,C,Ai)]
-        return: (B,A,C_expected)
-        """
-        if torch.is_tensor(x):
-            if x.ndim != 3:
-                raise TypeError(f"[v8JDELoss] expected 3D tensor, got {tuple(x.shape)}")
-            if x.shape[1] == C_expected:      # (B,C,A) -> (B,A,C)
-                return x.permute(0, 2, 1).contiguous()
-            if x.shape[2] == C_expected:      # (B,A,C)
-                return x.contiguous()
-            raise ValueError(f"[v8JDELoss] wrong C dim: expected {C_expected}, got {tuple(x.shape)}")
-
-        if isinstance(x, (list, tuple)):
-            if not x or not torch.is_tensor(x[0]):
-                raise TypeError("[v8JDELoss] list must contain tensors")
-            parts = []
-            for xi in x:
-                if xi.ndim == 4:  # (B,C,H,W) -> (B,C,HW)
-                    parts.append(xi.view(B, xi.shape[1], -1))
-                elif xi.ndim == 3:  # (B,C,Ai)
-                    parts.append(xi)
-                else:
-                    raise TypeError(f"[v8JDELoss] bad tensor ndim in list: {xi.ndim}")
-            t = torch.cat(parts, dim=2)  # (B,C,A)
-            if t.shape[1] != C_expected:
-                raise ValueError(f"[v8JDELoss] wrong C after cat: expected {C_expected}, got {t.shape[1]}")
-            return t.permute(0, 2, 1).contiguous()  # (B,A,C)
-
-        raise TypeError(f"[v8JDELoss] unsupported type: {type(x)}")
-
-    def preprocess(self, targets, batch_size, scale_tensor):
-        """
-        targets: (N, 7) = [batch_idx, cls, xywh(4), tag]
-        returns: (B, max_n, 6) = [cls, xyxy(4), tag]
-        """
-        nl, ne = targets.shape
-        if nl == 0:
-            return torch.zeros(batch_size, 0, ne - 1, device=targets.device, dtype=targets.dtype)
-
-        i = targets[:, 0]  # batch_idx
-        _, counts = i.unique(return_counts=True)
-        counts = counts.to(dtype=torch.int32)
-
-        out = torch.zeros(batch_size, counts.max(), ne - 1, device=targets.device, dtype=targets.dtype)
-        for j in range(batch_size):
-            m = (i == j)
-            n = int(m.sum())
-            if n:
-                out[j, :n] = targets[m, 1:]
-
-        # cls | xywh | tag -> cls | xyxy | tag
-        out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
-        return out
-
-    def bbox_decode(self, anchor_points, pred_dist):
-        # pred_dist: (B,A,4*reg_max) for DFL or (B,A,4)
-        if self.use_dfl:
-            b, a, c = pred_dist.shape
-            pred_dist = (
-                pred_dist.view(b, a, 4, c // 4)
-                .softmax(3)
-                .matmul(self.proj.to(dtype=pred_dist.dtype))
-            )
-        return dist2bbox(pred_dist, anchor_points, xywh=False)
-
-    def __call__(self, preds, batch):
-        preds = self._unwrap_preds(preds)
-
-        pred_boxes_raw = preds["boxes"]
-        pred_scores_raw = preds["scores"]
-        pred_embeds_raw = preds["embeds"]
-        feats = preds["feats"]  # list[(B,C,H,W)]
-
-        device = feats[0].device
-
-        # --- targets ---
-        batch_idx_det = batch["batch_idx"].to(device, non_blocking=True).long().view(-1, 1)
-
-        cls_det = batch["cls"].to(device, non_blocking=True).long()
-        if cls_det.ndim == 2 and cls_det.shape[1] > 1:
-            cls_det = cls_det[:, :1]
-        cls_det = cls_det.view(-1, 1)
-
-        bboxes_det = batch["bboxes"].to(device, non_blocking=True).float().view(-1, 4)  # normalized xywh
-        tags_batch = batch.get("tags", None)
-        if tags_batch is None:
-            tags_det = torch.zeros((bboxes_det.shape[0], 1), device=device, dtype=torch.long)
-        else:
-            tags_det = tags_batch.to(device, non_blocking=True).long().view(-1, 1)
-
-        # ---- head outputs -> (B,A,C) ----
-        B = feats[0].shape[0]
-        pred_distri = self._cat_level_or_tensor(pred_boxes_raw, B, C_expected=self.reg_max * 4)  # (B,A,4*reg_max)
-        pred_scores = self._cat_level_or_tensor(pred_scores_raw, B, C_expected=self.nc)          # (B,A,nc)
-        pred_embeds = self._cat_level_or_tensor(pred_embeds_raw, B, C_expected=self.embed_dim)   # (B,A,D)
-
-        dtype = pred_scores.dtype
-        pred_embeds = F.normalize(pred_embeds.float(), p=2, dim=2).to(dtype=dtype)
-
-        # ---- anchors ----
-        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
-        anchor_points = anchor_points.to(device)
-        stride_tensor = stride_tensor.to(device)
-
-        imgsz = torch.tensor(feats[0].shape[2:], device=device, dtype=torch.float32) * float(self.stride[0])
-        scale_tensor = imgsz[[1, 0, 1, 0]]  # (w,h,w,h)
-
-        # ---- targets preprocess ----
-        targets_det = torch.cat(
-            (batch_idx_det.float(), cls_det.float(), bboxes_det, tags_det.float()),
-            dim=1,
-        )  # (N,7)
-        targets_det = self.preprocess(targets_det, B, scale_tensor=scale_tensor)
-
-        gt_labels, gt_bboxes, gt_tags_det = targets_det.split((1, 4, 1), dim=2)
-        gt_labels = gt_labels.long()
-        gt_tags_det = gt_tags_det.long()
-        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
-
-        # ---- decode boxes ----
-        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # (B,A,4) xyxy
-
-        # ---- assign ----
-        _, fg_mask, target_gt_idx = self.assigner(
-            pred_scores.detach().sigmoid(),
-            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
-            anchor_points * stride_tensor,
-            gt_labels,
-            gt_bboxes,
-            mask_gt,
-        )
-
-        target_bboxes = self.assigner.get_bboxes(gt_bboxes, target_gt_idx, fg_mask)
-        _, target_scores = self.assigner.get_scores(gt_labels, target_gt_idx, fg_mask, num_classes=self.nc)
-        target_scores = target_scores.to(dtype)
-        target_scores_sum = target_scores.sum().clamp_min(1.0)
-
-        # ---- losses ----
-        loss = torch.zeros(4, device=device)
-
-        # cls
-        loss[1] = self.bce(pred_scores, target_scores).sum() / target_scores_sum
-
-        if fg_mask.sum():
-            # bbox + dfl
-            target_bboxes = target_bboxes / stride_tensor
-            loss[0], loss[2] = self.bbox_loss(
-                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
-            )
-
-            # embed
-            fg_mask = fg_mask.bool()
-
-            pred_embeds_fg = pred_embeds[fg_mask].float()  # (Nfg, D)
-            confidences = pred_scores[fg_mask].sigmoid().max(dim=1).values.float()  # (Nfg,)
-
-            gt_tags_flat = gt_tags_det.view(-1)              # (B*max_gt,)
-            target_gt_idx_fg = target_gt_idx[fg_mask].long() # (Nfg,)
-
-            valid = (target_gt_idx_fg >= 0) & (target_gt_idx_fg < gt_tags_flat.numel())
-
-            if valid.any():
-                target_tags_fg = gt_tags_flat[target_gt_idx_fg[valid]].view(-1)
-                pred_embeds_fg = pred_embeds_fg[valid]
-                confidences = confidences[valid]
-                loss[3] = self.embed_loss(pred_embeds_fg, target_tags_fg, confidences)
-            else:
-                loss[3] = pred_embeds.sum() * 0.0
-
-        # weights
-        loss[0] *= self.hyp.box
-        loss[1] *= self.hyp.cls
-        loss[2] *= self.hyp.dfl
-        loss[3] *= getattr(self.hyp, "clr", 1.0)
-
-        return loss.sum() * B, loss.detach()
-
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection.
     
@@ -938,6 +739,7 @@ class v8DetectionLoss:
         tal_topk: int = 10,
         tal_topk2: int | None = None,
         clf_loss_weights: list[list[float]] | None = None,
+        task_loss_weights: list[float] | None = None,
         clf_loss_fn: str = "qfl",
         iou_loss_fn: str = "ciou",
         nwd_loss: bool = False,
@@ -1018,7 +820,7 @@ class v8DetectionLoss:
             topk=tal_topk,
             num_classes=self.nc[0],  # Use first task for assignment
             alpha=0.5,
-            beta=6.0,
+            beta=3.0,
             stride=self.stride.tolist() if hasattr(self.stride, 'tolist') else self.stride,
             topk2=tal_topk2,
             iou_loss_fn=iou_loss_fn,
@@ -1036,6 +838,29 @@ class v8DetectionLoss:
             LOGGER.info(f"{colorstr('Using losses')}: {clf_loss_fn} loss & {iou_loss_fn} loss.")
         
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+
+        # Per-task cls loss weights (higher weight = more gradient for that task).
+        # Normalized so sum == n_tasks to preserve total cls loss magnitude.
+        if task_loss_weights is not None and self.n_tasks > 1:
+            assert len(task_loss_weights) == self.n_tasks, (
+                f"task_loss_weights length {len(task_loss_weights)} != n_tasks {self.n_tasks}"
+            )
+            tw_sum = sum(task_loss_weights)
+            self.task_loss_weights = [w * self.n_tasks / tw_sum for w in task_loss_weights]
+            if verbose:
+                LOGGER.info(
+                    f"{colorstr('Task Loss Weights')}: raw={task_loss_weights}, "
+                    f"normalized={[round(w, 3) for w in self.task_loss_weights]}"
+                )
+        else:
+            self.task_loss_weights = [1.0] * self.n_tasks
+
+        self.embed_dim = getattr(m, "embed_dim", 0)
+        self.has_embed = self.embed_dim > 0
+        self.n_losses = 4 if self.has_embed else 3
+        if self.has_embed:
+            self.embed_loss = MetricLearningLoss().to(device)
+
         disable_dynamo(self.__class__)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
@@ -1063,8 +888,8 @@ class v8DetectionLoss:
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
     def get_assigned_targets_and_loss(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> tuple:
-        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        """Calculate the sum of the loss for box, cls, dfl, and optionally reid."""
+        loss = torch.zeros(self.n_losses, device=self.device)
         pred_distri, pred_scores = (
             preds["boxes"].permute(0, 2, 1).contiguous(),
             preds["scores"].permute(0, 2, 1).contiguous(),
@@ -1109,7 +934,7 @@ class v8DetectionLoss:
 
             target_scores_task = target_scores_task * norm_align_metric
 
-            loss[1] += cls_loss_fn(
+            task_cls_loss = cls_loss_fn(
                 pred_scores=pred_scores_task,
                 gt_scores=target_scores_task, 
                 pred_bboxes=pred_bboxes,
@@ -1118,6 +943,8 @@ class v8DetectionLoss:
                 anchor_points=anchor_points,
                 stride_tensor=stride_tensor,
             ).sum() / target_scores_sum
+
+            loss[1] += task_cls_loss * self.task_loss_weights[task_idx]
 
             offset += n_cls_task
 
@@ -1136,10 +963,37 @@ class v8DetectionLoss:
                 stride_tensor,
             )
 
+        # ReID embedding loss
+        if self.has_embed and "embeds" in preds and fg_mask.sum():
+            pred_embeds = F.normalize(
+                preds["embeds"].permute(0, 2, 1).contiguous().float(), p=2, dim=2
+            )
+            tags_batch = batch.get("tags")
+            target_gt_idx_fg = target_gt_idx[fg_mask].long()
+
+            if tags_batch is not None and len(tags_batch):
+                tags = tags_batch.to(self.device).long().view(-1)
+                batch_idx = batch["batch_idx"].to(self.device).long()
+                gt_tags = torch.zeros(batch_size, int((batch_idx.bincount()).max()), device=self.device, dtype=torch.long)
+                for j in range(batch_size):
+                    m = batch_idx == j
+                    gt_tags[j, : m.sum()] = tags[m]
+
+                gt_tags_flat = gt_tags.view(-1)
+                valid = (target_gt_idx_fg >= 0) & (target_gt_idx_fg < gt_tags_flat.numel())
+                if valid.any():
+                    loss[3] = self.embed_loss(
+                        pred_embeds[fg_mask][valid],
+                        gt_tags_flat[target_gt_idx_fg[valid]],
+                        pred_scores[fg_mask].sigmoid().max(dim=1).values.float()[valid],
+                    )
+
         loss[0] *= self.hyp.box
         loss[1] *= self.hyp.cls
         loss[2] *= self.hyp.dfl
-        
+        if self.has_embed:
+            loss[3] *= self.hyp.reid
+
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
             loss,

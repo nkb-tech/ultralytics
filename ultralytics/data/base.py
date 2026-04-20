@@ -172,9 +172,7 @@ class BaseDataset(Dataset):
 
     def load_image(self, i, rect_mode=True):
         stored, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
-        if self.cache == "low-ram" and isinstance(
-            stored, (bytes, bytearray)
-        ):  # low-ram: если в self.ims байтовый JPEG-буфер, то декодируем на лету
+        if self.cache == "low-ram" and isinstance(stored, (bytes, bytearray)):
             arr = np.frombuffer(stored, dtype=np.uint8)
             im = cv2.imdecode(arr, cv2.IMREAD_UNCHANGED)
             if im is None:
@@ -184,17 +182,16 @@ class BaseDataset(Dataset):
             if not self.sahi:
                 im = self._resize(im, h0, w0, rect_mode)
 
-            if self.augment:
+            # SAHI manages its own slice-based buffer in get_image_and_label
+            if self.augment and not self.sahi:
                 self.im_hw0[i], self.im_hw[i] = (h0, w0), im.shape[:2]
                 self.buffer.append(i)
                 if len(self.buffer) >= self.max_buffer_length:
                     j = self.buffer.pop(0)
                     self.im_hw0[j], self.im_hw[j] = None, None
-                    
-            # Convert single-channel to 3-channel by duplicating (for 16-bit grayscale support)
+
             if im.ndim == 2:
                 im = np.repeat(im[:, :, None], 3, axis=2)
-            # Convert RGBA to RGB by dropping alpha channel
             elif im.ndim == 3 and im.shape[2] == 4:
                 im = cv2.cvtColor(im, cv2.COLOR_BGRA2BGR)
             return im, (h0, w0), im.shape[:2]
@@ -202,37 +199,33 @@ class BaseDataset(Dataset):
         if stored is not None:  # ram
             return stored, self.im_hw0[i], self.im_hw[i]
 
-        # disk или False
-        if fn.exists():  # load npy
+        if fn.exists():
             try:
                 im = np.load(fn)
             except Exception as e:
                 LOGGER.warning(f"{self.prefix}WARNING ⚠️ Removing corrupt *.npy image file {fn} due to: {e}")
                 Path(fn).unlink(missing_ok=True)
-                im = imread(f)  # BGR
-        else:  # read image
-            im = imread(f)  # BGR
+                im = imread(f)
+        else:
+            im = imread(f)
         if im is None:
             raise FileNotFoundError(f"Image Not Found {f}")
 
-        h0, w0 = im.shape[:2]  # orig hw
+        h0, w0 = im.shape[:2]
         if not self.sahi:
             im = self._resize(im, h0, w0, rect_mode)
 
-        if self.augment:  # Add to buffer if training with augmentations
+        # SAHI manages its own slice-based buffer in get_image_and_label
+        if self.augment and not self.sahi:
             self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
             self.buffer.append(i)
             if len(self.buffer) >= self.max_buffer_length:
                 j = self.buffer.pop(0)
-                # Don't set self.ims[j] = None for low-ram mode
-                if self.cache == "disk":
+                if self.cache != "ram" and self.cache != "low-ram":
                     self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
-                elif self.cache != "ram" and self.cache != "low-ram":
-                    self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
-        # Convert single-channel to 3-channel by duplicating (for 16-bit grayscale support)
+
         if im.ndim == 2:
             im = np.repeat(im[:, :, None], 3, axis=2)
-        # Convert RGBA to RGB by dropping alpha channel
         elif im.ndim == 3 and im.shape[2] == 4:
             im = cv2.cvtColor(im, cv2.COLOR_BGRA2BGR)
         return im, (h0, w0), im.shape[:2]

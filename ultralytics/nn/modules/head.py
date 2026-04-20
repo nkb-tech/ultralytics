@@ -92,6 +92,7 @@ class Detect(nn.Module):
         reg_max: int = 16,
         end2end: bool = False,
         ch: Tuple[int, ...] = (),
+        embed_dim: int = 0,
     ):
         """Initialize the YOLO detection layer with specified number of classes and channels.
 
@@ -100,12 +101,14 @@ class Detect(nn.Module):
             reg_max (int): Maximum number of DFL channels.
             end2end (bool): Whether to use end-to-end NMS-free detection.
             ch (tuple): Tuple of channel sizes from backbone feature maps.
+            embed_dim (int): Re-ID embedding dimension. 0 means disabled.
         """
         super().__init__()
-        self.nc = list(nc)  # list of class counts per task
-        self.nl = len(ch)  # number of detection layers
-        self.reg_max = reg_max  # DFL channels
-        self.no = self.reg_max * 4 + sum(nc)  # number of outputs per anchor
+        self.nc = nc
+        self.nl = len(ch)
+        self.reg_max = reg_max
+        self.embed_dim = embed_dim
+        self.no = self.reg_max * 4 + sum(nc) + self.embed_dim
         self.stride = torch.zeros(self.nl)  # strides computed during build
         self._end2end = end2end
 
@@ -121,6 +124,11 @@ class Detect(nn.Module):
             nn.ModuleList(self._make_head(self.head_mode, x, c3[i], nc[i]) for x in ch)
             for i in range(len(nc))
         )
+
+        # Build embedding head (emb) for Re-ID — single head shared between one2many and one2one in end2end models
+        if self.embed_dim > 0:
+            c_emb = max(ch[0] // 4, self.embed_dim) if len(ch) else self.embed_dim
+            self.emb = nn.ModuleList(self._make_head(self.head_mode, c, c_emb, self.embed_dim) for c in ch)
 
         self.dfl = DFL(self.reg_max) if self.reg_max > 1 else nn.Identity()
 
@@ -165,7 +173,10 @@ class Detect(nn.Module):
     @property
     def one2many(self) -> dict:
         """Returns the one-to-many head components."""
-        return dict(box_head=self.cv2, cls_head=self.cv3)
+        d = dict(box_head=self.cv2, cls_head=self.cv3)
+        if self.embed_dim > 0:
+            d["emb_head"] = self.emb
+        return d
 
     @property
     def one2one(self) -> dict:
@@ -180,36 +191,37 @@ class Detect(nn.Module):
         x: list[Tensor],
         box_head: nn.ModuleList | None = None,
         cls_head: nn.ModuleList | None = None,
+        emb_head: nn.ModuleList | None = None,
     ) -> dict[str, Tensor] | list[Tensor]:
-        """Forward pass through box and classification heads.
+        """Forward pass through box, classification, and optional embedding heads.
 
         Args:
             x (list[Tensor]): Feature maps from backbone.
             box_head (nn.ModuleList): Box regression head modules.
             cls_head (nn.ModuleList): Classification head modules (nested for multitask).
+            emb_head (nn.ModuleList | None): Embedding head modules for Re-ID.
 
         Returns:
-            (dict[str, Tensor]): Dict with 'boxes', 'scores', 'feats' tensors.
+            (dict[str, Tensor]): Dict with 'boxes', 'scores', 'feats' and optionally 'embeds'.
             (list[Tensor]): For RKNN export, raw outputs per scale/task.
         """
         if box_head is None or cls_head is None:
             return dict()
 
-        # RKNN export: return raw outputs per scale/task
+        # RKNN export: return raw outputs per scale/task as ordered dict
         if self.export and self.format == "rknn":
-            y = []
+            y = dict()
             for i in range(self.nl):
-                y.append(box_head[i](x[i]))
-                for task_head in cls_head:
+                y[f"box_p{i}"] = box_head[i](x[i])
+                for t, task_head in enumerate(cls_head):
                     if self.end2end:
-                        # end2end: raw cls outputs (no sigmoid, no cls_sum)
-                        y.append(task_head[i](x[i]))
+                        y[f"cls_t{t}_p{i}"] = task_head[i](x[i])
                     else:
-                        # non-end2end: cls with sigmoid + cls_sum for objectness
                         cls = task_head[i](x[i]).sigmoid_()
-                        cls_sum = cls.sum(dim=1, keepdim=True).clamp_(0, 1)
-                        y.append(cls)
-                        y.append(cls_sum)
+                        y[f"cls_t{t}_p{i}"] = cls
+                        y[f"obj_t{t}_p{i}"] = cls.sum(dim=1, keepdim=True).clamp_(0, 1)
+                if emb_head is not None:
+                    y[f"emb_p{i}"] = emb_head[i](x[i])
             return y
 
         bs = x[0].shape[0]
@@ -223,14 +235,25 @@ class Detect(nn.Module):
             scores_list.append(task_scores)
         scores = torch.cat(scores_list, dim=1)  # (bs, sum(nc), num_anchors)
 
-        return dict(boxes=boxes, scores=scores, feats=x)
+        out = dict(boxes=boxes, scores=scores, feats=x)
+
+        if emb_head is not None:
+            out["embeds"] = torch.cat(
+                [emb_head[i](x[i]).view(bs, self.embed_dim, -1) for i in range(self.nl)],
+                dim=-1,
+            )
+
+        return out
 
     def pre_forward(self, x: list[Tensor]) -> list[Tensor]:
         """Backward-compatible helper returning per-level raw head features."""
-        return [
-            torch.cat([self.cv2[i](x[i])] + [task_head[i](x[i]) for task_head in self.cv3], 1)
-            for i in range(self.nl)
-        ]
+        out = []
+        for i in range(self.nl):
+            parts = [self.cv2[i](x[i])] + [task_head[i](x[i]) for task_head in self.cv3]
+            if self.embed_dim > 0:
+                parts.append(self.emb[i](x[i]))
+            out.append(torch.cat(parts, 1))
+        return out
 
     def forward(
         self, x: list[Tensor]
@@ -240,6 +263,9 @@ class Detect(nn.Module):
         if self.end2end:
             x_detach = [xi.detach() for xi in x]
             one2one = self.forward_head(x_detach, **self.one2one)
+            # Share Re-ID embeddings computed by the one2many branch (same emb head, same x)
+            if "embeds" in preds:
+                one2one["embeds"] = preds["embeds"]
             # RKNN export: return one2one raw outputs
             if self.export and self.format == "rknn":
                 return one2one
@@ -279,7 +305,10 @@ class Detect(nn.Module):
         else:
             dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
 
-        return torch.cat((dbox, cls.sigmoid()), 1)
+        parts = [dbox, cls.sigmoid()]
+        if "embeds" in x:
+            parts.append(F.normalize(x["embeds"], p=2, dim=1))
+        return torch.cat(parts, 1)
 
     def decode_bboxes(self, bboxes: Tensor, anchors: Tensor, xywh: bool = True) -> Tensor:
         """Decode bounding boxes from predictions.
@@ -301,7 +330,12 @@ class Detect(nn.Module):
             for task_head, nc_i in zip(self.cv3, self.nc):
                 task_head[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)
 
-        if self.end2end and hasattr(self, "one2one_cv2") and self.one2one_cv2 is not None:
+        if self.embed_dim > 0:
+            for a in self.emb:
+                if a[-1].bias is not None:
+                    a[-1].bias.data.zero_()
+
+        if self.end2end:
             for i, (a, s) in enumerate(zip(self.one2one_cv2, self.stride)):
                 a[-1].bias.data[:] = 1.0
                 for task_head, nc_i in zip(self.one2one_cv3, self.nc):
@@ -312,17 +346,18 @@ class Detect(nn.Module):
         """Post-process predictions with multitask classification support.
 
         Args:
-            preds (Tensor): Predictions with shape (batch_size, num_anchors, 4 + sum(nc)).
+            preds (Tensor): Predictions with shape (batch_size, num_anchors, 4 + sum(nc) [+ embed_dim]).
             max_det (int): Maximum number of detections.
             nc (list[int]): List of class counts per task.
 
         Returns:
-            (Tensor): Post-processed predictions (batch_size, max_det, 6).
+            (Tensor): Post-processed predictions (batch_size, max_det, 6 [+ embed_dim]).
         """
         total_classes = sum(nc)
-        assert 4 + total_classes == preds.shape[-1]
-
-        boxes, scores = preds.split([4, total_classes], dim=-1)
+        expected = 4 + total_classes
+        has_embeds = preds.shape[-1] > expected
+        embeds = preds[..., expected:] if has_embeds else None
+        boxes, scores = preds[..., :expected].split([4, total_classes], dim=-1)
 
         # Split scores by task and use first task for ranking
         start_idx = 0
@@ -339,142 +374,35 @@ class Detect(nn.Module):
 
         boxes = torch.gather(boxes, dim=1, index=index.repeat(1, 1, boxes.shape[-1]))
         scores = torch.gather(scores, dim=1, index=index.repeat(1, 1, scores.shape[-1]))
+        if has_embeds:
+            embeds = torch.gather(embeds, dim=1, index=index.repeat(1, 1, embeds.shape[-1]))
 
         scores, index = torch.topk(scores.flatten(1), max_det, dim=-1)
         labels = index % total_classes
         index = index // total_classes
         boxes = boxes.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, boxes.shape[-1]))
 
-        return torch.cat([boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).to(boxes.dtype)], dim=-1)
+        parts = [boxes, scores.unsqueeze(-1), labels.unsqueeze(-1).to(boxes.dtype)]
+        if has_embeds:
+            embeds = embeds.gather(dim=1, index=index.unsqueeze(-1).repeat(1, 1, embeds.shape[-1]))
+            parts.append(embeds)
+        return torch.cat(parts, dim=-1)
 
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
+        if self.embed_dim > 0:
+            self.emb = None
 
-class JDE(Detect):
-    """JDE head: box + cls + embedding in one forward_head pass."""
+    def upgrade_to_reid(self, embed_dim: int):
+        """Add Re-ID embedding branches to an existing Detect head in-place."""
+        self.embed_dim = embed_dim
+        self.no = self.reg_max * 4 + sum(self.nc) + self.embed_dim
+        ch = [cv2[0].conv.in_channels for cv2 in self.cv2]
+        c_emb = max(ch[0] // 4, self.embed_dim)
+        self.emb = nn.ModuleList(self._make_head(self.head_mode, c, c_emb, self.embed_dim) for c in ch)
 
-    def __init__(self, nc, embed_dim, reg_max=16, end2end=False, ch=()):
-        super().__init__(
-            nc=[nc] if isinstance(nc, int) else nc,
-            reg_max=reg_max,
-            end2end=end2end,
-            ch=ch,
-        )
 
-        if end2end:
-            raise NotImplementedError("JDE stage-1 supports end2end=False only.")
-
-        self.embed_dim = int(embed_dim)
-        self.nc_det = sum(self.nc) if isinstance(self.nc, (list, tuple)) else int(self.nc)
-
-        # final inference tensor channels: 4 decoded box + sum(nc) cls + embed_dim
-        # raw head outputs still use reg_max*4 + sum(nc) + embed_dim
-        self.no = self.reg_max * 4 + self.nc_det + self.embed_dim
-
-        c4 = max(ch[0] // 4, self.embed_dim) if len(ch) else self.embed_dim
-        self.cv4 = nn.ModuleList(
-            self._make_head(self.head_mode, c, c4, self.embed_dim) for c in ch
-        )
-
-    @property
-    def one2many(self) -> dict:
-        """Returns one-to-many heads including embedding head."""
-        return dict(box_head=self.cv2, cls_head=self.cv3, emb_head=self.cv4)
-
-    def forward_head(
-        self,
-        x: list[Tensor],
-        box_head: nn.ModuleList | None = None,
-        cls_head: nn.ModuleList | None = None,
-        emb_head: nn.ModuleList | None = None,
-    ) -> dict[str, Tensor] | list[Tensor]:
-        """Forward pass through box/classification/embedding heads in one pass."""
-        if box_head is None or cls_head is None or emb_head is None:
-            return dict()
-
-        # RKNN path: keep raw per-scale outputs
-        if self.export and self.format == "rknn":
-            y = []
-            for i in range(self.nl):
-                y.append(box_head[i](x[i]))
-                for task_head in cls_head:
-                    cls = task_head[i](x[i]).sigmoid_()
-                    cls_sum = cls.sum(dim=1, keepdim=True).clamp_(0, 1)
-                    y.append(cls)
-                    y.append(cls_sum)
-                y.append(emb_head[i](x[i]))
-            return y
-
-        bs = x[0].shape[0]
-
-        boxes = torch.cat(
-            [box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)],
-            dim=-1,
-        )
-
-        scores_list = []
-        for task_head in cls_head:
-            task_scores = torch.cat(
-                [task_head[i](x[i]).view(bs, -1, x[i].shape[-2] * x[i].shape[-1]) for i in range(self.nl)],
-                dim=-1,
-            )
-            scores_list.append(task_scores)
-        scores = torch.cat(scores_list, dim=1)  # (bs, sum(nc), A)
-
-        embeds = torch.cat(
-            [emb_head[i](x[i]).view(bs, self.embed_dim, -1) for i in range(self.nl)],
-            dim=-1,
-        )  # (bs, D, A)
-
-        return dict(boxes=boxes, scores=scores, embeds=embeds, feats=x)
-
-    def forward(self, x: list[Tensor]):
-        preds = self.forward_head(x, **self.one2many)
-
-        # Keep same overall behavior as current Detect API
-        if self.training or (self.export and self.format == "rknn"):
-            return preds
-
-        y = self._inference(preds)
-        return y if self.export else (y, preds)
-
-    @disable_dynamo
-    def _inference(self, x: dict[str, Tensor]) -> Tensor:
-        """Decode boxes/classes and append normalized embeddings."""
-        shape = x["feats"][0].shape  # BCHW
-        if self.dynamic or self.shape != shape:
-            self.anchors, self.strides = (t.transpose(0, 1) for t in make_anchors(x["feats"], self.stride, 0.5))
-            self.shape = shape
-
-        box = x["boxes"]     # (bs, reg_max*4, A)
-        cls = x["scores"]    # (bs, sum(nc), A)
-        emb = x["embeds"]    # (bs, D, A)
-
-        if self.export and self.format in {"tflite", "edgetpu"}:
-            grid_h, grid_w = shape[2], shape[3]
-            grid_size = torch.tensor([grid_w, grid_h, grid_w, grid_h], device=box.device).reshape(1, 4, 1)
-            norm = self.strides / (self.stride[0] * grid_size)
-            dbox = self.decode_bboxes(self.dfl(box) * norm, self.anchors.unsqueeze(0) * norm[:, :2])
-        else:
-            dbox = self.decode_bboxes(self.dfl(box), self.anchors.unsqueeze(0)) * self.strides
-
-        emb = F.normalize(emb, p=2, dim=1)
-
-        return torch.cat((dbox, cls.sigmoid(), emb), 1)
-
-    def bias_init(self):
-        """Initialize JDE head biases."""
-        super().bias_init()
-        for a in self.cv4:
-            if hasattr(a[-1], "bias") and a[-1].bias is not None:
-                a[-1].bias.data.zero_()
-
-    def fuse(self) -> None:
-        """Remove one2many heads for inference optimization if needed."""
-        self.cv2 = self.cv3 = self.cv4 = None
-
-        
 class Segment(Detect):
     """YOLO Segment head for segmentation models with multitask support.
 
@@ -489,6 +417,7 @@ class Segment(Detect):
         reg_max: int = 16,
         end2end: bool = False,
         ch: Tuple[int, ...] = (),
+        embed_dim: int = 0,
     ):
         """Initialize the YOLO segmentation head.
 
@@ -499,8 +428,9 @@ class Segment(Detect):
             reg_max (int): Maximum number of DFL channels.
             end2end (bool): Whether to use end-to-end detection.
             ch (tuple): Tuple of channel sizes from backbone feature maps.
+            embed_dim (int): Re-ID embedding dimension. 0 means disabled.
         """
-        super().__init__(nc, reg_max, end2end, ch)
+        super().__init__(nc, reg_max, end2end, ch, embed_dim=embed_dim)
         self.nm = nm
         self.npr = npr
         self.proto = Proto(ch[0], self.npr, self.nm)
@@ -514,31 +444,29 @@ class Segment(Detect):
     @property
     def one2many(self) -> dict:
         """Returns the one-to-many head components including mask head."""
-        return dict(box_head=self.cv2, cls_head=self.cv3, mask_head=self.cv4)
+        d = super().one2many
+        d["mask_head"] = self.cv4
+        return d
 
     @property
     def one2one(self) -> dict:
         """Returns the one-to-one head components including mask head."""
-        return dict(
-            box_head=getattr(self, "one2one_cv2", None),
-            cls_head=getattr(self, "one2one_cv3", None),
-            mask_head=getattr(self, "one2one_cv4", None),
-        )
+        d = super().one2one
+        d["mask_head"] = getattr(self, "one2one_cv4", None)
+        return d
 
-    def forward_head(
-        self,
-        x: list[Tensor],
-        box_head: nn.ModuleList | None = None,
-        cls_head: nn.ModuleList | None = None,
-        mask_head: nn.ModuleList | None = None,
-    ) -> dict[str, Tensor]:
+    def forward_head(self, x: list[Tensor], mask_head: nn.ModuleList | None = None, **kwargs) -> dict[str, Tensor]:
         """Forward pass including mask coefficients."""
-        preds = super().forward_head(x, box_head, cls_head)
+        preds = super().forward_head(x, **kwargs)
         if mask_head is not None:
-            bs = x[0].shape[0]
-            preds["mask_coefficient"] = torch.cat(
-                [mask_head[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2
-            )
+            if self.export and self.format == "rknn":
+                for i in range(self.nl):
+                    preds[f"mask_p{i}"] = mask_head[i](x[i])
+            else:
+                bs = x[0].shape[0]
+                preds["mask_coefficient"] = torch.cat(
+                    [mask_head[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2
+                )
         return preds
 
     def forward(self, x: list[Tensor]) -> tuple | dict:
@@ -594,7 +522,8 @@ class Segment(Detect):
 
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
-        self.cv2 = self.cv3 = self.cv4 = None
+        super().fuse()
+        self.cv4 = None
 
 
 class Segment26(Segment):
@@ -665,31 +594,29 @@ class OBB(Detect):
     @property
     def one2many(self) -> dict:
         """Returns the one-to-many head components including angle head."""
-        return dict(box_head=self.cv2, cls_head=self.cv3, angle_head=self.cv4)
+        d = super().one2many
+        d["angle_head"] = self.cv4
+        return d
 
     @property
     def one2one(self) -> dict:
         """Returns the one-to-one head components including angle head."""
-        return dict(
-            box_head=getattr(self, "one2one_cv2", None),
-            cls_head=getattr(self, "one2one_cv3", None),
-            angle_head=getattr(self, "one2one_cv4", None),
-        )
+        d = super().one2one
+        d["angle_head"] = getattr(self, "one2one_cv4", None)
+        return d
 
-    def forward_head(
-        self,
-        x: list[Tensor],
-        box_head: nn.ModuleList | None = None,
-        cls_head: nn.ModuleList | None = None,
-        angle_head: nn.ModuleList | None = None,
-    ) -> dict[str, Tensor]:
+    def forward_head(self, x: list[Tensor], angle_head: nn.ModuleList | None = None, **kwargs) -> dict[str, Tensor]:
         """Forward pass including angle predictions."""
-        preds = super().forward_head(x, box_head, cls_head)
+        preds = super().forward_head(x, **kwargs)
         if angle_head is not None:
-            bs = x[0].shape[0]
-            angle = torch.cat([angle_head[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
-            angle = (angle.sigmoid() - 0.25) * math.pi  # [-pi/4, 3pi/4]
-            preds["angle"] = angle
+            if self.export and self.format == "rknn":
+                for i in range(self.nl):
+                    preds[f"angle_p{i}"] = angle_head[i](x[i])
+            else:
+                bs = x[0].shape[0]
+                angle = torch.cat([angle_head[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
+                angle = (angle.sigmoid() - 0.25) * math.pi
+                preds["angle"] = angle
         return preds
 
     def _inference(self, x: dict[str, Tensor]) -> Tensor:
@@ -732,25 +659,24 @@ class OBB(Detect):
 
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
-        self.cv2 = self.cv3 = self.cv4 = None
+        super().fuse()
+        self.cv4 = None
 
 
 class OBB26(OBB):
     """YOLO26 OBB detection head with raw angle predictions (no sigmoid)."""
 
-    def forward_head(
-        self,
-        x: list[Tensor],
-        box_head: nn.ModuleList | None = None,
-        cls_head: nn.ModuleList | None = None,
-        angle_head: nn.ModuleList | None = None,
-    ) -> dict[str, Tensor]:
+    def forward_head(self, x: list[Tensor], angle_head: nn.ModuleList | None = None, **kwargs) -> dict[str, Tensor]:
         """Forward pass with raw angle output (no sigmoid transformation)."""
-        preds = Detect.forward_head(self, x, box_head, cls_head)
+        preds = Detect.forward_head(self, x, **kwargs)
         if angle_head is not None:
-            bs = x[0].shape[0]
-            angle = torch.cat([angle_head[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
-            preds["angle"] = angle  # raw output
+            if self.export and self.format == "rknn":
+                for i in range(self.nl):
+                    preds[f"angle_p{i}"] = angle_head[i](x[i])
+            else:
+                bs = x[0].shape[0]
+                angle = torch.cat([angle_head[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
+                preds["angle"] = angle
         return preds
 
 
@@ -779,29 +705,27 @@ class Pose(Detect):
     @property
     def one2many(self) -> dict:
         """Returns the one-to-many head components including pose head."""
-        return dict(box_head=self.cv2, cls_head=self.cv3, pose_head=self.cv4)
+        d = super().one2many
+        d["pose_head"] = self.cv4
+        return d
 
     @property
     def one2one(self) -> dict:
         """Returns the one-to-one head components including pose head."""
-        return dict(
-            box_head=getattr(self, "one2one_cv2", None),
-            cls_head=getattr(self, "one2one_cv3", None),
-            pose_head=getattr(self, "one2one_cv4", None),
-        )
+        d = super().one2one
+        d["pose_head"] = getattr(self, "one2one_cv4", None)
+        return d
 
-    def forward_head(
-        self,
-        x: list[Tensor],
-        box_head: nn.ModuleList | None = None,
-        cls_head: nn.ModuleList | None = None,
-        pose_head: nn.ModuleList | None = None,
-    ) -> dict[str, Tensor]:
+    def forward_head(self, x: list[Tensor], pose_head: nn.ModuleList | None = None, **kwargs) -> dict[str, Tensor]:
         """Forward pass including keypoint predictions."""
-        preds = super().forward_head(x, box_head, cls_head)
+        preds = super().forward_head(x, **kwargs)
         if pose_head is not None:
-            bs = x[0].shape[0]
-            preds["kpts"] = torch.cat([pose_head[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], 2)
+            if self.export and self.format == "rknn":
+                for i in range(self.nl):
+                    preds[f"kpt_p{i}"] = pose_head[i](x[i])
+            else:
+                bs = x[0].shape[0]
+                preds["kpts"] = torch.cat([pose_head[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], 2)
         return preds
 
     def _inference(self, x: dict[str, Tensor]) -> Tensor:
@@ -862,7 +786,8 @@ class Pose(Detect):
 
     def fuse(self) -> None:
         """Remove the one2many head for inference optimization."""
-        self.cv2 = self.cv3 = self.cv4 = None
+        super().fuse()
+        self.cv4 = None
 
 
 class Pose26(Pose):
@@ -895,44 +820,41 @@ class Pose26(Pose):
     @property
     def one2many(self) -> dict:
         """Returns the one-to-many head components."""
-        return dict(
-            box_head=self.cv2,
-            cls_head=self.cv3,
-            pose_head=self.cv4,
-            kpts_head=self.cv4_kpts,
-            kpts_sigma_head=self.cv4_sigma,
-        )
+        d = super().one2many
+        d["kpts_head"] = self.cv4_kpts
+        d["kpts_sigma_head"] = self.cv4_sigma
+        return d
 
     @property
     def one2one(self) -> dict:
         """Returns the one-to-one head components."""
-        return dict(
-            box_head=getattr(self, "one2one_cv2", None),
-            cls_head=getattr(self, "one2one_cv3", None),
-            pose_head=getattr(self, "one2one_cv4", None),
-            kpts_head=getattr(self, "one2one_cv4_kpts", None),
-            kpts_sigma_head=getattr(self, "one2one_cv4_sigma", None),
-        )
+        d = super().one2one
+        d["kpts_head"] = getattr(self, "one2one_cv4_kpts", None)
+        d["kpts_sigma_head"] = getattr(self, "one2one_cv4_sigma", None)
+        return d
 
     def forward_head(
         self,
         x: list[Tensor],
-        box_head: nn.ModuleList | None = None,
-        cls_head: nn.ModuleList | None = None,
         pose_head: nn.ModuleList | None = None,
         kpts_head: nn.ModuleList | None = None,
         kpts_sigma_head: nn.ModuleList | None = None,
+        **kwargs,
     ) -> dict[str, Tensor]:
         """Forward pass with keypoints and optional sigma."""
-        preds = Detect.forward_head(self, x, box_head, cls_head)
+        preds = Detect.forward_head(self, x, **kwargs)
         if pose_head is not None:
-            bs = x[0].shape[0]
-            features = [pose_head[i](x[i]) for i in range(self.nl)]
-            preds["kpts"] = torch.cat([kpts_head[i](features[i]).view(bs, self.nk, -1) for i in range(self.nl)], 2)
-            if self.training and kpts_sigma_head is not None:
-                preds["kpts_sigma"] = torch.cat(
-                    [kpts_sigma_head[i](features[i]).view(bs, self.nk_sigma, -1) for i in range(self.nl)], 2
-                )
+            if self.export and self.format == "rknn":
+                for i in range(self.nl):
+                    preds[f"kpt_p{i}"] = pose_head[i](x[i])
+            else:
+                bs = x[0].shape[0]
+                features = [pose_head[i](x[i]) for i in range(self.nl)]
+                preds["kpts"] = torch.cat([kpts_head[i](features[i]).view(bs, self.nk, -1) for i in range(self.nl)], 2)
+                if self.training and kpts_sigma_head is not None:
+                    preds["kpts_sigma"] = torch.cat(
+                        [kpts_sigma_head[i](features[i]).view(bs, self.nk_sigma, -1) for i in range(self.nl)], 2
+                    )
         return preds
 
     def kpts_decode(self, kpts: Tensor) -> Tensor:
@@ -1313,8 +1235,8 @@ class PostDetectTRTNMS(nn.Module):
     conf = 0.25
     max_det = 100
 
-    def _forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
-        """Decode yolov8 model output."""
+    def _forward(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor | None]:
+        """Decode yolov8 model output, returning (boxes, scores, embeds_or_None)."""
         res = self.pre_forward(x)
         shape = res[0].shape
         b, b_reg_num = shape[0], self.reg_max * 4
@@ -1323,18 +1245,24 @@ class PostDetectTRTNMS(nn.Module):
             self.shape = shape
         x = [i.view(b, self.no, -1) for i in res]
         y = torch.cat(x, 2)
-        boxes, scores = y[:, :b_reg_num, ...], y[:, b_reg_num:, ...].sigmoid()
-        boxes = boxes.view(b, 4, self.reg_max, -1).permute(0, 1, 3, 2)
+
+        ed = getattr(self, "embed_dim", 0)
+        nc_ch = self.no - b_reg_num - ed
+        boxes_raw = y[:, :b_reg_num, ...]
+        scores = y[:, b_reg_num : b_reg_num + nc_ch, ...].sigmoid()
+        embeds = F.normalize(y[:, b_reg_num + nc_ch :, ...], p=2, dim=1) if ed > 0 else None
+
+        boxes = boxes_raw.view(b, 4, self.reg_max, -1).permute(0, 1, 3, 2)
         boxes = boxes.softmax(-1) @ torch.arange(self.reg_max, device=boxes.device, dtype=boxes.dtype)
         boxes0, boxes1 = -boxes[:, :2, ...], boxes[:, 2:, ...]
         boxes = self.anchors.repeat(b, 2, 1) + torch.cat([boxes0, boxes1], 1)
         boxes = boxes * self.strides
 
-        return boxes, scores
+        return boxes, scores, embeds
 
     def forward(self, x: Tensor) -> Tensor:
         """Forward with TRT NMS."""
-        boxes, scores = self._forward(x)
+        boxes, scores, _embeds = self._forward(x)
 
         return EfficientTRTNMS.apply(
             boxes.transpose(1, 2),
@@ -1348,9 +1276,9 @@ class PostDetectTRTNMS(nn.Module):
 class PostDetectONNXNMS(PostDetectTRTNMS):
     """YOLOv8 NMS-fused detection model for ONNX export."""
 
-    def forward(self, x: Tensor) -> Tensor:
-        """Forward with ONNX NMS."""
-        boxes, scores = self._forward(x)
+    def forward(self, x: Tensor) -> Tensor | tuple[Tensor, Tensor]:
+        """Forward with ONNX NMS. Returns (detections,) or (detections, embeds)."""
+        boxes, scores, embeds = self._forward(x)
         transposed_boxes = boxes.transpose(1, 2)
 
         selected_indices = ONNXNMS.apply(
@@ -1368,7 +1296,10 @@ class PostDetectONNXNMS(PostDetectTRTNMS):
         selected_categories = category_id[X, Y, None].float()
         selected_scores = max_score[X, Y, None]
         X = X.unsqueeze(1).float()
-        return torch.cat([X, selected_boxes, selected_scores, selected_categories], 1)
+        dets = torch.cat([X, selected_boxes, selected_scores, selected_categories], 1)
+        if embeds is not None:
+            return dets, embeds.permute(0, 2, 1)[X.long().squeeze(1).flatten(), Y, :]
+        return dets
 
 
 class LRPCHead(nn.Module):

@@ -56,12 +56,12 @@ class YOLODataset(BaseDataset):
         (torch.utils.data.Dataset): A PyTorch dataset object that can be used for training an object detection model.
     """
 
-    def __init__(self, *args, data=None, task="detect", **kwargs):
+    def __init__(self, *args, data=None, task="detect", use_tags=False, **kwargs):
         """Initializes the YOLODataset with optional configurations for segments and keypoints."""
         self.use_segments = task == "segment"
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
-        self.use_tags = task == "jde"
+        self.use_tags = use_tags
         self.data = data
         self.min_bbox = data.get("min_bbox", 10)
         self.min_imgsz = data.get("min_imgsz", 25)
@@ -147,23 +147,9 @@ class YOLODataset(BaseDataset):
                         "keypoints": keypoint,
                         "normalized": True,
                         "bbox_format": "xywh",
+                        "tags": None if not self.use_tags else tags,
                     }
-                    if self.use_tags:
-                        label_entry["tags"] = tags
                     x["labels"].append(label_entry)
-                # elif im_file and shape is not None:
-                #     x["labels"].append(
-                #         {
-                #             "im_file": im_file,
-                #             "shape": shape,
-                #             "cls": np.zeros((0, num_cls_cols), dtype=np.float32),
-                #             "bboxes": np.zeros((0, 4), dtype=np.float32),
-                #             "segments": [],
-                #             "keypoints": None,
-                #             "normalized": True,
-                #             "bbox_format": "xywh",
-                #         }
-                #     )
                 if msg:
                     msgs.append(msg)
                 stats = f"{nf} images, {nm + ne} backgrounds, {ncpt} corrupt, {fb}/{ab} boxes"
@@ -221,7 +207,7 @@ class YOLODataset(BaseDataset):
         if len_cls == 0:
             LOGGER.warning(f"WARNING ⚠️ No labels found in {cache_path}, training may not work correctly. {HELP_URL}")
         
-        # Add tags for JDE training
+        # Add tags for Re-ID training
         if getattr(self, "use_tags", False):
             import numpy as np
 
@@ -317,7 +303,7 @@ class YOLODataset(BaseDataset):
         keys = batch[0].keys()
 
         for k in keys:
-            vals = [b[k] for b in batch]  # key-safe, no reliance on dict order
+            vals = [b.get(k) for b in batch]
 
             if k == "img":
                 new_batch[k] = torch.stack(vals, 0)
@@ -655,7 +641,7 @@ class ClassificationDataset:
         self.cache_disk = str(args.cache).lower() == "disk"  # cache images on hard drive as uncompressed *.npy files
         self.samples = self.verify_images()  # filter out bad images
         self.samples = [list(x) + [Path(x[0]).with_suffix(".npy"), None] for x in self.samples]  # file, index, npy, im
-        scale = (1.0 - args.scale, 1.0)  # (0.08, 1.0)
+        scale = tuple(args.scale) if isinstance(args.scale, (list, tuple)) else (1.0 - args.scale, 1.0)
         self.torch_transforms = (
             classify_augmentations(
                 size=args.imgsz,

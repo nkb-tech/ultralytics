@@ -1,4 +1,4 @@
-tracker_type: jdetracker # tracker type, ['botsort', 'bytetrack', 'smiletrack']
+tracker_type: jdetracker # tracker type, ['botsort', 'bytetrack', 'smiletrack', 'jdetracker']
 
 # Tracking arguments
 track_buffer: 40 # buffer to calculate the time when to remove tracks
@@ -9,6 +9,3 @@ new_match_thresh: 0.7 # threshold for creating a new track (FairMOT uses 0.7)
 
 # ReID arguments
 with_reid: True  # always True for this tracker
-
-
-
