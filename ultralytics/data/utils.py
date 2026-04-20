@@ -336,6 +336,11 @@ def check_det_dataset(dataset, autodownload=True):
     if not path.is_absolute():
         path = (DATASETS_DIR / path).resolve()
 
+    def _resolve_split_paths(x):
+        """Resolve dataset split path(s) against dataset root and return list[str]."""
+        paths = [x] if isinstance(x, str) else list(x)
+        return [str((path / p).resolve()) for p in paths]
+
     # Set paths
     data["path"] = path  # download scripts
     for k in "train", "val", "test", "minival":
@@ -347,6 +352,32 @@ def check_det_dataset(dataset, autodownload=True):
                 data[k] = str(x)
             else:
                 data[k] = [str((path / x).resolve()) for x in data[k]]
+
+    # Optional domain-specific validation splits
+    # Expected schema:
+    # domains:
+    #   domain_name: path_or_paths
+    raw_domains = data.get("domains")
+    if raw_domains is not None:
+        if not isinstance(raw_domains, dict):
+            raise SyntaxError(emojis(f"{dataset} 'domains' must be a dictionary of domain_name -> path(s)."))
+        domains = {}
+        for domain_name, domain_paths in raw_domains.items():
+            if not isinstance(domain_name, str) or not domain_name.strip():
+                raise SyntaxError(emojis(f"{dataset} domain names in 'domains' must be non-empty strings."))
+            if not isinstance(domain_paths, (str, list, tuple)):
+                raise SyntaxError(
+                    emojis(f"{dataset} domains['{domain_name}'] must be a string path or a list/tuple of paths.")
+                )
+            resolved_paths = _resolve_split_paths(domain_paths)
+            missing = [p for p in resolved_paths if not Path(p).exists()]
+            if missing:
+                raise FileNotFoundError(
+                    f"\nDataset '{clean_url(dataset)}' domain '{domain_name}' images not found ⚠️, "
+                    f"missing path '{missing[0]}'"
+                )
+            domains[domain_name] = resolved_paths if len(resolved_paths) > 1 else resolved_paths[0]
+        data["domains"] = domains
 
     # Parse YAML
     val, s = (data.get(x) for x in ("val", "download"))

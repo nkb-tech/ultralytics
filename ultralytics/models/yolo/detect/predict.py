@@ -80,6 +80,10 @@ class DetectionPredictor(BasePredictor):
         if self.args.verbose:
             LOGGER.info("")
 
+        # Mirror BasePredictor flow: model must be initialized before setup_source().
+        if not self.model:
+            self.setup_model(model)
+
         with self._lock:
             self._setup_sahi(source)
 

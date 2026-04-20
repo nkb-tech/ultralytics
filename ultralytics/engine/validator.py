@@ -184,50 +184,8 @@ class BaseValidator:
             model.warmup(imgsz=(1 if pt else self.args.batch, 3, imgsz, imgsz))  # warmup
 
         self.run_callbacks("on_val_start")
-        dt = (
-            Profile(device=self.device),
-            Profile(device=self.device),
-            Profile(device=self.device),
-            Profile(device=self.device),
-        )
-        bar = TQDM(self.dataloader, desc=self.get_desc(), total=len(self.dataloader))
-        self.init_metrics(unwrap_model(model))
-        self.jdict = []  # empty before each val
-        for batch_i, batch in enumerate(bar):
-            self.run_callbacks("on_val_batch_start")
-            self.batch_i = batch_i
-            # Preprocess
-            with dt[0]:
-                batch = self.preprocess(batch)
-
-            # Inference
-            with dt[1]:
-                preds = model(batch["img"], augment=augment)
-
-            # Loss
-            with dt[2]:
-                if self.training:
-                    _, loss_items = model.loss(batch, preds)  
-                    #self.loss += model.loss(batch, preds)[1]
-                    n_losses = min(len(self.loss), len(loss_items))
-                    self.loss[:n_losses] += loss_items[:n_losses]
-
-            # Postprocess
-            with dt[3]:
-                preds = self.postprocess(preds)
-
-            self.update_metrics(preds, batch)
-            max_plot = getattr(self.args, 'max_plot_batches', 3)
-            if self.args.plots and (max_plot < 0 or batch_i < max_plot):
-                self.plot_val_samples(batch, batch_i)
-                self.plot_predictions(batch, preds, batch_i)
-
-            self.run_callbacks("on_val_batch_end")
-        stats = self.get_stats()
+        stats = self._run_validation_loop(model=model, augment=augment, enable_callbacks=True, allow_plots=self.args.plots)
         self.check_stats(stats)
-        self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
-        self.finalize_metrics()
-        self.print_results()
         self.run_callbacks("on_val_end")
         if self.training:
             model.float()
@@ -244,9 +202,90 @@ class BaseValidator:
                     LOGGER.info(f"Saving {f.name}...")
                     json.dump(self.jdict, f)  # flatten and save
                 stats = self.eval_json(stats)  # update stats
+            stats = self._run_domain_validations(model=model, augment=augment, base_stats=stats)
             if self.args.plots or self.args.save_json:
                 LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
             return stats
+
+    def _run_validation_loop(self, model, augment=False, enable_callbacks=True, allow_plots=True):
+        """Run one full validation pass on current dataloader and return stats."""
+        dt = (
+            Profile(device=self.device),
+            Profile(device=self.device),
+            Profile(device=self.device),
+            Profile(device=self.device),
+        )
+        bar = TQDM(self.dataloader, desc=self.get_desc(), total=len(self.dataloader))
+        self.init_metrics(unwrap_model(model))
+        self.jdict = []
+
+        for batch_i, batch in enumerate(bar):
+            if enable_callbacks:
+                self.run_callbacks("on_val_batch_start")
+            self.batch_i = batch_i
+
+            with dt[0]:
+                batch = self.preprocess(batch)
+
+            with dt[1]:
+                preds = model(batch["img"], augment=augment)
+
+            with dt[2]:
+                if self.training:
+                    _, loss_items = model.loss(batch, preds)
+                    n_losses = min(len(self.loss), len(loss_items))
+                    self.loss[:n_losses] += loss_items[:n_losses]
+
+            with dt[3]:
+                preds = self.postprocess(preds)
+
+            self.update_metrics(preds, batch)
+            max_plot = getattr(self.args, "max_plot_batches", 3)
+            if allow_plots and self.args.plots and (max_plot < 0 or batch_i < max_plot):
+                self.plot_val_samples(batch, batch_i)
+                self.plot_predictions(batch, preds, batch_i)
+
+            if enable_callbacks:
+                self.run_callbacks("on_val_batch_end")
+
+        stats = self.get_stats()
+        self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
+        self.finalize_metrics()
+        self.print_results()
+        return stats
+
+    def _run_domain_validations(self, model, augment, base_stats):
+        """Run optional domain-specific validations and merge their metrics into stats."""
+        domains = self.data.get("domains")
+        if not domains:
+            return base_stats
+
+        original_dataloader = self.dataloader
+        original_data = self.data
+        original_plots = self.args.plots
+        merged = dict(base_stats)
+        model_unwrapped = unwrap_model(model)
+
+        try:
+            for domain_name, domain_split in domains.items():
+                LOGGER.info(f"\nRunning domain validation: {domain_name}")
+                self.dataloader = self.get_dataloader(domain_split, self.args.batch)
+                if hasattr(self.dataloader, "dataset") and getattr(self.dataloader.dataset, "data", None):
+                    self.data = self.dataloader.dataset.data
+                self.args.plots = False  # avoid plot overwrite between domains
+                domain_stats = self._run_validation_loop(
+                    model=model_unwrapped,
+                    augment=augment,
+                    enable_callbacks=False,
+                    allow_plots=False,
+                )
+                for key, value in domain_stats.items():
+                    merged[f"domain/{domain_name}/{key}"] = value
+        finally:
+            self.dataloader = original_dataloader
+            self.data = original_data
+            self.args.plots = original_plots
+        return merged
 
     def match_predictions(self, pred_classes, true_classes, iou, use_scipy=False):
         """
