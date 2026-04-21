@@ -727,6 +727,7 @@ class KeypointLoss(nn.Module):
         e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)
         return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
 
+
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection.
     
@@ -745,12 +746,13 @@ class v8DetectionLoss:
         nwd_loss: bool = False,
         use_wiseiou: bool = False,
         iou_ratio: float = 0.5,
+        dependency_loss: bool = False,
+        child_parent_map: dict | None = None,
         verbose: bool = True,
     ):  # model must be de-paralleled
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings."""
         device = next(model.parameters()).device
         h = model.args
-
         m = model.model[-1]  # Detect() module
         self.nc: list[int] = m.nc if isinstance(m.nc, list) else [m.nc]
         self.n_tasks = len(self.nc)
@@ -768,40 +770,7 @@ class v8DetectionLoss:
         # Initialize classification loss functions for each task
         cls_losses = []
         for i in range(self.n_tasks):
-            if clf_loss_fn == "bce":
-                cls_loss_fn = BCELoss
-                cls_losses.append(cls_loss_fn(reduction="none", weight=self.clf_loss_weights[i]))
-            elif clf_loss_fn == "vfl":
-                cls_loss_fn = VarifocalLoss
-                cls_losses.append(cls_loss_fn(weight=self.clf_loss_weights[i]))
-            elif clf_loss_fn == "qfl":
-                cls_loss_fn = QualityFocalLoss
-                cls_losses.append(cls_loss_fn(weight=self.clf_loss_weights[i]))
-            elif clf_loss_fn == "ecm":
-                cls_losses.append(EffectiveClassMarginLoss(
-                    num_classes=self.nc[i],
-                    reduction='none',
-                    weight=self.clf_loss_weights[i]
-                ))
-            elif clf_loss_fn == "pp":
-                cls_losses.append(PPLoss(
-                    num_levels=len(m.stride),
-                    strides=m.stride.tolist(),
-                    reduction='none',
-                    weight=self.clf_loss_weights[i],
-                    verbose=verbose,
-                ))
-            elif clf_loss_fn == "ppqfl":
-                cls_losses.append(PPQualityFocalLoss(
-                    num_levels=len(m.stride),
-                    strides=m.stride.tolist(),
-                    weight=self.clf_loss_weights[i],
-                    verbose=verbose,
-                ))
-            elif clf_loss_fn == "focal":
-                cls_losses.append(FocalLoss())
-            else:
-                raise ValueError(f"Unknown classification loss function: {clf_loss_fn}")
+            cls_losses.append(self._build_cls_loss(clf_loss_fn, self.clf_loss_weights[i], self.nc[i], m, verbose))
         self.cls_losses = nn.ModuleList(cls_losses)
         self.cls_losses.to(device)  # Move loss modules (buffers) to model device
 
@@ -825,7 +794,7 @@ class v8DetectionLoss:
             topk2=tal_topk2,
             iou_loss_fn=iou_loss_fn,
         )
-        
+
         self.bbox_loss = BboxLoss(
             reg_max=m.reg_max,
             iou_loss_fn=iou_loss_fn,
@@ -833,10 +802,15 @@ class v8DetectionLoss:
             use_wiseiou=use_wiseiou,
             iou_ratio=iou_ratio,
         ).to(device)
-        
+
         if verbose:
-            LOGGER.info(f"{colorstr('Using losses')}: {clf_loss_fn} loss & {iou_loss_fn} loss.")
-        
+            loss_parts = [f"{clf_loss_fn} cls loss", f"{iou_loss_fn} iou loss"]
+            if dependency_loss:
+                loss_parts.append("dependency loss")
+            if getattr(m, "embed_dim", 0) > 0:
+                loss_parts.append("ReID (metric learning) loss")
+            LOGGER.info(f"{colorstr('Using losses')}: {' & '.join(loss_parts)}")
+
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
         # Per-task cls loss weights (higher weight = more gradient for that task).
@@ -855,13 +829,167 @@ class v8DetectionLoss:
         else:
             self.task_loss_weights = [1.0] * self.n_tasks
 
+        # Hierarchical dependency loss
+        self.dependency_loss = dependency_loss and self.n_tasks > 1
+        self.child_parent_maps = None
+        if self.dependency_loss:
+            if not child_parent_map:
+                LOGGER.warning(
+                    f"{colorstr('Dependency Loss')}: 'child_parent_map' not provided in data YAML. "
+                    "Dependency loss will be disabled."
+                )
+                self.dependency_loss = False
+            else:
+                self._load_child_parent_map(child_parent_map, device)
+
         self.embed_dim = getattr(m, "embed_dim", 0)
         self.has_embed = self.embed_dim > 0
-        self.n_losses = 4 if self.has_embed else 3
         if self.has_embed:
             self.embed_loss = MetricLearningLoss().to(device)
+        # Fixed-order loss layout: box, cls, dfl, [dep], [reid]
+        self.loss_names = ["box", "cls", "dfl"]
+        if self.dependency_loss:
+            self.loss_names.append("dep")
+        if self.has_embed:
+            self.loss_names.append("reid")
+        self.n_losses = len(self.loss_names)
+        # Slot indices (-1 means "not present")
+        self.box_idx = 0
+        self.cls_idx = 1
+        self.dfl_idx = 2
+        self.dep_idx = self.loss_names.index("dep") if self.dependency_loss else -1
+        self.reid_idx = self.loss_names.index("reid") if self.has_embed else -1
 
         disable_dynamo(self.__class__)
+
+    def _load_child_parent_map(self, raw_map: dict, device: torch.device):
+        """Preprocess the child-parent class mapping for dependency loss.
+
+        ``raw_map`` maps hierarchy levels to {child_class_idx: parent_class_idx}.
+        Level 0 has no parent. Level k maps its classes to level k-1 classes.
+        Keys may be ints or strings (e.g. when coming from YAML/JSON).
+
+        Internally builds per-level tensors for efficient vectorized computation:
+        child_parent_maps[level] is a tensor of shape (nc[level],) where
+        entry i = parent class index in level-1 for child class i at this level.
+        """
+        # Normalize top-level keys to int for uniform lookup
+        norm_map = {int(k): v for k, v in raw_map.items()}
+
+        self.child_parent_maps = {}
+        for level in range(1, self.n_tasks):
+            if level not in norm_map:
+                LOGGER.warning(
+                    f"{colorstr('Dependency Loss')}: No mapping for level {level} in child_parent_map."
+                )
+                continue
+            level_map = norm_map[level]
+            parent_indices = torch.full((self.nc[level],), -1, dtype=torch.long, device=device)
+            for child_key, parent_idx in level_map.items():
+                child_idx = int(child_key)
+                if child_idx < self.nc[level]:
+                    parent_indices[child_idx] = int(parent_idx)
+            self.child_parent_maps[level] = parent_indices
+
+    def _compute_dependency_penalty(
+        self,
+        pred_scores: torch.Tensor,
+        target_scores: torch.Tensor,
+        parent_target_scores: torch.Tensor,
+        offset: int,
+        task_idx: int,
+    ) -> torch.Tensor:
+        """Compute hierarchical dependency penalty for a given task level.
+
+        Penalizes false-positive predictions that are inconsistent with the parent level.
+        A prediction is inconsistent if it's a false positive at level k AND its corresponding
+        parent class at level k-1 is also not a true positive.
+
+        Args:
+            pred_scores: Full predicted scores (bs, num_anchors, sum(nc)) - raw logits.
+            target_scores: Full target scores (bs, num_anchors, nc[task]) for current task.
+            offset: Start index of current task in the score dimension.
+            task_idx: Current hierarchy level index.
+            prev_offset: Start index of parent task in the score dimension.
+
+        Returns:
+            Scalar penalty value.
+        """
+        if task_idx == 0 or task_idx not in self.child_parent_maps:
+            return torch.tensor(0.0, device=pred_scores.device)
+
+        parent_map = self.child_parent_maps[task_idx]  # (nc_child,) -> parent cls in level-1
+        nc_child = self.nc[task_idx]
+
+        # Child confidences for current hierarchy level.
+        child_preds = pred_scores[..., offset : offset + nc_child].sigmoid()
+        child_is_tp = target_scores > 0
+        fp_conf = child_preds * (~child_is_tp).float()
+
+        # hyolo-style: only consider anchors that are active in both adjacent levels.
+        common_anchor = (target_scores.sum(-1, keepdim=True) > 0) & (parent_target_scores.sum(-1, keepdim=True) > 0)
+        fp_conf = fp_conf * common_anchor.float()
+
+        # Filter tiny confidences.
+        fp_conf = fp_conf * (fp_conf > 0.001).float()
+        if fp_conf.sum() == 0:
+            return torch.tensor(0.0, device=pred_scores.device)
+
+        # Map each child class to its parent class and keep only inconsistent FPs
+        # (i.e. mapped parent class is NOT a TP at this anchor).
+        valid_child = parent_map >= 0
+        safe_parent_map = parent_map.clamp(min=0)  # avoid gather OOB for invalid entries
+
+        # parent_tp_mapped: [B, A, nc_child], value 1 if mapped parent is TP, else 0.
+        parent_tp = (parent_target_scores > 0).float()
+        gather_idx = safe_parent_map.view(1, 1, -1).expand(parent_tp.shape[0], parent_tp.shape[1], -1)
+        parent_tp_mapped = torch.gather(parent_tp, 2, gather_idx)
+        if (~valid_child).any():
+            parent_tp_mapped[..., ~valid_child] = 0.0
+
+        inconsistent_fp = fp_conf * (1.0 - parent_tp_mapped)
+        fp_count = (inconsistent_fp > 0).float().sum()
+        if fp_count > 0:
+            return inconsistent_fp.sum() / fp_count
+        return torch.tensor(0.0, device=pred_scores.device)
+
+    @staticmethod
+    def _build_cls_loss(name: str, weight, nc: int, detect_module, verbose: bool = True):
+        """Build a single classification loss module by name.
+
+        Args:
+            name: Loss function name (bce, vfl, qfl, ecm, pp, ppqfl, focal).
+            weight: Per-class weight tensor for this task.
+            nc: Number of classes for this task.
+            detect_module: The Detect head module (used by pp/ppqfl for stride info).
+            verbose: Whether to log details.
+        """
+        if name == "bce":
+            return BCELoss(reduction="none", weight=weight)
+        if name == "vfl":
+            return VarifocalLoss(weight=weight)
+        if name == "qfl":
+            return QualityFocalLoss(weight=weight)
+        if name == "ecm":
+            return EffectiveClassMarginLoss(num_classes=nc, reduction="none", weight=weight)
+        if name == "pp":
+            return PPLoss(
+                num_levels=len(detect_module.stride),
+                strides=detect_module.stride.tolist(),
+                reduction="none",
+                weight=weight,
+                verbose=verbose,
+            )
+        if name == "ppqfl":
+            return PPQualityFocalLoss(
+                num_levels=len(detect_module.stride),
+                strides=detect_module.stride.tolist(),
+                weight=weight,
+                verbose=verbose,
+            )
+        if name == "focal":
+            return FocalLoss()
+        raise ValueError(f"Unknown classification loss function: {name}")
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -922,6 +1050,7 @@ class v8DetectionLoss:
         target_scores_sum, offset = max(norm_align_metric.sum(), 1), 0
 
         # Cls loss - iterate over each classification task/head
+        prev_target_scores_task = None
         for task_idx, (cls_loss_fn, n_cls_task) in enumerate(zip(self.cls_losses, self.nc)):
             pred_scores_task = pred_scores[..., offset: offset + n_cls_task]
 
@@ -936,7 +1065,7 @@ class v8DetectionLoss:
 
             task_cls_loss = cls_loss_fn(
                 pred_scores=pred_scores_task,
-                gt_scores=target_scores_task, 
+                gt_scores=target_scores_task,
                 pred_bboxes=pred_bboxes,
                 gt_bboxes=target_bboxes / stride_tensor,
                 fg_mask=fg_mask,
@@ -944,14 +1073,28 @@ class v8DetectionLoss:
                 stride_tensor=stride_tensor,
             ).sum() / target_scores_sum
 
-            loss[1] += task_cls_loss * self.task_loss_weights[task_idx]
+            # Hierarchical dependency penalty (levels > 0) in its own slot
+            if self.dependency_loss and task_idx > 0:
+                dep_penalty = self._compute_dependency_penalty(
+                    pred_scores,
+                    target_scores_task,
+                    prev_target_scores_task,
+                    offset,
+                    task_idx,
+                )
+                # Clamp penalty so it cannot exceed base cls loss magnitude
+                dep_term = (dep_penalty * self.hyp.dep).clamp(max=task_cls_loss.detach())
+                loss[self.dep_idx] += dep_term * self.task_loss_weights[task_idx]
 
+            loss[self.cls_idx] += task_cls_loss * self.task_loss_weights[task_idx]
+
+            prev_target_scores_task = target_scores_task
             offset += n_cls_task
 
         # Bbox loss
         if fg_mask.sum():
             target_bboxes /= stride_tensor
-            loss[0], loss[2] = self.bbox_loss(
+            loss[self.box_idx], loss[self.dfl_idx] = self.bbox_loss(
                 pred_distri,
                 pred_bboxes,
                 anchor_points,
@@ -982,17 +1125,19 @@ class v8DetectionLoss:
                 gt_tags_flat = gt_tags.view(-1)
                 valid = (target_gt_idx_fg >= 0) & (target_gt_idx_fg < gt_tags_flat.numel())
                 if valid.any():
-                    loss[3] = self.embed_loss(
+                    loss[self.reid_idx] = self.embed_loss(
                         pred_embeds[fg_mask][valid],
                         gt_tags_flat[target_gt_idx_fg[valid]],
                         pred_scores[fg_mask].sigmoid().max(dim=1).values.float()[valid],
                     )
 
-        loss[0] *= self.hyp.box
-        loss[1] *= self.hyp.cls
-        loss[2] *= self.hyp.dfl
+        loss[self.box_idx] *= self.hyp.box
+        loss[self.cls_idx] *= self.hyp.cls / len(self.nc)
+        loss[self.dfl_idx] *= self.hyp.dfl
+        if self.dependency_loss:
+            loss[self.dep_idx] *= self.hyp.dep / len(self.nc)
         if self.has_embed:
-            loss[3] *= self.hyp.reid
+            loss[self.reid_idx] *= self.hyp.reid
 
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),

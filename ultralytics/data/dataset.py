@@ -324,15 +324,6 @@ class YOLODataset(BaseDataset):
             new_batch["batch_idx"][i] += i
         new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
 
-        # Debug checks
-        # for k in ("batch_idx", "cls", "bboxes", "tags"):
-        #     if k in new_batch:
-        #         v = new_batch[k]
-        #         if isinstance(v, str):
-        #             raise TypeError(f"[COLLATE] new_batch['{k}'] is str: {v[:200]}")
-        #         if v is not None and not torch.is_tensor(v):
-        #             raise TypeError(f"[COLLATE] new_batch['{k}'] is not Tensor: {type(v)}")
-
         return new_batch
 
 

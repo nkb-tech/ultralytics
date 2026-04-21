@@ -417,7 +417,7 @@ class DetectionModel(BaseModel):
         y[-1] = y[-1][..., i:]  # small
         return y
 
-    def init_criterion(self, clf_loss_weights=None):
+    def init_criterion(self, clf_loss_weights=None, child_parent_map=None):
         """Initialize the loss criterion for the DetectionModel."""
         kwargs = dict(
             clf_loss_weights=clf_loss_weights,
@@ -427,6 +427,8 @@ class DetectionModel(BaseModel):
             use_wiseiou=self.args.use_wiseiou,
             iou_ratio=self.args.iou_ratio,
             task_loss_weights=self.args.task_loss_weights,
+            dependency_loss=getattr(self.args, "dependency_loss", False),
+            child_parent_map=child_parent_map,
         )
 
         return E2ELoss(self, v8DetectionLoss, **kwargs) if getattr(self, "end2end", False) else v8DetectionLoss(self, **kwargs)
@@ -1137,6 +1139,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         nc = [nc]
         d["nc"] = nc
     end2end = d.get("end2end", False)  # default to False for models without end2end config
+    hierarchical = d.get("hierarchical", False)
     reg_max = d.get("reg_max", 16)
     depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
     if scales:
@@ -1266,6 +1269,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                    Pose, Pose26, Pose_LSCD, Pose_TADDH, OBB, OBB26, OBB_LSCD, OBB_TADDH, Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH,
                    Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect, v10Pose, v10Segment):
             args.extend([reg_max, end2end, [ch[x] for x in f]])
+            if m is Detect:
+                args.append(hierarchical)
             m.legacy = legacy
             if m in (Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Segment_LADH, Segment_LSCSBD):
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)

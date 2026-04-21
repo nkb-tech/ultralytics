@@ -417,11 +417,16 @@ class BaseTrainer:
             LOGGER.info(f'{colorstr("Auto-calculated class weights")}: {clf_loss_weights}')
 
         # Initialize criterion
+        child_parent_map = self.data.get("child_parent_map") if isinstance(self.data, dict) else None
         if world_size > 1:
-            criterion = self.model.module.init_criterion(wclf_loss_weights=clf_loss_weights)
+            criterion = self.model.module.init_criterion(
+                clf_loss_weights=clf_loss_weights, child_parent_map=child_parent_map
+            )
             self.model.module.criterion = criterion
         else:
-            criterion = self.model.init_criterion(clf_loss_weights=clf_loss_weights)
+            criterion = self.model.init_criterion(
+                clf_loss_weights=clf_loss_weights, child_parent_map=child_parent_map
+            )
             self.model.criterion = criterion
 
         # Compile model

@@ -106,6 +106,7 @@ CFG_FLOAT_KEYS = {  # integer or float arguments, i.e. x=2 and x=2.0
     "cls",
     "dfl",
     "reid",
+    "dep",
     "degrees",
     "shear",
     "time",

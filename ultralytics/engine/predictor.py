@@ -314,6 +314,11 @@ class BasePredictor:
 
     def setup_model(self, model, verbose=True):
         """Initialize YOLO model with given parameters and set it to evaluation mode."""
+        if hasattr(model, "end2end"):
+            if self.args.end2end is not None:
+                model.end2end = self.args.end2end
+            if model.end2end:
+                model.set_head_attr(max_det=self.args.max_det, agnostic_nms=self.args.agnostic_nms)
         self.model = AutoBackend(
             weights=model or self.args.model,
             device=select_device(self.args.device, verbose=verbose),
