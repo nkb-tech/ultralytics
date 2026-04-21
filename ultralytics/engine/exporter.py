@@ -116,6 +116,7 @@ from ultralytics.utils.torch_utils import (
     TORCH_2_1,
     TORCH_2_4,
     TORCH_2_6,
+    TORCH_2_9,
     select_device,
     smart_inference_mode
 )
@@ -296,6 +297,7 @@ class Exporter:
         export_edgetpu: Export model to Edge TPU format.
         export_tfjs: Export model to TensorFlow.js format.
         export_rknn: Export model to RKNN format.
+        export_hailo: Export model to Hailo-compatible ONNX format.
         export_executorch: Export model to ExecuTorch format.
         export_imx: Export model to IMX format.
 
@@ -424,6 +426,15 @@ class Exporter:
             if not (self.args.int8 or self.args.half):
                 LOGGER.warning("WARNING ⚠️ FP32 quantization is not supported for RKNN export, setting half=True.")
                 self.args.half = True
+        if hailo:
+            if self.args.nms:
+                LOGGER.warning("Hailo export does not support nms=True, setting nms=False. "
+                               "Hailo DFC / runtime performs NMS off-graph.")
+                self.args.nms = False
+            if getattr(model, "end2end", False):
+                LOGGER.warning(
+                    "WARNING ⚠️ Hailo export uses the one2many detection branch; end2end branch will be ignored."
+                )
         if self.args.nms:
             assert not isinstance(model, ClassificationModel), "'nms=True' is not valid for classification models."
             assert not tflite or not ARM64 or not LINUX, "TFLite export with NMS unsupported on ARM64 Linux"
@@ -567,7 +578,7 @@ class Exporter:
 
         # Exports
         f = [""] * len(fmts)  # exported filenames
-        self.engine, self.onnx, self.rknn = engine, onnx, rknn
+        self.engine, self.onnx, self.rknn, self.hailo = engine, onnx, rknn, hailo
         if jit or ncnn:  # TorchScript
             f[0], _ = self.export_torchscript()
         if engine:  # TensorRT required before ONNX
@@ -594,11 +605,13 @@ class Exporter:
         if ncnn:  # NCNN
             f[11], _ = self.export_ncnn()
         if imx:
-            f[13] = self.export_imx()
+            f[13], _ = self.export_imx()
         if rknn:
             f[14], _ = self.export_rknn()
+        if hailo:
+            f[15], _ = self.export_hailo()
         if executorch:
-            f[15] = self.export_executorch()
+            f[16], _ = self.export_executorch()
 
         # Finish
         f = [str(x) for x in f if x]  # filter out '' and None
@@ -1686,10 +1699,6 @@ class Exporter:
                 if src.exists():
                     src.rename(export_path / src.name)
 
-            # Force output-layer Convs to FP16 — INT8 destroys logit precision
-            # cfg_path = export_path / f"{onnx_stem}.quantization.cfg"
-            # self._patch_rknn_quant_cfg(f, cfg_path, prefix)
-
             if check_version("rknn-toolkit2", ">=2.4.0"):
                 # >=2.4 forbids load_onnx before step2; rebuild a clean instance
                 rknn.release()
@@ -1754,22 +1763,62 @@ class Exporter:
         return str(export_path), None
 
     @try_export
+    def export_hailo(self, prefix=colorstr("Hailo:")):
+        """Export YOLO model to Hailo-compatible ONNX format.
+
+        Produces ONNX with the ultralytics 8.1.47 graph topology — per-scale Concat(box, cls[, emb]) →
+        Reshape → cross-scale Concat → Split → DFL → anchor decode → sigmoid — which Hailo DFC
+        recognises and compiles to HEF at full throughput. The HEF compilation itself is performed
+        externally via Hailo DFC / CLI; this routine only emits the ONNX the DFC expects.
+        """
+        LOGGER.info(f"\n{prefix} starting Hailo-compatible ONNX export...")
+        return self.export_onnx()
+
+    @try_export
     def export_ncnn(self, prefix=colorstr("NCNN:")):
-        """Export YOLO model to NCNN format."""
-        LOGGER.warning(f"{prefix} WARNING ⚠️ NCNN export not supported yet")
-        return None, None
+        """Export YOLO model to NCNN format using PNNX https://github.com/pnnx/pnnx."""
+        from ultralytics.utils.export.ncnn import torch2ncnn
+
+        return torch2ncnn(
+            model=self.model,
+            im=self.im,
+            output_dir=str(self.file).replace(self.file.suffix, "_ncnn_model/"),
+            half=self.args.half,
+            metadata=self.metadata,
+            device=self.device,
+            prefix=prefix,
+        )
 
     @try_export
     def export_executorch(self, prefix=colorstr("ExecuTorch:")):
-        """Export YOLO model to ExecuTorch format."""
-        LOGGER.warning(f"{prefix} WARNING ⚠️ ExecuTorch export not supported yet")
-        return None, None
+        """Export YOLO model to ExecuTorch *.pte format via XNNPACK."""
+        assert TORCH_2_9, (
+            f"ExecuTorch export requires torch>=2.9.0 but torch=={TORCH_VERSION} is installed"
+        )
+        check_requirements(("executorch>=0.3.0",))
+        from ultralytics.utils.export.executorch import torch2executorch
+
+        return torch2executorch(
+            model=self.model,
+            im=self.im,
+            output_dir=str(self.file).replace(self.file.suffix, "_executorch_model/"),
+            metadata=self.metadata,
+            prefix=prefix,
+        )
 
     @try_export
     def export_imx(self, prefix=colorstr("IMX:")):
-        """Export YOLO model to IMX format."""
-        LOGGER.warning(f"{prefix} WARNING ⚠️ ExecuTorch export not supported yet")
-        return None, None
+        """Export YOLO model to IMX (Sony IMX500) format.
+
+        Not yet ported to this fork — upstream reference uses hardcoded layer indices for
+        single-task YOLOv8/11 graphs that are incompatible with the hierarchical multitask
+        head (``nc=list``) in this repo. See
+        https://github.com/ultralytics/ultralytics/blob/main/ultralytics/utils/export/imx.py
+        if / when IMX support is needed.
+        """
+        raise NotImplementedError(
+            "IMX export is not supported in this fork. See upstream ultralytics for reference."
+        )
 
     def _add_tflite_metadata(self, file):
         """Add metadata to *.tflite models per https://www.tensorflow.org/lite/models/convert/metadata."""

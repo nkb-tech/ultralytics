@@ -259,6 +259,8 @@ class Detect(nn.Module):
         self, x: list[Tensor]
     ) -> dict[str, Tensor] | Tensor | tuple[Tensor, dict[str, Tensor]]:
         """Concatenates and returns predicted bounding boxes and class probabilities."""
+        if self.export and self.format == "hailo":
+            return self._forward_hailo(x)
         preds = self.forward_head(x, **self.one2many)
         if self.end2end:
             x_detach = [xi.detach() for xi in x]
@@ -278,6 +280,39 @@ class Detect(nn.Module):
         if self.end2end:
             y = self.postprocess(y.permute(0, 2, 1), self.max_det, self.nc)
         return y if self.export else (y, preds)
+
+    def _hailo_concat(self, x: list[Tensor]) -> Tensor:
+        """Per-scale Concat(box, cls[, emb]) → Reshape → cross-scale Concat (sets self.anchors/strides).
+
+        Replicates the ultralytics 8.1.47 graph topology that Hailo DFC recognises for HEF
+        compilation at full throughput. Always uses the one2many heads via :meth:`pre_forward`.
+        """
+        feats = self.pre_forward(x)
+        shape = feats[0].shape
+        if self.dynamic or self.shape != shape:
+            self.anchors, self.strides = (t.transpose(0, 1) for t in make_anchors(feats, self.stride, 0.5))
+            self.shape = shape
+        return torch.cat([f.view(shape[0], self.no, -1) for f in feats], 2)
+
+    def _hailo_decode_boxes(self, box: Tensor) -> Tensor:
+        """Decode DFL box distribution into xywh boxes at input-image scale."""
+        return dist2bbox(self.dfl(box), self.anchors.unsqueeze(0), xywh=True, dim=1) * self.strides
+
+    def _forward_hailo(self, x: list[Tensor]) -> Tensor:
+        """Hailo-compatible forward producing the ultralytics 8.1.47 graph topology.
+
+        Outputs a single tensor ``(B, 4 + sum(nc) [+ embed_dim], A)`` with decoded boxes,
+        sigmoid scores, and L2-normalized Re-ID embeddings. End2end / one2one branches
+        are bypassed — Hailo runs NMS off-graph.
+        """
+        splits = [self.reg_max * 4, sum(self.nc)]
+        if self.embed_dim > 0:
+            splits.append(self.embed_dim)
+        parts = self._hailo_concat(x).split(splits, 1)
+        out = [self._hailo_decode_boxes(parts[0]), parts[1].sigmoid()]
+        if self.embed_dim > 0:
+            out.append(F.normalize(parts[2], p=2, dim=1))
+        return torch.cat(out, 1)
 
     @disable_dynamo
     def _inference(self, x: dict[str, Tensor]) -> Tensor:
@@ -471,6 +506,8 @@ class Segment(Detect):
 
     def forward(self, x: list[Tensor]) -> tuple | dict:
         """Return model outputs and mask coefficients."""
+        if self.export and self.format == "hailo":
+            return self._forward_hailo(x)
         outputs = super().forward(x)
         preds = outputs[1] if isinstance(outputs, tuple) else outputs
         proto = self.proto(x[0])
@@ -486,6 +523,14 @@ class Segment(Detect):
             return preds
 
         return (outputs, proto) if self.export else ((outputs[0], proto), preds)
+
+    def _forward_hailo(self, x: list[Tensor]) -> tuple[Tensor, Tensor]:
+        """Hailo-compatible forward: old-style detection + mask coefficients + proto."""
+        proto = self.proto(x[0])
+        bs = proto.shape[0]
+        mc = torch.cat([self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2)
+        y = Detect._forward_hailo(self, x)
+        return torch.cat([y, mc], 1), proto
 
     def _inference(self, x: dict[str, Tensor]) -> Tensor:
         """Decode with mask coefficients."""
@@ -544,6 +589,8 @@ class Segment26(Segment):
 
     def forward(self, x: list[Tensor]) -> tuple | dict:
         """Return model outputs with Proto26 mask generation."""
+        if self.export and self.format == "hailo":
+            return self._forward_hailo(x)
         outputs = Detect.forward(self, x)
         preds = outputs[1] if isinstance(outputs, tuple) else outputs
         proto = self.proto(x)
@@ -562,6 +609,15 @@ class Segment26(Segment):
 
         proto_out = proto[0] if isinstance(proto, tuple) else proto
         return (outputs, proto_out) if self.export else ((outputs[0], proto_out), preds)
+
+    def _forward_hailo(self, x: list[Tensor]) -> tuple[Tensor, Tensor]:
+        """Hailo-compatible forward for Segment26: old-style detection + mc + Proto26 output."""
+        proto = self.proto(x)
+        proto_out = proto[0] if isinstance(proto, tuple) else proto
+        bs = x[0].shape[0]
+        mc = torch.cat([self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2)
+        y = Detect._forward_hailo(self, x)
+        return torch.cat([y, mc], 1), proto_out
 
     def fuse(self) -> None:
         """Remove proto semantic segmentation head for inference."""
@@ -625,6 +681,25 @@ class OBB(Detect):
         preds = super()._inference(x)
         return torch.cat([preds, x["angle"]], dim=1)
 
+    def _compute_hailo_angle(self, x: list[Tensor]) -> Tensor:
+        """Per-scale angle concat, with sigmoid-shifted transformation.
+
+        Subclasses (OBB26) override to emit raw angle logits without the sigmoid.
+        """
+        bs = x[0].shape[0]
+        angle = torch.cat([self.cv4[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
+        return (angle.sigmoid() - 0.25) * math.pi
+
+    def _hailo_decode_boxes(self, box: Tensor) -> Tensor:
+        """Decode DFL into rotated boxes using the cached angle tensor."""
+        return dist2rbox(self.dfl(box), self.angle, self.anchors.unsqueeze(0), dim=1) * self.strides
+
+    def _forward_hailo(self, x: list[Tensor]) -> Tensor:
+        """Hailo-compatible forward for OBB: rotated detection + angle."""
+        self.angle = self._compute_hailo_angle(x)
+        y = Detect._forward_hailo(self, x)  # uses overridden _hailo_decode_boxes above
+        return torch.cat([y, self.angle], 1)
+
     def decode_bboxes(self, bboxes: Tensor, anchors: Tensor) -> Tensor:
         """Decode rotated bounding boxes."""
         return dist2rbox(bboxes, self.angle, anchors, dim=1)
@@ -678,6 +753,11 @@ class OBB26(OBB):
                 angle = torch.cat([angle_head[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
                 preds["angle"] = angle
         return preds
+
+    def _compute_hailo_angle(self, x: list[Tensor]) -> Tensor:
+        """Raw angle logits for Hailo (YOLO26 — no sigmoid transform)."""
+        bs = x[0].shape[0]
+        return torch.cat([self.cv4[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)
 
 
 class Pose(Detect):
@@ -733,6 +813,13 @@ class Pose(Detect):
         preds = super()._inference(x)
         kpts = self.kpts_decode(x["kpts"])
         return torch.cat([preds, kpts], dim=1)
+
+    def _forward_hailo(self, x: list[Tensor]) -> Tensor:
+        """Hailo-compatible forward for Pose: old-style detection + decoded keypoints."""
+        bs = x[0].shape[0]
+        kpt = torch.cat([self.cv4[i](x[i]).view(bs, self.nk, -1) for i in range(self.nl)], 2)
+        y = Detect._forward_hailo(self, x)
+        return torch.cat([y, self.kpts_decode(kpt)], 1)
 
     def kpts_decode(self, kpts: Tensor) -> Tensor:
         """Decode keypoints from predictions."""
