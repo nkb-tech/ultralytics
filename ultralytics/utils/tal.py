@@ -488,8 +488,21 @@ def make_anchors(feats, strides, grid_cell_offset=0.5):
 
 
 def dist2bbox(distance, anchor_points, xywh=True, dim=-1):
-    """Transform distance(ltrb) to box(xywh or xyxy)."""
-    lt, rb = distance.chunk(2, dim)
+    """Transform distance(ltrb) to box(xywh or xyxy).
+
+    Uses ``split([n, n], dim)`` rather than ``chunk(2, dim)`` — the former dispatches to
+    ``aten::split_with_sizes`` which emits a single ONNX ``Split`` op, while ``chunk`` often
+    lowers to two separate ``Slice`` ops (especially after a ``Reshape``) which break
+    Hailo DFC's graph pattern matching for the detection tail.
+
+    The ``int(...)`` cast is load-bearing for ONNX export: ``Tensor.shape[dim]`` returns a
+    symbolic int during TorchScript tracing, and a list of symbolic ints passed to ``split``
+    takes the dynamic ``split_with_sizes`` path that the exporter lowers to two ``Slice`` ops.
+    Casting to a concrete Python int lets the exporter emit a single ``Split`` op — which is
+    what Hailo DFC's detection-tail pattern matcher expects.
+    """
+    half = int(distance.shape[dim]) // 2
+    lt, rb = distance.split([half, half], dim=dim)
     x1y1 = anchor_points - lt
     x2y2 = anchor_points + rb
     if xywh:

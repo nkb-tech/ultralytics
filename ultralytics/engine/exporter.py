@@ -116,6 +116,7 @@ from ultralytics.utils.torch_utils import (
     TORCH_2_1,
     TORCH_2_4,
     TORCH_2_6,
+    TORCH_2_9,
     select_device,
     smart_inference_mode
 )
@@ -296,6 +297,7 @@ class Exporter:
         export_edgetpu: Export model to Edge TPU format.
         export_tfjs: Export model to TensorFlow.js format.
         export_rknn: Export model to RKNN format.
+        export_hailo: Export model to Hailo-compatible ONNX format.
         export_executorch: Export model to ExecuTorch format.
         export_imx: Export model to IMX format.
 
@@ -424,6 +426,15 @@ class Exporter:
             if not (self.args.int8 or self.args.half):
                 LOGGER.warning("WARNING ⚠️ FP32 quantization is not supported for RKNN export, setting half=True.")
                 self.args.half = True
+        if hailo:
+            if self.args.nms:
+                LOGGER.warning("Hailo export does not support nms=True, setting nms=False. "
+                               "Hailo DFC / runtime performs NMS off-graph.")
+                self.args.nms = False
+            if getattr(model, "end2end", False):
+                LOGGER.warning(
+                    "WARNING ⚠️ Hailo export uses the one2many detection branch; end2end branch will be ignored."
+                )
         if self.args.nms:
             assert not isinstance(model, ClassificationModel), "'nms=True' is not valid for classification models."
             assert not tflite or not ARM64 or not LINUX, "TFLite export with NMS unsupported on ARM64 Linux"
@@ -463,6 +474,7 @@ class Exporter:
         model = model.fuse()
         head_mode = 'legacy'
         end2end = False
+        embed_dim = 0
         for m in model.modules():
             if isinstance(m, (Detect, RTDETRDecoder)):  # includes all Detect subclasses like Segment, Pose, OBB
                 m.dynamic = self.args.dynamic
@@ -471,9 +483,22 @@ class Exporter:
                 m.max_det = self.args.max_det
                 head_mode = getattr(m, "head_mode", "legacy")
                 end2end = getattr(m, "end2end", False)
+                embed_dim = getattr(m, "embed_dim", 0)
+                if "embed_dim" not in m.__dict__:
+                    m.embed_dim = 0
                 if self.args.nms and m.end2end:
                     LOGGER.warning(
                         "WARNING ⚠️ Your model is already end2end, no need to include nms inside the graph."
+                    )
+                    self.args.nms = False
+                # JDE + nms=True: TensorRT EfficientNMS plugin can't return extra tensors;
+                # CoreML NMS pipeline only supports confidence+coordinates outputs.
+                # ONNX nms=True now supported (PostDetectONNXNMS returns (dets, embeds)).
+                # OpenVINO / TF SavedModel / TFLite / TFjs use NMSModel which handles embeds as extras.
+                if self.args.nms and embed_dim > 0 and (engine or coreml):
+                    LOGGER.warning(
+                        f"WARNING ⚠️ In-graph 'nms=True' not supported for Re-ID embeddings with format='{self.args.format}'. "
+                        "Forcing 'nms=False' — run NMS externally and gather embeddings by index."
                     )
                     self.args.nms = False
                 if not isinstance(m, RTDETRDecoder) and self.args.nms and (onnx or engine):
@@ -542,7 +567,9 @@ class Exporter:
             "dtype": "uint8" if self.args.int8 else "float16" if self.args.half else "float32",
             "head_mode": head_mode,
             "end2end": end2end,
+            "embed_dim": embed_dim,
         }  # model metadata
+        self.has_embeds = embed_dim > 0
         if model.task == "pose":
             self.metadata["kpt_shape"] = model.model[-1].kpt_shape
 
@@ -553,7 +580,7 @@ class Exporter:
 
         # Exports
         f = [""] * len(fmts)  # exported filenames
-        self.engine, self.onnx, self.rknn = engine, onnx, rknn
+        self.engine, self.onnx, self.rknn, self.hailo = engine, onnx, rknn, hailo
         if jit or ncnn:  # TorchScript
             f[0], _ = self.export_torchscript()
         if engine:  # TensorRT required before ONNX
@@ -580,11 +607,13 @@ class Exporter:
         if ncnn:  # NCNN
             f[11], _ = self.export_ncnn()
         if imx:
-            f[13] = self.export_imx()
+            f[13], _ = self.export_imx()
         if rknn:
             f[14], _ = self.export_rknn()
+        if hailo:
+            f[15], _ = self.export_hailo()
         if executorch:
-            f[15] = self.export_executorch()
+            f[16], _ = self.export_executorch()
 
         # Finish
         f = [str(x) for x in f if x]  # filter out '' and None
@@ -650,7 +679,7 @@ class Exporter:
     @try_export
     def export_onnx(self, prefix=colorstr("ONNX:")):
         """YOLOv8 ONNX export."""
-        requirements = ["onnx>=1.12.0"]
+        requirements = ["onnx>=1.12.0,<1.17.0"]
         if self.args.simplify:
             requirements += ["onnxslim", "onnxscript", "onnxruntime" + ("-gpu" if torch.cuda.is_available() else "")]
         check_requirements(requirements)
@@ -660,7 +689,20 @@ class Exporter:
         LOGGER.info(f"\n{prefix} starting export with onnx {onnx.__version__} opset {opset_version}...")
         f = str(self.file.with_suffix(".onnx"))
 
-        if not self.args.nms:
+        if self.rknn:
+            y = self.model(self.im)
+            if isinstance(y, dict):
+                output_names = list(y.keys())
+            elif isinstance(y, (tuple, list)):
+                output_names = []
+                for item in y:
+                    if isinstance(item, dict):
+                        output_names.extend(item.keys())
+                    else:
+                        output_names.append(f"output_{len(output_names)}")
+            else:
+                output_names = ["outputs"]
+        elif not self.args.nms:
             if isinstance(self.model, SegmentationModel):
                 output_names = ["outputs", "proto"]
             else:
@@ -669,7 +711,12 @@ class Exporter:
             if isinstance(self.model, SegmentationModel):
                 output_names = ["indices", "outputs", "proto"]
             else:
-                output_names = ["num_dets", "bboxes", "scores", "labels"] if self.engine else ["output"]
+                if self.engine:
+                    output_names = ["num_dets", "bboxes", "scores", "labels"]
+                else:
+                    output_names = ["output"]
+                    if self.has_embeds:
+                        output_names.append("embeds")
 
         # Set shapes
         dynamic = dict()
@@ -690,7 +737,8 @@ class Exporter:
 
                 elif isinstance(self.model, DetectionModel):
                     if self.args.dynamic:
-                        dynamic["outputs"] = {0: "batch", 2: "anchors"}  # shape(1, 84, 8400)
+                        # shape(B, 4 + sum(nc) [+ embed_dim], A)
+                        dynamic["outputs"] = {0: "batch", 2: "anchors"}
             else:
                 # FIXME incorrect behaviour
                 if isinstance(self.model, SegmentationModel):
@@ -712,7 +760,9 @@ class Exporter:
                     elif self.onnx:
                         shapes["output"] = ["topk" if self.args.dynamic else self.args.batch, 7]
                         if self.args.dynamic:
-                            dynamic["output"] = {0: "num_boxes"}  # shape(num_boxes, 7), 7 = 1(batch_index) + 6
+                            dynamic["output"] = {0: "num_boxes"}  # shape(num_boxes, 7)
+                            if self.has_embeds:
+                                dynamic["embeds"] = {0: "num_boxes"}
                     else:
                         dynamic["output"] = {0: "batch"}
 
@@ -1498,72 +1548,6 @@ class Exporter:
         YAML.save(Path(f) / "metadata.yaml", self.metadata)  # add metadata.yaml
         return f, None
 
-    @staticmethod
-    def _patch_rknn_quant_cfg(onnx_path: str, cfg_path, prefix: str = ""):
-        """Add quantization-sensitive layers to ``custom_quantize_layers`` as float16.
-
-        INT8 quantization in the deep backbone/neck blocks accumulates error
-        that destroys the small positive detection logits while preserving the
-        bulk of negative (non-detection) values.  Cosine similarity stays high
-        (>0.999) because negatives dominate, but sigmoid confidences drop from
-        ~0.88 to ~0.003.
-
-        Layers promoted to FP16:
-
-        1. **Cls-head** (``cv3.``) — raw logits need full precision.
-        2. **Reg-head** (``one2one_cv2.``) — box regression accuracy.
-        3. **Deep backbone/neck** (``model.19/``, ``model.20/``, ``model.22/``)
-           — worst accumulated error sources that feed the detect head.
-        4. **Attention / FFN** (``/attn/``, ``/ffn/``) — quantization-sensitive
-           operations inside PSA blocks.
-
-        Sigmoid outputs are skipped (RKNN fuses them into SiLU).
-        Layers not present in ``quantize_parameters`` (fused by RKNN) are skipped.
-        """
-        import onnx
-
-        model = onnx.load(onnx_path)
-
-        _FP16_PATTERNS = ("cv3.",)
-
-        fp16_outputs = []
-        for node in model.graph.node:
-            if "Sigmoid" in node.name:
-                continue
-            if any(p in node.name for p in _FP16_PATTERNS):
-                for out in node.output:
-                    fp16_outputs.append(out)
-
-        if not fp16_outputs:
-            LOGGER.info(f"{prefix} no quantization-sensitive layers found in ONNX — skipping")
-            return
-
-        cfg_text = Path(cfg_path).read_text()
-        marker = "quantize_parameters:"
-        if marker not in cfg_text:
-            LOGGER.warning(f"{prefix} '{marker}' section not found in config — skipping")
-            return
-
-        custom_section, quant_section = cfg_text.split(marker, 1)
-
-        new_entries = []
-        for name in fp16_outputs:
-            yaml_key = f"'{name}'" if name.isdigit() else name
-            if yaml_key in custom_section:
-                continue
-            if f"\n    {yaml_key}:" not in quant_section and f"\n    {name}_int8:" not in quant_section:
-                continue
-            new_entries.append(f"    {yaml_key}: float16")
-
-        if not new_entries:
-            LOGGER.info(f"{prefix} all {len(fp16_outputs)} sensitive layers already in custom_quantize_layers")
-            return
-
-        insert_block = "\n".join(new_entries) + "\n"
-        cfg_text = custom_section + insert_block + marker + quant_section
-        Path(cfg_path).write_text(cfg_text)
-        LOGGER.info(f"{prefix} added {len(new_entries)} sensitive layers to custom_quantize_layers as float16")
-
     @try_export
     def export_rknn(self, prefix=colorstr("RKNN:")):
         """Export YOLO model to RKNN format."""
@@ -1651,10 +1635,6 @@ class Exporter:
                 if src.exists():
                     src.rename(export_path / src.name)
 
-            # Force output-layer Convs to FP16 — INT8 destroys logit precision
-            # cfg_path = export_path / f"{onnx_stem}.quantization.cfg"
-            # self._patch_rknn_quant_cfg(f, cfg_path, prefix)
-
             if check_version("rknn-toolkit2", ">=2.4.0"):
                 # >=2.4 forbids load_onnx before step2; rebuild a clean instance
                 rknn.release()
@@ -1719,22 +1699,62 @@ class Exporter:
         return str(export_path), None
 
     @try_export
+    def export_hailo(self, prefix=colorstr("Hailo:")):
+        """Export YOLO model to Hailo-compatible ONNX format.
+
+        Produces ONNX with the ultralytics 8.1.47 graph topology — per-scale Concat(box, cls[, emb]) →
+        Reshape → cross-scale Concat → Split → DFL → anchor decode → sigmoid — which Hailo DFC
+        recognises and compiles to HEF at full throughput. The HEF compilation itself is performed
+        externally via Hailo DFC / CLI; this routine only emits the ONNX the DFC expects.
+        """
+        LOGGER.info(f"\n{prefix} starting Hailo-compatible ONNX export...")
+        return self.export_onnx()
+
+    @try_export
     def export_ncnn(self, prefix=colorstr("NCNN:")):
-        """Export YOLO model to NCNN format."""
-        LOGGER.warning(f"{prefix} WARNING ⚠️ NCNN export not supported yet")
-        return None, None
+        """Export YOLO model to NCNN format using PNNX https://github.com/pnnx/pnnx."""
+        from ultralytics.utils.export.ncnn import torch2ncnn
+
+        return torch2ncnn(
+            model=self.model,
+            im=self.im,
+            output_dir=str(self.file).replace(self.file.suffix, "_ncnn_model/"),
+            half=self.args.half,
+            metadata=self.metadata,
+            device=self.device,
+            prefix=prefix,
+        )
 
     @try_export
     def export_executorch(self, prefix=colorstr("ExecuTorch:")):
-        """Export YOLO model to ExecuTorch format."""
-        LOGGER.warning(f"{prefix} WARNING ⚠️ ExecuTorch export not supported yet")
-        return None, None
+        """Export YOLO model to ExecuTorch *.pte format via XNNPACK."""
+        assert TORCH_2_9, (
+            f"ExecuTorch export requires torch>=2.9.0 but torch=={TORCH_VERSION} is installed"
+        )
+        check_requirements(("executorch>=0.3.0",))
+        from ultralytics.utils.export.executorch import torch2executorch
+
+        return torch2executorch(
+            model=self.model,
+            im=self.im,
+            output_dir=str(self.file).replace(self.file.suffix, "_executorch_model/"),
+            metadata=self.metadata,
+            prefix=prefix,
+        )
 
     @try_export
     def export_imx(self, prefix=colorstr("IMX:")):
-        """Export YOLO model to IMX format."""
-        LOGGER.warning(f"{prefix} WARNING ⚠️ ExecuTorch export not supported yet")
-        return None, None
+        """Export YOLO model to IMX (Sony IMX500) format.
+
+        Not yet ported to this fork — upstream reference uses hardcoded layer indices for
+        single-task YOLOv8/11 graphs that are incompatible with the hierarchical multitask
+        head (``nc=list``) in this repo. See
+        https://github.com/ultralytics/ultralytics/blob/main/ultralytics/utils/export/imx.py
+        if / when IMX support is needed.
+        """
+        raise NotImplementedError(
+            "IMX export is not supported in this fork. See upstream ultralytics for reference."
+        )
 
     def _add_tflite_metadata(self, file):
         """Add metadata to *.tflite models per https://www.tensorflow.org/lite/models/convert/metadata."""
@@ -1778,16 +1798,23 @@ class Exporter:
         output1.name = "output"
         output1.description = "Coordinates of detected objects, class labels, and confidence score"
         output1.associatedFiles = [label_file]
+        extra_outputs = []
         if self.model.task == "segment":
             output2 = schema.TensorMetadataT()
             output2.name = "output"
             output2.description = "Mask protos"
             output2.associatedFiles = [label_file]
+            extra_outputs.append(output2)
+        if self.metadata.get("embed_dim", 0) > 0:
+            output_emb = schema.TensorMetadataT()
+            output_emb.name = "embeds"
+            output_emb.description = f"Re-ID embeddings (dim={self.metadata['embed_dim']})"
+            extra_outputs.append(output_emb)
 
         # Create subgraph info
         subgraph = schema.SubGraphMetadataT()
         subgraph.inputTensorMetadata = [input_meta]
-        subgraph.outputTensorMetadata = [output1, output2] if self.model.task == "segment" else [output1]
+        subgraph.outputTensorMetadata = [output1] + extra_outputs
         model_meta.subgraphMetadata = [subgraph]
 
         b = flatbuffers.Builder(0)
@@ -1942,11 +1969,18 @@ class IOSDetectModel(torch.nn.Module):
 
     def forward(self, x):
         """Normalize predictions of object detection model with input size-dependent factors."""
-        xywh, cls = self.model(x)[0].transpose(0, 1).split((4, self.nc), 1)
+        pred = self.model(x)[0].transpose(0, 1)  # (A, C)
+        embed_dim = getattr(self.model.model[-1], "embed_dim", 0)
+        if embed_dim > 0:
+            xywh, cls, emb = pred.split((4, self.nc, embed_dim), 1)
+        else:
+            xywh, cls = pred.split((4, self.nc), 1)
         if self.mlprogram and self.nc % 80 != 0:  # NMS bug https://github.com/ultralytics/ultralytics/issues/22309
-            pad_length = int(((self.nc + 79) // 80) * 80) - self.nc  # pad class length to multiple of 80
+            pad_length = int(((self.nc + 79) // 80) * 80) - self.nc
             cls = torch.nn.functional.pad(cls, (0, pad_length, 0, 0), "constant", 0)
 
+        if embed_dim > 0:
+            return cls, xywh * self.normalize, emb
         return cls, xywh * self.normalize
 
 

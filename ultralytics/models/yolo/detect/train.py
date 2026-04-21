@@ -16,6 +16,7 @@ from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel, yaml_model_load
 from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK
+from ultralytics.utils.checks import reid_embed_dim
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import unwrap_model, torch_distributed_zero_first
 
@@ -42,7 +43,10 @@ class DetectionTrainer(BaseTrainer):
             _callbacks (list, optional): List of callback functions to be executed during training.
         """
         super().__init__(cfg=cfg, overrides=overrides, _callbacks=_callbacks)
+        self.reid_dim = reid_embed_dim(self.args)
         self.dynamic_tensors = ["batch_idx", "cls", "bboxes"]
+        if self.reid_dim:
+            self.dynamic_tensors.append("tags")
 
     def build_dataset(self, img_path, mode="train", batch=None):
         """
@@ -129,12 +133,18 @@ class DetectionTrainer(BaseTrainer):
         )
         if weights:
             model.load(weights)
+
+        if self.reid_dim and not getattr(model.model[-1], "embed_dim", 0):
+            model.model[-1].upgrade_to_reid(embed_dim=self.reid_dim)
+
         return model
 
     def get_validator(self):
         """Returns a DetectionValidator for YOLO model validation."""
         self.loss_names = "box_loss", "cls_loss", "dfl_loss"
-        if self.args.teacher is not None:
+        if self.reid_dim:
+            self.loss_names = "box_loss", "cls_loss", "dfl_loss", "reid_loss"
+        elif self.args.teacher is not None:
             self.loss_names = "box_loss", "cls_loss", "dfl_loss", "dist_loss"
         return yolo.detect.DetectionValidator(
             self.test_loader,

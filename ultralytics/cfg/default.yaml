@@ -67,7 +67,9 @@ half: False # (bool) use half precision (FP16)
 dnn: False # (bool) use OpenCV DNN for ONNX inference
 plots: True # (bool) save plots and images during train/val
 end2end: # (bool, optional) override end2end head mode for predict/val/export; None = use model default
-max_plot_batches: 3 # (int) maximum number of batches to plot during validation (-1 for all)
+max_plot_batches: 5 # (int) maximum number of batches to plot during validation (-1 for all)
+
+task_loss_weights:  # (list[float] | None) per-task cls loss weights for multitask training.
 
 # Predict settings -----------------------------------------------------------------------------------------------------
 source: # (str, optional) source directory for images or videos
@@ -102,7 +104,7 @@ simplify: True # (bool) ONNX: simplify model using `onnxslim`
 opset: # (int, optional) ONNX: opset version
 workspace: 4 # (int) TensorRT: workspace size (GB)
 nms: False # (bool) CoreML: add NMS
-hybrid: True # (bool) RKNN: use hybrid quantization for INT8 (two-step), False uses standard rknn.build
+hybrid: False # (bool) RKNN: use hybrid quantization for INT8 (two-step), False uses standard rknn.build
 
 # Hyperparameters ------------------------------------------------------------------------------------------------------
 lr0: 0.01 # (float) initial learning rate (i.e. SGD=1E-2, Adam=1E-3)
@@ -115,6 +117,7 @@ warmup_bias_lr: 0.1 # (float) warmup initial bias lr
 box: 7.5 # (float) box loss gain
 cls: 0.5 # (float) cls loss gain (scale with pixels)
 dfl: 1.5 # (float) dfl loss gain
+reid: 10.0 # (float) Re-ID embedding loss gain
 pose: 12.0 # (float) pose loss gain
 kobj: 1.0 # (float) keypoint obj loss gain
 label_smoothing: 0.0 # (float) label smoothing (fraction)
@@ -184,6 +187,9 @@ cfg: # (str, optional) for overriding defaults.yaml
 
 # Tracker settings ------------------------------------------------------------------------------------------------------
 tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yaml]
+
+# ReID settings --------------------------------------------------------------------------------------------------------
+reid_dim: 0 # (int) Re-ID embedding dimension for self-supervised Re-ID head (e.g. 128); 0 = disabled
 
 # Distillation settings -------------------------------------------------------------------------------------------------
 teacher: None #  None | (str) path to teacher model

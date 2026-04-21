@@ -305,6 +305,8 @@ class DetectionModel(BaseModel):
 
         # Define model
         ch = self.yaml["ch"] = self.yaml.get("ch", ch)  # input channels
+        if isinstance(self.yaml.get("nc"), int):
+            self.yaml["nc"] = [self.yaml["nc"]]
         if nc and nc != self.yaml["nc"]:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
@@ -424,6 +426,7 @@ class DetectionModel(BaseModel):
             nwd_loss=self.args.nwd_loss,
             use_wiseiou=self.args.use_wiseiou,
             iou_ratio=self.args.iou_ratio,
+            task_loss_weights=self.args.task_loss_weights,
         )
 
         return E2ELoss(self, v8DetectionLoss, **kwargs) if getattr(self, "end2end", False) else v8DetectionLoss(self, **kwargs)
@@ -493,7 +496,6 @@ class PoseModel(DetectionModel):
             iou_ratio=self.args.iou_ratio,
         )
         return E2EPoseLoss(self, v8PoseLoss, **kwargs) if getattr(self, "end2end", False) else v8PoseLoss(self, **kwargs)
-
 
 class ClassificationModel(BaseModel):
     """YOLOv8 classification model."""
@@ -1131,6 +1133,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     max_channels = float("inf")
     legacy = d.get("legacy", False)  # backward compatibility for v3/v5/v8/v9 models
     nc, act, scales = (d.get(x) for x in ("nc", "activation", "scales"))
+    if isinstance(nc, int):
+        nc = [nc]
+        d["nc"] = nc
     end2end = d.get("end2end", False)  # default to False for models without end2end config
     reg_max = d.get("reg_max", 16)
     depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
@@ -1473,7 +1478,7 @@ def yaml_model_load(path):
 
     nc = d.get("nc", None)
     if isinstance(nc, int):
-        d["nc"] = [nc]
+        d["nc"] = nc
     elif isinstance(nc, list):
         d["nc"] = nc  # Already a list (multihead format)
     else:
@@ -1508,7 +1513,7 @@ def guess_model_task(model):
         model (nn.Module | dict): PyTorch model or model configuration in YAML format.
 
     Returns:
-        (str): Task of the model ('detect', 'segment', 'classify', 'pose').
+        (str): Task of the model ('detect', 'segment', 'classify', 'pose', 'obb').
 
     Raises:
         SyntaxError: If the task of the model could not be determined.
@@ -1571,6 +1576,6 @@ def guess_model_task(model):
     # Unable to determine task from model
     LOGGER.warning(
         "WARNING ⚠️ Unable automatically guess model task, assuming 'task=detect'. "
-        "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify','pose' or 'obb'."
+        "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify', 'pose' or 'obb'."
     )
     return "detect"  # assume detect

@@ -14,6 +14,7 @@ from PIL import Image
 from torch.utils.data import Dataset, dataloader, distributed
 
 from ultralytics.cfg import IterableSimpleNamespace
+from ultralytics.utils.checks import reid_embed_dim
 from ultralytics.data.dataset import (
     GroundingDataset,
     YOLODataset,
@@ -279,6 +280,7 @@ def build_yolo_dataset(
         pad=0.0 if mode == "train" else 0.5,
         prefix=colorstr(f"{mode}: "),
         task=cfg.task,
+        use_tags=reid_embed_dim(cfg) > 0,
         classes=cfg.classes,
         data=data,
         fraction=cfg.fraction if mode == "train" else 1.0,

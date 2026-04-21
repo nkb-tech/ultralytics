@@ -27,6 +27,46 @@ from ultralytics.utils.torch_utils import autocast, disable_dynamo
 from .metrics import bbox_iou, probiou, WiseIoULoss, wasserstein_loss
 
 
+class MetricLearningLoss(nn.Module):
+    """Self-supervised Re-ID embedding loss using triplet margin with hard mining.
+
+    Based on the YOLO-JDE approach described in https://arxiv.org/abs/2501.13710
+    """
+
+    def __init__(
+        self, 
+        margin: float = 0.075, 
+        confidence_threshold: float = 1,
+        pos_strategy: str = 'hard',
+        neg_strategy: str = 'semihard',
+    ):
+        super().__init__()
+        try:
+            from pytorch_metric_learning import losses, miners
+        except ImportError as e:
+            raise ModuleNotFoundError(
+                "Re-ID training requires pytorch-metric-learning. Install it with: pip install pytorch-metric-learning"
+            ) from e
+        self.mining_func = miners.BatchEasyHardMiner(pos_strategy=pos_strategy, neg_strategy=neg_strategy)
+        self.loss_func = losses.TripletMarginLoss(margin=margin)
+        self.confidence_threshold = confidence_threshold
+
+    def forward(self, embeddings, tags, confidences=None, normalize=False):
+        # Select only the embeddings and tags for confidences on top X%
+        if confidences is not None and self.confidence_threshold < 1:
+            top_k = int(self.confidence_threshold * len(confidences))
+            _, indices = torch.topk(confidences, top_k, largest=True)
+            embeddings = embeddings[indices]
+            tags = tags[indices]
+
+        if normalize:
+            embeddings = F.normalize(embeddings, p=2, dim=1)
+        # Sample triplets and calculate loss
+        indices_tuples = self.mining_func(embeddings, tags)
+        loss = self.loss_func(embeddings, tags, indices_tuples)
+        return loss
+
+
 class DistillationLoss(nn.Module):
     """Criterion class for computing training losses.
     Calculates KL-divergence loss for each classification head separately and sums them up."""
@@ -687,7 +727,6 @@ class KeypointLoss(nn.Module):
         e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)
         return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
 
-
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection.
     
@@ -700,6 +739,7 @@ class v8DetectionLoss:
         tal_topk: int = 10,
         tal_topk2: int | None = None,
         clf_loss_weights: list[list[float]] | None = None,
+        task_loss_weights: list[float] | None = None,
         clf_loss_fn: str = "qfl",
         iou_loss_fn: str = "ciou",
         nwd_loss: bool = False,
@@ -780,7 +820,7 @@ class v8DetectionLoss:
             topk=tal_topk,
             num_classes=self.nc[0],  # Use first task for assignment
             alpha=0.5,
-            beta=6.0,
+            beta=3.0,
             stride=self.stride.tolist() if hasattr(self.stride, 'tolist') else self.stride,
             topk2=tal_topk2,
             iou_loss_fn=iou_loss_fn,
@@ -798,6 +838,29 @@ class v8DetectionLoss:
             LOGGER.info(f"{colorstr('Using losses')}: {clf_loss_fn} loss & {iou_loss_fn} loss.")
         
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+
+        # Per-task cls loss weights (higher weight = more gradient for that task).
+        # Normalized so sum == n_tasks to preserve total cls loss magnitude.
+        if task_loss_weights is not None and self.n_tasks > 1:
+            assert len(task_loss_weights) == self.n_tasks, (
+                f"task_loss_weights length {len(task_loss_weights)} != n_tasks {self.n_tasks}"
+            )
+            tw_sum = sum(task_loss_weights)
+            self.task_loss_weights = [w * self.n_tasks / tw_sum for w in task_loss_weights]
+            if verbose:
+                LOGGER.info(
+                    f"{colorstr('Task Loss Weights')}: raw={task_loss_weights}, "
+                    f"normalized={[round(w, 3) for w in self.task_loss_weights]}"
+                )
+        else:
+            self.task_loss_weights = [1.0] * self.n_tasks
+
+        self.embed_dim = getattr(m, "embed_dim", 0)
+        self.has_embed = self.embed_dim > 0
+        self.n_losses = 4 if self.has_embed else 3
+        if self.has_embed:
+            self.embed_loss = MetricLearningLoss().to(device)
+
         disable_dynamo(self.__class__)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
@@ -825,8 +888,8 @@ class v8DetectionLoss:
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
     def get_assigned_targets_and_loss(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> tuple:
-        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        """Calculate the sum of the loss for box, cls, dfl, and optionally reid."""
+        loss = torch.zeros(self.n_losses, device=self.device)
         pred_distri, pred_scores = (
             preds["boxes"].permute(0, 2, 1).contiguous(),
             preds["scores"].permute(0, 2, 1).contiguous(),
@@ -871,7 +934,7 @@ class v8DetectionLoss:
 
             target_scores_task = target_scores_task * norm_align_metric
 
-            loss[1] += cls_loss_fn(
+            task_cls_loss = cls_loss_fn(
                 pred_scores=pred_scores_task,
                 gt_scores=target_scores_task, 
                 pred_bboxes=pred_bboxes,
@@ -880,6 +943,8 @@ class v8DetectionLoss:
                 anchor_points=anchor_points,
                 stride_tensor=stride_tensor,
             ).sum() / target_scores_sum
+
+            loss[1] += task_cls_loss * self.task_loss_weights[task_idx]
 
             offset += n_cls_task
 
@@ -898,10 +963,37 @@ class v8DetectionLoss:
                 stride_tensor,
             )
 
+        # ReID embedding loss
+        if self.has_embed and "embeds" in preds and fg_mask.sum():
+            pred_embeds = F.normalize(
+                preds["embeds"].permute(0, 2, 1).contiguous().float(), p=2, dim=2
+            )
+            tags_batch = batch.get("tags")
+            target_gt_idx_fg = target_gt_idx[fg_mask].long()
+
+            if tags_batch is not None and len(tags_batch):
+                tags = tags_batch.to(self.device).long().view(-1)
+                batch_idx = batch["batch_idx"].to(self.device).long()
+                gt_tags = torch.zeros(batch_size, int((batch_idx.bincount()).max()), device=self.device, dtype=torch.long)
+                for j in range(batch_size):
+                    m = batch_idx == j
+                    gt_tags[j, : m.sum()] = tags[m]
+
+                gt_tags_flat = gt_tags.view(-1)
+                valid = (target_gt_idx_fg >= 0) & (target_gt_idx_fg < gt_tags_flat.numel())
+                if valid.any():
+                    loss[3] = self.embed_loss(
+                        pred_embeds[fg_mask][valid],
+                        gt_tags_flat[target_gt_idx_fg[valid]],
+                        pred_scores[fg_mask].sigmoid().max(dim=1).values.float()[valid],
+                    )
+
         loss[0] *= self.hyp.box
         loss[1] *= self.hyp.cls
         loss[2] *= self.hyp.dfl
-        
+        if self.has_embed:
+            loss[3] *= self.hyp.reid
+
         return (
             (fg_mask, target_gt_idx, target_bboxes, anchor_points, stride_tensor),
             loss,
@@ -912,7 +1004,18 @@ class v8DetectionLoss:
         self, preds: dict[str, torch.Tensor] | tuple[torch.Tensor, dict[str, torch.Tensor]]
     ) -> dict[str, torch.Tensor]:
         """Parse model predictions to extract features."""
-        return preds[1] if isinstance(preds, tuple) else preds
+        if isinstance(preds, tuple):
+            return preds[1]
+        if isinstance(preds, list):
+            # Backward compatibility for callers that pass raw per-level tensors.
+            # Each tensor shape: (B, reg_max*4 + sum(nc), H, W)
+            feats = preds
+            bs = feats[0].shape[0]
+            box_ch = self.reg_max * 4
+            boxes = torch.cat([f[:, :box_ch].view(bs, box_ch, -1) for f in feats], dim=-1)
+            scores = torch.cat([f[:, box_ch:].view(bs, -1, f.shape[-2] * f.shape[-1]) for f in feats], dim=-1)
+            return {"boxes": boxes, "scores": scores, "feats": feats}
+        return preds
 
     def __call__(
         self,

@@ -3,8 +3,11 @@
 import numpy as np
 import scipy
 from scipy.spatial.distance import cdist
+from .kalman_filter import chi2inv95
 
 from ultralytics.utils.metrics import batch_probiou, bbox_ioa
+
+EMB_GATE_THRESHOLD = 0.3
 
 try:
     import lap  # for linear_assignment
@@ -79,7 +82,7 @@ def iou_distance(atracks: list, btracks: list) -> np.ndarray:
         >>> btracks = [np.array([5, 5, 15, 15]), np.array([25, 25, 35, 35])]
         >>> cost_matrix = iou_distance(atracks, btracks)
     """
-    if atracks and isinstance(atracks[0], np.ndarray) or btracks and isinstance(btracks[0], np.ndarray):
+    if (atracks and isinstance(atracks[0], np.ndarray)) or (btracks and isinstance(btracks[0], np.ndarray)):
         atlbrs = atracks
         btlbrs = btracks
     else:
@@ -125,8 +128,6 @@ def embedding_distance(tracks: list, detections: list, metric: str = "cosine") -
     if cost_matrix.size == 0:
         return cost_matrix
     det_features = np.asarray([track.curr_feat for track in detections], dtype=np.float32)
-    # for i, track in enumerate(tracks):
-    # cost_matrix[i, :] = np.maximum(0.0, cdist(track.smooth_feat.reshape(1,-1), det_features, metric))
     track_features = np.asarray([track.smooth_feat for track in tracks], dtype=np.float32)
     cost_matrix = np.maximum(0.0, cdist(track_features, det_features, metric))  # Normalized features
     return cost_matrix
@@ -156,3 +157,27 @@ def fuse_score(cost_matrix: np.ndarray, detections: list) -> np.ndarray:
     det_scores = np.expand_dims(det_scores, axis=0).repeat(cost_matrix.shape[0], axis=0)
     fuse_sim = iou_sim * det_scores
     return 1 - fuse_sim  # fuse_cost
+
+def fuse_motion(kf, cost_matrix, tracks, detections, only_position=False, lambda_=0.98):
+    if cost_matrix.size == 0:
+        return cost_matrix
+    gating_dim = 2 if only_position else 4
+    gating_threshold = chi2inv95[gating_dim]
+    measurements = np.asarray([det.to_xyah() for det in detections])
+    for row, track in enumerate(tracks):
+        gating_distance = kf.gating_distance(
+            track.mean, track.covariance, measurements, only_position, metric='maha')
+        cost_matrix[row, gating_distance > gating_threshold] = np.inf
+        cost_matrix[row] = lambda_ * cost_matrix[row] + (1 - lambda_) * gating_distance
+    return cost_matrix
+
+def gate(cost_matrix, emb_cost):
+    """Gate association cost matrix using an embedding distance threshold."""
+
+    if cost_matrix.size == 0:
+        return cost_matrix
+
+    index = emb_cost > EMB_GATE_THRESHOLD
+    cost_matrix[index] = 1
+
+    return cost_matrix

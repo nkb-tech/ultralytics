@@ -823,6 +823,24 @@ def is_sudo_available() -> bool:
     return subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 
+def reid_embed_dim(cfg) -> int:
+    """Return Re-ID embedding dimension; 0 means disabled (not ``False``).
+
+    Accepts namespace-like objects with ``reid_dim`` or dicts with key ``"reid_dim"``.
+    ``None``, invalid, or non-positive values are treated as 0.
+    """
+    if cfg is None:
+        return 0
+    v = cfg.get("reid_dim", 0) if isinstance(cfg, dict) else getattr(cfg, "reid_dim", 0)
+    if v is None:
+        return 0
+    try:
+        d = int(v)
+    except (TypeError, ValueError):
+        return 0
+    return d if d > 0 else 0
+
+
 def truncate_middle(text: str, max_length: int = 50) -> str:
     """
     Truncate a string to a maximum length, keeping the middle part.

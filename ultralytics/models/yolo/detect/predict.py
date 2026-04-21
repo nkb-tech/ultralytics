@@ -65,7 +65,10 @@ class DetectionPredictor(BasePredictor):
             if orig_img.shape[2] == 1:
                 orig_img = np.repeat(orig_img, 3, axis=2)
             pred[:, :4] = ops.scale_boxes(img_hw, pred[:, :4], orig_img.shape)
-            results.append(Results(orig_img, path=img_path, names=self.model.names, boxes=pred))
+            r = Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6] if self.embed_dim else pred)
+            if self.embed_dim and pred.shape[1] > 6:
+                r.embeds = pred[:, 6:]
+            results.append(r)
         return results
 
     def stream_inference(self, source=None, model=None, *args, **kwargs):

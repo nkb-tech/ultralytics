@@ -95,12 +95,12 @@ def verify_image(args, min_imgsz=25):
 
 def verify_image_label(args, min_imgsz=9):
     """Verify one image-label pair."""
-    im_file, lb_file, prefix, keypoint, nkpt, ndim, single_cls, nc = args
+    im_file, lb_file, prefix, keypoint, use_tags, n_tag_attrs, nkpt, ndim, single_cls, nc = args
     # nc is a list with number of classes for each attribute (multi-head support)
     if not isinstance(nc, (list, tuple)):
         raise ValueError("'nc' must be a list specifying number of classes per attribute (multi-head labels)")
     # Number (missing, found, empty, corrupt), message, segments, keypoints
-    nm, nf, ne, ncpt, msg, segments, keypoints, nattrs = 0, 0, 0, 0, "", [], None, len(nc)
+    nm, nf, ne, ncpt, msg, segments, keypoints, tags, nattrs = 0, 0, 0, 0, "", [], None, None, len(nc)
     try:
         # Verify images
         im = Image.open(im_file)
@@ -137,12 +137,37 @@ def verify_image_label(args, min_imgsz=9):
                     )
                     points = lb[:, nattrs + 4:].reshape(-1, ndim)[:, :2]
                 else:
-                    expected_cols = nattrs + 4
-                    assert lb.shape[1] == expected_cols, (
-                        f"labels require {expected_cols} columns (got {lb.shape[1]}). "
-                        f"Expected {nattrs} class attrs + 4 bbox coords"
-                    )
-                    points = lb[:, nattrs : nattrs + 4]
+                    # bbox points must NEVER include tags
+                    if use_tags:
+                        exp_a = nattrs + n_tag_attrs + 4          # tags after class attrs
+                        exp_b = nattrs + 4 + n_tag_attrs          # tags after bbox (your val_mot_id case)
+
+                        if lb.shape[1] == exp_b:
+                            # [class_attrs..., x y w h, tag...]
+                            points = lb[:, nattrs : nattrs + 4]
+                            tags = lb[:, nattrs + 4 : nattrs + 4 + n_tag_attrs].astype(np.int64)
+                            lb = lb[:, : nattrs + 4]  # keep only class attrs + bbox in lb
+                        elif lb.shape[1] == exp_a:
+                            # [class_attrs..., tag..., x y w h]
+                            tags = lb[:, nattrs : nattrs + n_tag_attrs].astype(np.int64)
+                            points = lb[:, nattrs + n_tag_attrs : nattrs + n_tag_attrs + 4]
+                            # rebuild lb to class attrs + bbox
+                            lb = np.concatenate([lb[:, :nattrs], points], axis=1).astype(np.float32)
+                        else:
+                            expected_cols = nattrs + 4
+                            assert lb.shape[1] == expected_cols, (
+                                f"labels require {expected_cols} columns (got {lb.shape[1]}). "
+                                f"Expected {nattrs} class attrs + 4 bbox coords"
+                            )
+                            points = lb[:, nattrs : nattrs + 4]
+                            tags = None
+                    else:
+                        expected_cols = nattrs + 4
+                        assert lb.shape[1] == expected_cols, (
+                            f"labels require {expected_cols} columns (got {lb.shape[1]}). "
+                            f"Expected {nattrs} class attrs + 4 bbox coords"
+                        )
+                        points = lb[:, nattrs : nattrs + 4]
                 # Coordinate points check with 1% tolerance
                 assert points.max() <= 1.01, f"non-normalized or out of bounds coordinates {points[points > 1.01]}"
                 assert lb.min() >= -0.01, f"negative class labels {lb[lb < -0.01]}"
@@ -176,11 +201,11 @@ def verify_image_label(args, min_imgsz=9):
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
         lb = lb[:, : nattrs + 4]
-        return im_file, lb, shape, segments, keypoints, nm, nf, ne, ncpt, msg
+        return im_file, lb, shape, segments, keypoints, tags, nm, nf, ne, ncpt, msg
     except Exception as e:
         ncpt = 1
         msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
-        return [None, None, None, None, None, nm, nf, ne, ncpt, msg]
+        return [None, None, None, None, None, None, nm, nf, ne, ncpt, msg]
 
 
 def polygon2mask(imgsz, polygons, color=1, downsample_ratio=1):

@@ -332,6 +332,7 @@ class BasePredictor:
 
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half
+        self.embed_dim = getattr(getattr(self.model, "model", [None])[-1], "embed_dim", 0)
         self.model.eval()
         self.model = attempt_compile(self.model, device=self.device, mode=self.args.compile)
 

@@ -39,8 +39,6 @@ TASK2DATA = {
     "classify": "imagenet10",
     "pose": "coco8-pose.yaml",
     "obb": "dota8.yaml",
-   
-     
 }
 TASK2MODEL = {
     "detect": "yolo11n.pt",
@@ -107,6 +105,7 @@ CFG_FLOAT_KEYS = {  # integer or float arguments, i.e. x=2 and x=2.0
     "box",
     "cls",
     "dfl",
+    "reid",
     "degrees",
     "shear",
     "time",
@@ -127,7 +126,6 @@ CFG_FRACTION_KEYS = {  # fractional float arguments with 0.0<=values<=1.0
     "hsv_s",
     "hsv_v",
     "translate",
-    "scale",
     "perspective",
     "flipud",
     "fliplr",
@@ -161,6 +159,7 @@ CFG_INT_KEYS = {  # integer-only arguments
     "min_bbox",
     "min_imgsz",
     "max_plot_batches",
+    "reid_dim",
 }
 CFG_BOOL_KEYS = {  # boolean-only arguments
     "save",
@@ -316,6 +315,22 @@ def check_cfg(cfg, hard=True):
         - None values are ignored as they may be from optional arguments.
         - Fraction keys are checked to be within the range [0.0, 1.0].
     """
+    if "scale" in cfg and cfg["scale"] is not None:
+        v = cfg["scale"]
+        if isinstance(v, (list, tuple)):
+            if len(v) != 2 or not all(isinstance(x, (int, float)) for x in v):
+                raise TypeError(
+                    f"'scale={v}' must be a list/tuple of 2 numbers (i.e. 'scale=[0.6, 1.0]')"
+                )
+            cfg["scale"] = list(v)
+        elif not isinstance(v, (int, float)):
+            if hard:
+                raise TypeError(
+                    f"'scale={v}' is of invalid type {type(v).__name__}. "
+                    f"Valid 'scale' types are int, float, or list (i.e. 'scale=0.5' or 'scale=[0.6, 1.0]')"
+                )
+            cfg["scale"] = float(v)
+
     for k, v in cfg.items():
         if v is not None:  # None values may be from optional args
             if k in CFG_FLOAT_KEYS and not isinstance(v, (int, float)):

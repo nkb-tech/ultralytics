@@ -404,21 +404,20 @@ def cached_grid_count(img_h: int, img_w: int, crop_h: int, crop_w: int, overlap_
 
 
 class SAHIDataset(YOLODataset):
-    """
-    SAHI-enabled YOLO dataset for small object detection.
-    
-    Splits large images into overlapping crops for training/validation.
-    During validation, also includes letterboxed full image for large object detection.
-    
+    """SAHI-enabled YOLO dataset that splits large images into overlapping crops.
+
+    Supports mosaic/mixup on crops with minimal RAM overhead. Each crop is fetched via the
+    per-worker LRU cache, so mixing augmentations only cost extra JPEG decodes from memory.
+
     Args:
-        img_path: Path to images directory
-        cut_strategy: "grid" for deterministic slicing, "random" for object-centered crops
-        crop_size: Size of each crop (square)
-        overlap_ratio: Overlap between adjacent crops (0-1)
-        sampling_rate: Fraction of grid crops to sample (for random strategy)
-        min_object_coverage: Minimum fraction of object area in crop to keep it
-        object_crop_prob: Probability to center crop on object (for random strategy)
-        buffer_size: Per-worker image cache size
+        img_path (str): Path to images directory.
+        cut_strategy (str): "grid" for deterministic slicing, "random" for object-centered crops.
+        crop_size (int): Square crop side length.
+        overlap_ratio (float): Overlap between adjacent grid crops (0-1).
+        sampling_rate (float): Fraction of grid positions to sample (random strategy).
+        min_object_coverage (float): Minimum object area fraction in crop to keep label.
+        object_crop_prob (float): Probability to center crop on an object (random strategy).
+        buffer_size (int): Per-worker decoded image cache size.
     """
 
     def __init__(
@@ -434,7 +433,6 @@ class SAHIDataset(YOLODataset):
         *args,
         **kwargs,
     ):
-        # Normalize strategy name
         self.cut_strategy = "random" if cut_strategy in ("random_crop", "random") else cut_strategy
         self.crop_size = crop_size
         self.overlap_ratio = overlap_ratio
@@ -444,40 +442,34 @@ class SAHIDataset(YOLODataset):
         self.use_slicing = (self.cut_strategy == "grid")
         self._epoch = 0
         self._buffer_size = buffer_size
-        
         self.image_shapes: Dict[int, Tuple[int, int]] = {}
 
-        # sahi=True MUST be passed to super() so load_image() does NOT resize
-        # during cache_images() — we need original resolution for cropping
+        # sahi=True prevents load_image() from resizing — we need original resolution for cropping
         kwargs["sahi"] = True
 
-        # BaseDataset cache='ram'/'low-ram' is constructed before dataloader workers are spawned.
-        # For SAHI this caches full-resolution source images and can be inherited by every worker,
-        # causing extreme host RAM usage on large datasets.
         cache_val = kwargs.get("cache", None)
         cache_mode = "ram" if cache_val is True else cache_val.lower() if isinstance(cache_val, str) else cache_val
-        if cache_mode in {"ram", "low-ram"}:
+        if cache_mode == "ram":
             LOGGER.warning(
-                f"WARNING ⚠️ SAHI + cache='{cache_mode}' preloads full-resolution images before worker fork and can "
-                "multiply RAM usage across dataloader workers. Disabling base image cache for SAHI and relying on "
-                "the per-worker image buffer instead."
+                "WARNING ⚠️ SAHI + cache='ram' keeps every source image decoded in memory. "
+                "Prefer cache='low-ram' or cache='disk'."
             )
-            kwargs["cache"] = None
 
         super().__init__(img_path=img_path, *args, **kwargs)
 
-        # SAHI uses its own per-worker _worker_image_cache and overrides load_image,
-        # so the base class buffer/ims storage is unnecessary and wastes ~50-100 GB RAM.
-        self.max_buffer_length = 0
-        self.buffer = []
-        self.ims = [None] * self.ni
-        self.im_hw0 = [None] * self.ni
-        self.im_hw = [None] * self.ni
+        # Without base cache, clear decoded images but keep buffer for mosaic sampling
+        if not self.cache:
+            self.ims = [None] * self.ni
+            self.im_hw0 = [None] * self.ni
+            self.im_hw = [None] * self.ni
 
         self._cache_image_shapes()
         self.slice_indices = self._precompute_slices()
-        
-        # Sort by image index for better cache locality
+
+        # Re-size buffer for slice count (base class sized it for image count)
+        if self.augment:
+            self.max_buffer_length = min(len(self.slice_indices), self.batch_size * 8, 1000)
+
         if self.use_slicing:
             self.slice_indices.sort(key=lambda x: x[0])
 
@@ -523,6 +515,12 @@ class SAHIDataset(YOLODataset):
         img_idx, slice_idx, coords = self.slice_indices[index]
         x1, y1, x2, y2 = coords
 
+        # Track slice indices in buffer for mosaic/mixup sampling
+        if self.augment:
+            self.buffer.append(index)
+            if len(self.buffer) >= self.max_buffer_length:
+                self.buffer.pop(0)
+
         im = self._get_cached_image(img_idx)
         actual_h, actual_w = im.shape[:2]
         is_full_image = (slice_idx == FULL_IMAGE_SLICE_IDX)
@@ -555,12 +553,13 @@ class SAHIDataset(YOLODataset):
 
         # Transform labels
         labels = deepcopy(self.labels[img_idx])
+        labels.pop("shape", None)
         if is_full_image:
             crop_labels = self._transform_labels_for_full_image(labels, ratio_pad, actual_h, actual_w)
         else:
             crop_labels = self._transform_labels_to_crop(labels, coords, actual_h, actual_w)
 
-        labels.update({
+        update = {
             "img": crop_im,
             "ori_shape": (actual_h, actual_w),
             "resized_shape": resized_shape,
@@ -572,7 +571,10 @@ class SAHIDataset(YOLODataset):
             "slice_idx": slice_idx,
             "slice_coords": coords,
             "is_full_image": is_full_image,
-        })
+        }
+        if "tags" in crop_labels:
+            update["tags"] = crop_labels["tags"]
+        labels.update(update)
 
         return self.update_labels_info(labels)
 
@@ -608,6 +610,7 @@ class SAHIDataset(YOLODataset):
         bboxes = labels.get("bboxes", np.zeros((0, 4), dtype=np.float32))
         cls = labels.get("cls", np.zeros((0, n_cls_cols), dtype=np.float32))
         segments = labels.get("segments", [])
+        tags = labels.get("tags", None)
 
         if not isinstance(bboxes, np.ndarray):
             bboxes = np.array(bboxes, dtype=np.float32) if bboxes is not None and len(bboxes) > 0 else np.zeros((0, 4), dtype=np.float32)
@@ -619,52 +622,53 @@ class SAHIDataset(YOLODataset):
         if cls.ndim == 1:
             cls = cls.reshape(-1, n_cls_cols) if len(cls) > 0 else np.zeros((0, n_cls_cols), dtype=np.float32)
 
+        empty_result = {
+            "bboxes": np.zeros((0, 4), dtype=np.float32),
+            "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
+            "segments": [],
+        }
+        if tags is not None:
+            t = np.asarray(tags)
+            empty_result["tags"] = np.empty((0, t.shape[-1] if t.ndim > 1 else 1), dtype=t.dtype)
+
         if len(bboxes) == 0:
-            return {
-                "bboxes": np.zeros((0, 4), dtype=np.float32),
-                "cls": cls.astype(np.float32),
-                "segments": [],
-            }
+            return empty_result
 
         ratio, (pad_w, pad_h) = ratio_pad
         scale = ratio[0]
         target = self.crop_size
 
-        # For segmentation: filter by segments first to keep sync
         if segments and len(segments) > 0 and len(segments) == len(bboxes):
             new_segments, valid_mask = _transform_segments_for_letterbox(
                 segments, ratio, (pad_w, pad_h), img_h, img_w, target
             )
             
-            # Use same mask for bboxes
             valid_indices = np.where(valid_mask)[0]
             
             if len(valid_indices) == 0:
-                return {
-                    "bboxes": np.zeros((0, 4), dtype=np.float32),
-                    "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
-                    "segments": [],
-                }
+                return empty_result
             
             bboxes = bboxes[valid_indices]
             cls = cls[valid_indices]
+            if tags is not None:
+                tags = np.asarray(tags)[valid_indices]
         else:
             new_segments = []
 
-        # Transform bboxes
         new_bboxes = np.zeros_like(bboxes)
         new_bboxes[:, 0] = (bboxes[:, 0] * img_w * scale + pad_w) / target
         new_bboxes[:, 1] = (bboxes[:, 1] * img_h * scale + pad_h) / target
         new_bboxes[:, 2] = bboxes[:, 2] * img_w * scale / target
         new_bboxes[:, 3] = bboxes[:, 3] * img_h * scale / target
 
-        return {
+        result = {
             "bboxes": new_bboxes.astype(np.float32),
             "cls": cls.astype(np.float32),
             "segments": new_segments,
         }
-
-
+        if tags is not None:
+            result["tags"] = np.asarray(tags)
+        return result
 
     def _transform_labels_to_crop(
         self,
@@ -680,6 +684,7 @@ class SAHIDataset(YOLODataset):
         bboxes = labels.get("bboxes", np.array([]))
         cls = labels.get("cls", np.array([]))
         segments = labels.get("segments", [])
+        tags = labels.get("tags", None)
 
         if not isinstance(bboxes, np.ndarray):
             bboxes = np.array(bboxes) if bboxes is not None and len(bboxes) > 0 else np.zeros((0, 4))
@@ -689,12 +694,17 @@ class SAHIDataset(YOLODataset):
         if cls.ndim == 1 and len(cls) > 0:
             cls = cls.reshape(-1, 1) if n_cls_cols == 1 else cls.reshape(-1, n_cls_cols) if len(cls) % n_cls_cols == 0 else cls.reshape(-1, 1)
 
+        empty_result = {
+            "bboxes": np.zeros((0, 4), dtype=np.float32),
+            "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
+            "segments": [],
+        }
+        if tags is not None:
+            t = np.asarray(tags)
+            empty_result["tags"] = np.empty((0, t.shape[-1] if t.ndim > 1 else 1), dtype=t.dtype)
+
         if len(bboxes) == 0:
-            return {
-                "bboxes": np.zeros((0, 4), dtype=np.float32),
-                "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
-                "segments": [],
-            }
+            return empty_result
 
         if bboxes.ndim == 1:
             bboxes = bboxes.reshape(-1, 4)
@@ -707,87 +717,76 @@ class SAHIDataset(YOLODataset):
             new_cls_arr[:, 0] = cls[:, 0]
             cls = new_cls_arr
 
-        # For segmentation: filter segments first, then use the same mask for bboxes
+        new_tags = None
+
         if segments and len(segments) > 0 and len(segments) == len(bboxes):
-            # Transform segments and get valid mask
             new_segments, segment_valid_mask = _transform_segments_to_crop(
                 segments, coords, img_h, img_w, self.min_object_coverage
             )
             
-            # Use segment_valid_mask to filter bboxes too
             valid_indices = np.where(segment_valid_mask)[0]
             
             if len(valid_indices) == 0:
-                return {
-                    "bboxes": np.zeros((0, 4), dtype=np.float32),
-                    "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
-                    "segments": [],
-                }
+                return empty_result
             
-            # Transform only valid bboxes to crop coordinates
             crop_w, crop_h = x2 - x1, y2 - y1
             boxes_xyxy = _xywh_to_xyxy(bboxes[valid_indices].astype(np.float64), img_h, img_w)
             
             new_bboxes = np.zeros((len(valid_indices), 4), dtype=np.float32)
             for i, box in enumerate(boxes_xyxy):
-                # Clip to crop bounds
                 new_x1 = max(box[0] - x1, 0)
                 new_y1 = max(box[1] - y1, 0)
                 new_x2 = min(box[2] - x1, crop_w)
                 new_y2 = min(box[3] - y1, crop_h)
                 
-                # Convert to normalized xywh
                 new_bboxes[i, 0] = (new_x1 + new_x2) / 2 / crop_w
                 new_bboxes[i, 1] = (new_y1 + new_y2) / 2 / crop_h
                 new_bboxes[i, 2] = (new_x2 - new_x1) / crop_w
                 new_bboxes[i, 3] = (new_y2 - new_y1) / crop_h
             
             new_cls = cls[valid_indices].astype(np.float32)
+            if tags is not None:
+                new_tags = np.asarray(tags)[valid_indices]
             
         else:
-            # Detection only or segments don't match bboxes - use numba-accelerated bbox filtering
             boxes_xyxy = _xywh_to_xyxy(bboxes.astype(np.float64), img_h, img_w)
-            cls_flat = cls[:, 0].astype(np.float64) if cls.ndim > 1 else cls.astype(np.float64)
-            
-            new_bboxes, filtered_cls = _filter_bboxes(
-                boxes_xyxy, cls_flat, x1, y1, x2, y2, self.min_object_coverage
+            row_ids = np.arange(len(bboxes), dtype=np.float64)
+
+            new_bboxes, kept_row_ids = _filter_bboxes(
+                boxes_xyxy, row_ids, x1, y1, x2, y2, self.min_object_coverage
             )
-            
+
             if len(new_bboxes) == 0:
-                return {
-                    "bboxes": np.zeros((0, 4), dtype=np.float32),
-                    "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
-                    "segments": [],
-                }
-            
+                return empty_result
+
             new_bboxes = new_bboxes.astype(np.float32)
-            # Restore multi-column cls if needed
-            if n_cls_cols > 1:
-                new_cls = np.zeros((len(filtered_cls), n_cls_cols), dtype=np.float32)
-                new_cls[:, 0] = filtered_cls
+            kept_row_ids = kept_row_ids.astype(np.int64)
+            if cls.ndim == 1:
+                new_cls = cls[kept_row_ids].reshape(-1, 1).astype(np.float32)
             else:
-                new_cls = filtered_cls.reshape(-1, 1).astype(np.float32)
+                new_cls = cls[kept_row_ids].astype(np.float32)
+            if tags is not None:
+                new_tags = np.asarray(tags)[kept_row_ids]
             new_segments = []
 
-        # Format outputs
         new_bboxes = new_bboxes.astype(np.float32)
         if len(new_bboxes) == 0:
-            return {
-                "bboxes": np.zeros((0, 4), dtype=np.float32),
-                "cls": np.zeros((0, n_cls_cols), dtype=np.float32),
-                "segments": [],
-            }
+            return empty_result
         
-        return {
+        result = {
             "bboxes": new_bboxes,
             "cls": new_cls,
             "segments": new_segments,
         }
+        if new_tags is not None:
+            result["tags"] = new_tags
+        return result
 
 
     def load_image(self, i, rect_mode=True):
-        """Load image without writing into BaseDataset's self.ims/self.buffer.
-        SAHI uses its own per-worker _worker_image_cache instead."""
+        """Load image; use BaseDataset cache (ram / low-ram / disk) when enabled."""
+        if self.cache:
+            return super().load_image(i, rect_mode)
         f = self.im_files[i]
         fn = self.npy_files[i]
         if fn.exists():
@@ -809,25 +808,24 @@ class SAHIDataset(YOLODataset):
         return im, (h0, w0), im.shape[:2]
 
     def _get_cached_image(self, img_idx: int) -> np.ndarray:
-        """Get image with a per-worker cache and FIFO eviction by entry count."""
+        """Get decoded image from per-worker LRU cache, loading on miss."""
         import torch
-        
+
         worker_info = torch.utils.data.get_worker_info()
-        current_worker_id = worker_info.id if worker_info else -1
-        
-        if self._worker_image_cache is None or self._worker_id != current_worker_id:
+        wid = worker_info.id if worker_info else -1
+
+        if self._worker_image_cache is None or self._worker_id != wid:
             self._worker_image_cache = {}
-            self._worker_id = current_worker_id
-        
+            self._worker_id = wid
+
         if img_idx in self._worker_image_cache:
             return self._worker_image_cache[img_idx]
-        
+
         im, _, _ = self.load_image(img_idx)
-        
+
         while len(self._worker_image_cache) >= self._buffer_size:
-            oldest_key = next(iter(self._worker_image_cache))
-            del self._worker_image_cache[oldest_key]
-        
+            del self._worker_image_cache[next(iter(self._worker_image_cache))]
+
         self._worker_image_cache[img_idx] = im
         return im
 
@@ -890,14 +888,8 @@ class SAHIDataset(YOLODataset):
         return bboxes.astype(np.float64)
 
     def build_transforms(self, hyp: Optional[Any] = None) -> Compose:
-        """Build augmentation transforms. Mosaic/MixUp are disabled for SAHI because each
-        mix image requires a full-resolution decode from disk, creating a 4x I/O multiplier
-        that starves the GPU. SAHI crops already provide spatial diversity."""
+        """Build augmentation transforms including mosaic/mixup on SAHI crops."""
         if self.augment:
-            hyp = copy(hyp)
-            hyp.mosaic = 0.0
-            hyp.mixup = 0.0
-            hyp.copy_paste = 0.0
             transforms = v8_transforms(dataset=self, imgsz=self.crop_size, hyp=hyp, stretch=False)
         else:
             transforms = Compose([LetterBox(new_shape=(self.crop_size, self.crop_size), scaleup=False)])
@@ -943,8 +935,6 @@ class SAHIDataset(YOLODataset):
         LOGGER.info("\n".join(lines))
 
 
-# ==================== Random Crop Generation ====================
-
 def _generate_random_coords(
     img_h: int,
     img_w: int,
@@ -954,12 +944,7 @@ def _generate_random_coords(
     object_crop_prob: float,
     seed: int,
 ) -> List[Tuple[int, int, int, int]]:
-    """
-    Generate random crop coordinates, biased towards objects.
-    
-    Wrapper that pre-generates random values for numba-accelerated core.
-    """
-    # Pre-generate all random values with numpy (numba-compatible)
+    """Generate random crop coordinates biased towards objects."""
     rng = np.random.default_rng(seed)
     random_vals = rng.random(num_crops)
     box_indices = rng.integers(0, max(1, len(bboxes)), size=num_crops)
