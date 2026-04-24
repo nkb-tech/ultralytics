@@ -2407,7 +2407,11 @@ class Albumentations:
                 from albumentations.core.composition import BaseCompose, TransformsSeqType, TransformType
                 from albumentations.core.transforms_interface import BasicTransform
 
-                check_version(A.__version__, ">2.0.1", hard=True)  # version requirement
+                # AlbumentationsX 2.2.0 (Apr 2026) renamed `*_limit` -> `*_range` for
+                # RandomBrightnessContrast, RGBShift, UnsharpMask (and several others) with no
+                # deprecation period. 2.0.x/2.1.x still expect `*_limit`. See
+                # https://github.com/albumentations-team/AlbumentationsX/releases/tag/2.2.0
+                ALBU_2_2 = check_version(A.__version__, ">=2.2.0")
 
                 # List of possible spatial transforms
                 spatial_transforms = {
@@ -2511,16 +2515,20 @@ class Albumentations:
                             p=0,
                         ),
                         A.RandomBrightnessContrast(
-                            brightness_limit=self.hyp.bright_limit,
-                            contrast_limit=self.hyp.contrast_limit,
+                            **{
+                                "brightness_range" if ALBU_2_2 else "brightness_limit": self.hyp.bright_limit,
+                                "contrast_range" if ALBU_2_2 else "contrast_limit": self.hyp.contrast_limit,
+                            },
                             p=0,
                         ),
                         A.Sharpen(p=0),
                         A.ToGray(p=0),
                         A.RGBShift(
-                            r_shift_limit=[-10, 10],
-                            g_shift_limit=[-10, 10],
-                            b_shift_limit=[-10, 10],
+                            **{
+                                "r_shift_range" if ALBU_2_2 else "r_shift_limit": [-10, 10],
+                                "g_shift_range" if ALBU_2_2 else "g_shift_limit": [-10, 10],
+                                "b_shift_range" if ALBU_2_2 else "b_shift_limit": [-10, 10],
+                            },
                             p=0,
                         ),
                         A.Emboss(
@@ -2537,8 +2545,10 @@ class Albumentations:
                             p=0,
                         ),
                         A.UnsharpMask(
-                            blur_limit=(3, 5),
-                            sigma_limit=(0.5, 1.0),
+                            **{
+                                "blur_range" if ALBU_2_2 else "blur_limit": (3, 5),
+                                "sigma_range" if ALBU_2_2 else "sigma_limit": (0.5, 1.0),
+                            },
                             p=0,
                         )
                     ]

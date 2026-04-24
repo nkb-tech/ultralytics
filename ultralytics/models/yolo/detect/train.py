@@ -128,11 +128,13 @@ class DetectionTrainer(BaseTrainer):
             nc=[1] if self.args.single_cls else self.data["nc"],
             verbose=verbose and RANK == -1,
         )
-        if weights:
-            model.load(weights)
 
+        # Materialize the Re-ID head BEFORE loading weights.
         if self.reid_dim and not getattr(model.model[-1], "embed_dim", 0):
             model.model[-1].upgrade_to_reid(embed_dim=self.reid_dim)
+
+        if weights:
+            model.load(weights)
 
         return model
 
