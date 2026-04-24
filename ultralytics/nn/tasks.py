@@ -84,6 +84,14 @@ class BaseModel(nn.Module):
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
 
+    @property
+    def embed_dim(self):
+        """Re-ID embedding dimension of the model head, or 0 if the head is not an embedding head."""
+        layers = getattr(self, "model", None)
+        if layers is None or not hasattr(layers, "__getitem__") or len(layers) == 0:
+            return 0
+        return getattr(layers[-1], "embed_dim", 0)
+
     def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
         """
         Perform a forward pass through the network.

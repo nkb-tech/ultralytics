@@ -1546,6 +1546,16 @@ class CutMix(BaseMixTransform):
         """
         Applies CutMix augmentation to the input labels.
 
+        This implementation correctly aligns labels with visible pixels:
+        - Base-image instances fully/largely covered by the cut rectangle are dropped
+          (their pixels have been replaced by those of the second image).
+        - Only instances of the second image whose boxes fall inside the cut rectangle are
+          imported into the mixed image, and they are clipped to the rectangle so the box
+          matches the visible pixels.
+
+        This matters for JDE / self-supervised ReID: a "phantom" box (label kept but pixels
+        replaced) would pair a tag with the wrong visual, silently poisoning the triplet loss.
+
         Args:
             labels (dict): A dictionary containing the original image and label information.
 
@@ -1564,19 +1574,89 @@ class CutMix(BaseMixTransform):
         img2 = labels2["img"]
         h, w = labels["img"].shape[:2]
 
-        # Generate random bounding box
+        # Generate random bounding box in pixel coordinates of the base image
         x1, y1, x2, y2 = self._rand_bbox(w, h, lam)
 
-        # Apply CutMix
+        if x2 <= x1 or y2 <= y1:
+            # Degenerate cut region -> skip mixing entirely to avoid label/pixel drift
+            return labels
+
+        # Apply CutMix at the pixel level
         labels["img"][y1:y2, x1:x2] = img2[y1:y2, x1:x2]
 
-        # Adjust lambda to match the actual area ratio
-        lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
+        # Remember the base bbox format so we can restore it before returning
+        inst1 = labels.pop("instances")
+        fmt1, norm1 = inst1._bboxes.format, inst1.normalized
 
-        labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], axis=0)
-        labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
-        if "tags" in labels and "tags" in labels2:
-            labels["tags"] = np.concatenate([labels["tags"], labels2["tags"]], 0)
+        # Put both sets of instances into the same (xyxy, pixel) coordinate system
+        inst1.convert_bbox("xyxy")
+        inst1.denormalize(w, h)
+
+        inst2 = labels2["instances"]
+        inst2.convert_bbox("xyxy")
+        h2, w2 = img2.shape[:2]
+        inst2.denormalize(w2, h2)
+
+        cls1 = labels["cls"]
+        cls2 = labels2["cls"]
+        tags1 = labels.get("tags", None)
+        tags2 = labels2.get("tags", None)
+
+        cut_rect = np.array([[x1, y1, x2, y2]], dtype=np.float32)
+
+        # 1) Drop base instances whose pixels have been replaced by the cutout (>=60% inside)
+        if len(inst1):
+            # bbox_ioa(cut_rect, inst.bboxes) -> intersection / inst_area, shape (1, N)
+            ioa1 = bbox_ioa(cut_rect, inst1.bboxes).reshape(-1)
+            keep1 = ioa1 < 0.60
+            inst1 = inst1[keep1]
+            cls1 = cls1[keep1]
+            if tags1 is not None:
+                tags1 = tags1[keep1]
+
+        # 2) Keep only labels2 instances whose pixels were actually copied, then clip to rect
+        if len(inst2):
+            ioa2 = bbox_ioa(cut_rect, inst2.bboxes).reshape(-1)
+            keep2 = ioa2 >= 0.60
+            inst2 = inst2[keep2]
+            cls2 = cls2[keep2]
+            if tags2 is not None:
+                tags2 = tags2[keep2]
+            if len(inst2):
+                inst2.bboxes[:, [0, 2]] = np.clip(inst2.bboxes[:, [0, 2]], x1, x2)
+                inst2.bboxes[:, [1, 3]] = np.clip(inst2.bboxes[:, [1, 3]], y1, y2)
+
+        # Merge
+        merged = Instances.concatenate([inst1, inst2], axis=0)
+        cls = np.concatenate([cls1, cls2], axis=0)
+
+        # Tags: only concat when both sides have them; if only labels1 has tags but nothing
+        # is imported from labels2, keep labels1's tags; otherwise drop to avoid length drift.
+        tags_out = None
+        if tags1 is not None and tags2 is not None:
+            tags_out = np.concatenate([tags1, tags2], axis=0)
+        elif tags1 is not None and len(cls2) == 0:
+            tags_out = tags1
+
+        # Drop zero-area boxes that clipping may have produced, and keep cls/tags in sync
+        good = merged.bbox_areas > 0
+        if not bool(good.all()):
+            merged = merged[good]
+            cls = cls[good]
+            if tags_out is not None:
+                tags_out = tags_out[good]
+
+        # Restore the base bbox format / normalization for downstream transforms
+        merged.convert_bbox(fmt1)
+        if norm1 and not merged.normalized:
+            merged.normalize(w, h)
+
+        labels["instances"] = merged
+        labels["cls"] = cls
+        if tags_out is not None:
+            labels["tags"] = tags_out
+        else:
+            labels.pop("tags", None)
         return labels
 
     def __repr__(self):
@@ -2261,17 +2341,28 @@ class CopyPaste(BaseMixTransform):
 
         im_new = np.zeros(im.shape, np.uint8)
         instances2 = labels2.pop("instances", None)
-        tags2 = labels2.get("tags", tags)
         if instances2 is None:
+            # Flip mode: pasted copy is the same source object flipped. It MUST carry the
+            # base tag so JDE/ReID sees it as a positive pair (anchor-positive with same tag).
             instances2 = deepcopy(instances)
             instances2.fliplr(w)
+            cls2 = cls
+            tags2 = tags
+        else:
+            # Mixup mode: pasted object comes from a different image. Use that image's own
+            # cls/tags; if labels2 has no tags we cannot fabricate them (index space is
+            # different), so drop tags entirely to keep lengths aligned downstream.
+            cls2 = labels2.get("cls", cls)
+            tags2 = labels2.get("tags", None)
+            if tags is not None and tags2 is None:
+                tags = None
         ioa = bbox_ioa(instances2.bboxes, instances.bboxes)  # intersection over area, (N, M)
         indexes = np.nonzero((ioa < 0.30).all(1))[0]  # (N, )
         n = len(indexes)
         sorted_idx = np.argsort(ioa.max(1)[indexes])
         indexes = indexes[sorted_idx]
         for j in indexes[: round(self.p * n)]:
-            cls = np.concatenate((cls, labels2.get("cls", cls)[[j]]), axis=0)
+            cls = np.concatenate((cls, cls2[[j]]), axis=0)
             instances = Instances.concatenate((instances, instances2[[j]]), axis=0)
             if tags is not None:
                 tags = np.concatenate((tags, tags2[[j]]), axis=0)

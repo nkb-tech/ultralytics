@@ -154,7 +154,7 @@ class BaseTrainer:
         self.tloss = None
         self.loss_names = ["Loss"]
         self.csv = self.save_dir / "results.csv"
-        self.plot_idx = [0, 1, 2]
+        self.plot_idx = list(range(self.args.max_plot_batches))
 
         # HUB
         self.hub_session = None

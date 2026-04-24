@@ -374,7 +374,7 @@ class DetectionCompressor(BaseTrainer):
         self.tloss = None
         self.loss_names = ['Loss']
         self.csv = self.save_dir / 'results.csv'
-        self.plot_idx = [0, 1, 2]
+        self.plot_idx = list(range(self.args.max_plot_batches))
 
         # Callbacks
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
