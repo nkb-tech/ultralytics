@@ -117,7 +117,8 @@ warmup_bias_lr: 0.1 # (float) warmup initial bias lr
 box: 7.5 # (float) box loss gain
 cls: 0.5 # (float) cls loss gain (scale with pixels)
 dfl: 1.5 # (float) dfl loss gain
-reid: 10.0 # (float) Re-ID embedding loss gain
+reid: 2.0 # (float) Re-ID embedding loss gain
+dep: 10.0 # (float) dependency loss gain
 pose: 12.0 # (float) pose loss gain
 kobj: 1.0 # (float) keypoint obj loss gain
 label_smoothing: 0.0 # (float) label smoothing (fraction)
@@ -190,6 +191,10 @@ tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yam
 
 # ReID settings --------------------------------------------------------------------------------------------------------
 reid_dim: 0 # (int) Re-ID embedding dimension for self-supervised Re-ID head (e.g. 128); 0 = disabled
+
+# Hierarchical detection (hYOLO / multitask nc list + Detect fusion) ---------------------------------------------------
+hierarchical: False # (bool) training flag: inject hierarchical:true into model yaml when building from weights
+dependency_loss: True # (bool) parent-child penalty (requires child_parent_map JSON)
 
 # Distillation settings -------------------------------------------------------------------------------------------------
 teacher: None #  None | (str) path to teacher model
