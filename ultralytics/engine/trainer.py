@@ -558,11 +558,19 @@ class BaseTrainer:
 
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
-             # SAHI: Regenerate random crops for next epoch
+            # SAHI: Regenerate random crops for next epoch.
+            # IMPORTANT: ``on_epoch_end`` mutates only the main-process dataset.
+            # With ``persistent_workers=True`` (default when workers > 0) each worker
+            # has its own forked copy of ``dataset.slice_indices`` from the original
+            # ``__init__`` and never sees the regeneration. Calling
+            # ``train_loader.reset()`` after the regeneration tears down the worker
+            # pool and re-forks workers, which propagates the new slice_indices.
             if hasattr(self.train_loader, 'dataset'):
                 dataset = self.train_loader.dataset
                 if hasattr(dataset, 'on_epoch_end'):
                     dataset.on_epoch_end()
+                    if hasattr(self.train_loader, 'reset'):
+                        self.train_loader.reset()
                     
             # SAHI: Update distributed sampler epoch
             if hasattr(self.train_loader, 'batch_sampler') and hasattr(self.train_loader.batch_sampler, 'set_epoch'):

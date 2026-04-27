@@ -64,7 +64,7 @@ class TaskAlignedAssigner(nn.Module):
         self.iou_loss_fn = iou_loss_fn.lower()
 
     @torch.no_grad()
-    def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
+    def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt, return_reid: bool = False):
         """Compute the task-aligned assignment.
 
         Args:
@@ -74,11 +74,17 @@ class TaskAlignedAssigner(nn.Module):
             gt_labels (torch.Tensor): Ground truth labels with shape (bs, n_max_boxes, 1).
             gt_bboxes (torch.Tensor): Ground truth boxes with shape (bs, n_max_boxes, 4).
             mask_gt (torch.Tensor): Mask for valid ground truth boxes with shape (bs, n_max_boxes, 1).
+            return_reid (bool): If True, additionally return a wide foreground mask covering
+                every anchor whose center is inside any GT box, plus the matching gt index
+                (for the GT with highest alignment metric where the anchor lies). Used by
+                the ReID embedding loss to get many same-tag positive pairs per object.
 
         Returns:
             norm_align_metric (torch.Tensor): Normalized alignment metric with shape (bs, num_total_anchors, 1).
             fg_mask (torch.Tensor): Foreground mask with shape (bs, num_total_anchors).
             target_gt_idx (torch.Tensor): Target ground truth indices with shape (bs, num_total_anchors).
+            reid_fg_mask (torch.Tensor, optional): Wide foreground mask (bs, num_total_anchors).
+            reid_target_gt_idx (torch.Tensor, optional): Per-anchor gt index (bs, num_total_anchors).
 
         References:
             https://github.com/Nioolek/PPYOLOE_pytorch/blob/master/ppyoloe/assigner/tal_assigner.py
@@ -88,26 +94,27 @@ class TaskAlignedAssigner(nn.Module):
         device = gt_bboxes.device
 
         if self.n_max_boxes == 0:
-            return (
-                torch.zeros(self.bs, pd_scores.shape[1], 1, device=device),
-                torch.zeros(self.bs, pd_scores.shape[1], device=device, dtype=torch.bool),
-                torch.zeros(self.bs, pd_scores.shape[1], device=device, dtype=torch.long),
-            )
+            empty_metric = torch.zeros(self.bs, pd_scores.shape[1], 1, device=device)
+            empty_mask = torch.zeros(self.bs, pd_scores.shape[1], device=device, dtype=torch.bool)
+            empty_idx = torch.zeros(self.bs, pd_scores.shape[1], device=device, dtype=torch.long)
+            if return_reid:
+                return empty_metric, empty_mask, empty_idx, empty_mask, empty_idx
+            return empty_metric, empty_mask, empty_idx
 
         try:
-            return self._forward(pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)
+            return self._forward(pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt, return_reid)
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 # Move tensors to CPU, compute, then move back to original device
                 LOGGER.warning("CUDA OutOfMemoryError in TaskAlignedAssigner, using CPU")
                 cpu_tensors = [t.cpu() for t in (pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt)]
-                result = self._forward(*cpu_tensors)
+                result = self._forward(*cpu_tensors, return_reid)
                 return tuple(t.to(device) for t in result)
             raise
 
-    def _forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt):
+    def _forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt, return_reid: bool = False):
         """Compute the task-aligned assignment (internal implementation)."""
-        mask_pos, align_metric, overlaps = self.get_pos_mask(
+        mask_pos, align_metric, overlaps, mask_in_gts = self.get_pos_mask(
             pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt
         )
 
@@ -121,7 +128,24 @@ class TaskAlignedAssigner(nn.Module):
         # Prepare target indices for get_bboxes/get_scores
         target_gt_idx = self.prepare_targets(target_gt_idx)
 
-        return norm_align_metric, fg_mask.bool(), target_gt_idx
+        if not return_reid:
+            return norm_align_metric, fg_mask.bool(), target_gt_idx
+
+        # Wide ReID positive set: any anchor inside any valid GT box. Tie-break by
+        # alignment metric so a single anchor inside multiple GTs picks the best-aligned.
+        reid_score = align_metric * mask_in_gts * mask_gt  # (b, n_max_boxes, A)
+        reid_max, reid_target_gt_idx = reid_score.max(dim=1)  # (b, A)
+        reid_fg_mask = reid_max > 0
+        # If alignment metric is 0 everywhere for this anchor (rare, e.g. very early
+        # training when scores are tiny), fall back to "any anchor inside any GT".
+        any_inside = (mask_in_gts * mask_gt).max(dim=1)
+        fallback_mask = any_inside.values > 0
+        reid_target_gt_idx = torch.where(reid_fg_mask, reid_target_gt_idx, any_inside.indices)
+        reid_fg_mask = reid_fg_mask | fallback_mask
+        # Flat batch indexing: idx + b * n_max_boxes
+        reid_target_gt_idx = self.prepare_targets(reid_target_gt_idx)
+
+        return norm_align_metric, fg_mask.bool(), target_gt_idx, reid_fg_mask.bool(), reid_target_gt_idx
 
     def get_norm_align_metric(self, align_metric, mask_pos, overlaps):
         """Get normalized alignment metric.
@@ -164,7 +188,7 @@ class TaskAlignedAssigner(nn.Module):
         # Merge all mask to a final mask, (b, max_num_obj, h*w)
         mask_pos = mask_topk * mask_in_gts * mask_gt
 
-        return mask_pos, align_metric, overlaps
+        return mask_pos, align_metric, overlaps, mask_in_gts
 
     def get_box_metrics(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_gt):
         """Compute alignment metric given predicted and ground truth bounding boxes.

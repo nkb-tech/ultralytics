@@ -179,12 +179,13 @@ class Detect(nn.Module):
     @property
     def hierarchical(self) -> bool:
         """Whether hierarchical late fusion is enabled; safe for legacy pickled heads."""
-        return getattr(self, "_hierarchical", False) and hasattr(self, "cv3_fuse")
+        return getattr(self, "_hierarchical", hasattr(self, "cv3_fuse")) and hasattr(self, "cv3_fuse")
 
     @property
     def end2end(self) -> bool:
         """Check if model has one2one heads for end-to-end detection."""
-        return getattr(self, "_end2end", False) and hasattr(self, "one2one_cv2")
+        has_one2one = hasattr(self, "one2one_cv2") and hasattr(self, "one2one_cv3")
+        return getattr(self, "_end2end", has_one2one) and has_one2one
 
     @end2end.setter
     def end2end(self, value: bool):
@@ -195,7 +196,7 @@ class Detect(nn.Module):
     def one2many(self) -> dict:
         """Returns the one-to-many head components."""
         d = dict(box_head=self.cv2, cls_head=self.cv3)
-        if self.embed_dim > 0:
+        if getattr(self, "embed_dim", 0) > 0 and hasattr(self, "emb"):
             d["emb_head"] = self.emb
         return d
 
@@ -300,7 +301,7 @@ class Detect(nn.Module):
         out = []
         for i in range(self.nl):
             parts = [self.cv2[i](x[i])] + [task_head[i](x[i]) for task_head in self.cv3]
-            if self.embed_dim > 0:
+            if getattr(self, "embed_dim", 0) > 0 and hasattr(self, "emb"):
                 parts.append(self.emb[i](x[i]))
             out.append(torch.cat(parts, 1))
         return out
@@ -368,12 +369,13 @@ class Detect(nn.Module):
         sigmoid scores, and L2-normalized Re-ID embeddings. End2end / one2one branches
         are bypassed — Hailo runs NMS off-graph.
         """
+        embed_dim = getattr(self, "embed_dim", 0)
         splits = [self.reg_max * 4, sum(self.nc)]
-        if self.embed_dim > 0:
-            splits.append(self.embed_dim)
+        if embed_dim > 0:
+            splits.append(embed_dim)
         parts = self._hailo_concat(x).split(splits, 1)
         out = [self._hailo_decode_boxes(parts[0]), parts[1].sigmoid()]
-        if self.embed_dim > 0:
+        if embed_dim > 0:
             out.append(F.normalize(parts[2], p=2, dim=1))
         return torch.cat(out, 1)
 
@@ -428,7 +430,7 @@ class Detect(nn.Module):
             for task_head, nc_i in zip(self.cv3, self.nc):
                 task_head[i][-1].bias.data[:] = math.log(5 / nc_i / (640 / s) ** 2)
 
-        if self.embed_dim > 0:
+        if getattr(self, "embed_dim", 0) > 0 and hasattr(self, "emb"):
             for a in self.emb:
                 if a[-1].bias is not None:
                     a[-1].bias.data.zero_()
@@ -490,7 +492,7 @@ class Detect(nn.Module):
         """Remove the one2many head for inference optimization."""
         self.cv2 = self.cv3 = None
         
-        if self.embed_dim > 0:
+        if getattr(self, "embed_dim", 0) > 0:
             self.emb = None
 
         if self.hierarchical:

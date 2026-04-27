@@ -28,43 +28,80 @@ from .metrics import bbox_iou, probiou, WiseIoULoss, wasserstein_loss
 
 
 class MetricLearningLoss(nn.Module):
-    """Self-supervised Re-ID embedding loss using triplet margin with hard mining.
+    """Self-supervised Re-ID embedding loss (SupCon-style).
 
-    Based on the YOLO-JDE approach described in https://arxiv.org/abs/2501.13710
+    Hand-rolled supervised contrastive loss (Khosla et al., https://arxiv.org/abs/2004.11362)
+    over the unique-per-instance tags emitted by the dataset. Each anchor compares against
+    every other anchor in the batch as either same-tag positive or different-tag negative,
+    giving a much smoother gradient than triplet-margin mining. Background anchors
+    (tag <= 0) are kept as pure negatives. Embeddings are L2-normalized inside this module
+    so callers don't need to normalize first.
+
+    Magnitude normalization
+    -----------------------
+    Raw SupCon at τ=0.1 with N≈1k anchors lands at ~log(N)/τ ≈ 70 untrained, while the
+    other YOLO loss components (box/cls/dfl/dep) sit at ~0.05–0.4 in the same regime.
+    To put reid on the same magnitude scale — so ``hyp.reid = 1.0`` is consistent with
+    ``hyp.box = 1.0`` etc. without needing per-coefficient hand tuning — we divide the
+    per-anchor SupCon loss by ``log(N - 1) / τ`` (its untrained upper bound). After
+    normalization the loss is ~1.0 for random embeddings and decreases toward 0 as the
+    embedding head learns.
+
+    Args:
+        temperature: SupCon temperature τ. 0.1 is the canonical default.
+        max_samples: optional cap on anchors per step (random sub-sample when exceeded).
+            Keeps the (NxN) similarity matrix from blowing up on large batches.
     """
 
-    def __init__(
-        self, 
-        margin: float = 0.075, 
-        confidence_threshold: float = 1,
-        pos_strategy: str = 'hard',
-        neg_strategy: str = 'semihard',
-    ):
+    def __init__(self, temperature: float = 0.1, max_samples: int = 4096):
         super().__init__()
-        try:
-            from pytorch_metric_learning import losses, miners
-        except ImportError as e:
-            raise ModuleNotFoundError(
-                "Re-ID training requires pytorch-metric-learning. Install it with: pip install pytorch-metric-learning"
-            ) from e
-        self.mining_func = miners.BatchEasyHardMiner(pos_strategy=pos_strategy, neg_strategy=neg_strategy)
-        self.loss_func = losses.TripletMarginLoss(margin=margin)
-        self.confidence_threshold = confidence_threshold
+        self.temperature = temperature
+        self.max_samples = max_samples
 
-    def forward(self, embeddings, tags, confidences=None, normalize=False):
-        # Select only the embeddings and tags for confidences on top X%
-        if confidences is not None and self.confidence_threshold < 1:
-            top_k = int(self.confidence_threshold * len(confidences))
-            _, indices = torch.topk(confidences, top_k, largest=True)
-            embeddings = embeddings[indices]
-            tags = tags[indices]
+    def forward(self, embeddings, tags, confidences=None, normalize=True):  # confidences kept for back-compat
+        if embeddings.numel() == 0:
+            return embeddings.sum() * 0.0
+
+        n = embeddings.shape[0]
+        if n > self.max_samples:
+            idx = torch.randperm(n, device=embeddings.device)[: self.max_samples]
+            embeddings = embeddings[idx]
+            tags = tags[idx]
+            n = self.max_samples
 
         if normalize:
-            embeddings = F.normalize(embeddings, p=2, dim=1)
-        # Sample triplets and calculate loss
-        indices_tuples = self.mining_func(embeddings, tags)
-        loss = self.loss_func(embeddings, tags, indices_tuples)
-        return loss
+            embeddings = F.normalize(embeddings.float(), p=2, dim=1)
+
+        tags = tags.view(-1)
+        # Same-tag mask, exclude self pairs.
+        pos_mask = (tags.unsqueeze(0) == tags.unsqueeze(1)).float()
+        pos_mask.fill_diagonal_(0.0)
+        # Background tags (tag <= 0) act as pure negatives: they keep their negative
+        # comparisons (everyone else is anchor) but never contribute as a positive.
+        bg = (tags <= 0).float()
+        pos_mask = pos_mask * (1.0 - bg).unsqueeze(0) * (1.0 - bg).unsqueeze(1)
+
+        # Skip cleanly when no positives are available (e.g. all-unique-tags batch).
+        n_pos_per_anchor = pos_mask.sum(dim=1)
+        if n_pos_per_anchor.sum() == 0:
+            return embeddings.sum() * 0.0
+
+        sim = embeddings @ embeddings.t() / self.temperature
+        # Mask self-similarity in the denominator for numerical stability.
+        sim = sim - sim.detach().max()
+        logits_mask = 1.0 - torch.eye(n, device=embeddings.device, dtype=sim.dtype)
+        exp_sim = torch.exp(sim) * logits_mask
+        log_prob = sim - torch.log(exp_sim.sum(dim=1, keepdim=True).clamp_min(1e-12))
+
+        # Mean over positives per anchor; skip anchors with no positives.
+        valid_anchor = n_pos_per_anchor > 0
+        loss_per_anchor = -(pos_mask * log_prob).sum(dim=1) / n_pos_per_anchor.clamp_min(1)
+        raw = loss_per_anchor[valid_anchor].mean()
+
+        # Magnitude normalization to match box/cls/dfl/dep dynamic range.
+        # Untrained upper bound is ~log(N - 1)/τ; dividing by it puts loss in [~0, ~1].
+        denom = math.log(max(n - 1, 2)) / self.temperature
+        return raw / denom
 
 
 class DistillationLoss(nn.Module):
@@ -1037,14 +1074,25 @@ class v8DetectionLoss:
         # Pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)
 
-        norm_align_metric, fg_mask, target_gt_idx = self.assigner(
+        # Foreground assignment. When a ReID head is enabled we also ask the assigner
+        # for a "wide" positive mask covering every anchor whose center is inside any
+        # GT (not just the topk-aligned ones); the embedding loss uses that to get many
+        # same-tag positive pairs per object.
+        assigner_out = self.assigner(
             pred_scores[..., :self.nc[0]].detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
             gt_labels[..., 0, None],
             gt_bboxes,
             mask_gt,
+            return_reid=self.has_embed,
         )
+        if self.has_embed:
+            norm_align_metric, fg_mask, target_gt_idx, reid_fg_mask, reid_target_gt_idx = assigner_out
+        else:
+            norm_align_metric, fg_mask, target_gt_idx = assigner_out
+            reid_fg_mask = None
+            reid_target_gt_idx = None
 
         target_bboxes = self.assigner.get_bboxes(gt_bboxes, target_gt_idx, fg_mask)
         target_scores_sum, offset = max(norm_align_metric.sum(), 1), 0
@@ -1106,36 +1154,42 @@ class v8DetectionLoss:
                 stride_tensor,
             )
 
-        # ReID embedding loss
-        if self.has_embed and "embeds" in preds and fg_mask.sum():
-            pred_embeds = F.normalize(
-                preds["embeds"].permute(0, 2, 1).contiguous().float(), p=2, dim=2
-            )
+        # ReID embedding loss. SupCon over the wide TAL positive set: every anchor
+        # inside a GT contributes with that GT's tag. Many same-tag pairs per object
+        # → strong contrastive signal even with unique-per-instance tags. Embeddings
+        # are NOT pre-normalized here; MetricLearningLoss handles normalization.
+        if self.has_embed and "embeds" in preds and reid_fg_mask is not None and reid_fg_mask.sum():
+            pred_embeds = preds["embeds"].permute(0, 2, 1).contiguous().float()
             tags_batch = batch.get("tags")
-            target_gt_idx_fg = target_gt_idx[fg_mask].long()
 
             if tags_batch is not None and len(tags_batch):
                 tags = tags_batch.to(self.device).long().view(-1)
-                batch_idx = batch["batch_idx"].to(self.device).long()
-                gt_tags = torch.zeros(batch_size, int((batch_idx.bincount()).max()), device=self.device, dtype=torch.long)
+                batch_idx_t = batch["batch_idx"].to(self.device).long()
+                # Use n_max_boxes from the assigner so the flat indexing matches
+                # target_gt_idx (= idx + b * n_max_boxes).
+                n_max_boxes = self.assigner.n_max_boxes
+                gt_tags = torch.zeros(batch_size, n_max_boxes, device=self.device, dtype=torch.long)
                 for j in range(batch_size):
-                    m = batch_idx == j
-                    gt_tags[j, : m.sum()] = tags[m]
+                    m = batch_idx_t == j
+                    if m.any():
+                        gt_tags[j, : m.sum()] = tags[m]
 
                 gt_tags_flat = gt_tags.view(-1)
-                valid = (target_gt_idx_fg >= 0) & (target_gt_idx_fg < gt_tags_flat.numel())
+                reid_target_gt_idx_fg = reid_target_gt_idx[reid_fg_mask].long()
+                valid = (reid_target_gt_idx_fg >= 0) & (reid_target_gt_idx_fg < gt_tags_flat.numel())
                 if valid.any():
                     loss[self.reid_idx] = self.embed_loss(
-                        pred_embeds[fg_mask][valid],
-                        gt_tags_flat[target_gt_idx_fg[valid]],
-                        pred_scores[fg_mask].sigmoid().max(dim=1).values.float()[valid],
+                        pred_embeds[reid_fg_mask][valid],
+                        gt_tags_flat[reid_target_gt_idx_fg[valid]],
                     )
 
         loss[self.box_idx] *= self.hyp.box
         loss[self.cls_idx] *= self.hyp.cls / len(self.nc)
         loss[self.dfl_idx] *= self.hyp.dfl
         if self.dependency_loss:
-            loss[self.dep_idx] *= self.hyp.dep / len(self.nc)
+            # dep accumulates over n_tasks-1 levels (skip root), so divide by that count
+            # to keep the per-level magnitude on the same scale as cls.
+            loss[self.dep_idx] *= self.hyp.dep / max(len(self.nc) - 1, 1)
         if self.has_embed:
             loss[self.reid_idx] *= self.hyp.reid
 
