@@ -28,6 +28,7 @@ def non_max_suppression(
     end2end: bool = False,
     return_idxs: bool = False,
     nms_strategy: str = "usual",  # "usual" (NMS), "nmm", "nmm_greedy"
+    main_head: int = 0,
 ):
     """Perform non-maximum suppression (NMS) on prediction results.
 
@@ -67,6 +68,9 @@ def non_max_suppression(
 
     num_tasks = len(nc)
     total_nc = sum(nc)
+    main_head = int(main_head)
+    if not 0 <= main_head < num_tasks:
+        raise ValueError(f"main_head={main_head} is outside task head range 0-{num_tasks - 1}")
 
     # Post-processed format: (batch, N, 4+2*num_tasks) with [x1, y1, x2, y2, conf0, cls0, ...]
     # Already xyxy — must NOT go through BCN path (xywh2xyxy would corrupt coordinates).
@@ -78,15 +82,17 @@ def non_max_suppression(
     if is_postprocessed:
         output = []
         for pred in prediction:
-            pred = pred[pred[:, 4] > conf_thres]
+            main_conf_col = 4 + 2 * main_head
+            main_cls_col = 5 + 2 * main_head
+            pred = pred[pred[:, main_conf_col] > conf_thres]
             if classes is not None:
-                pred = pred[(pred[:, 5:6] == classes).any(1)]
+                pred = pred[(pred[:, main_cls_col : main_cls_col + 1] == classes).any(1)]
             if len(pred) == 0:
                 output.append(pred[:0])
                 continue
 
             boxes = pred[:, :4]
-            scores = pred[:, 4]
+            scores = pred[:, main_conf_col]
 
             # Class offset: unique per combination of all task classes
             if agnostic:
@@ -104,7 +110,7 @@ def non_max_suppression(
 
             if nms_strategy in ("nmm", "nmm_greedy"):
                 nmm_input = torch.cat(
-                    [boxes + c, scores.view(-1, 1), pred[:, 5].view(-1, 1)], dim=1
+                    [boxes + c, scores.view(-1, 1), pred[:, main_cls_col].view(-1, 1)], dim=1
                 )
                 keep_to_merge = _nmm_core(
                     nmm_input, match_metric="IOU", match_threshold=iou_thres,
@@ -129,8 +135,9 @@ def non_max_suppression(
     extra = prediction.shape[1] - total_nc - 4
     mi = 4 + total_nc
 
-    # Candidate filtering by first task confidence
-    xc = prediction[:, 4:4 + nc[0]].amax(1) > conf_thres
+    main_offset = 4 + sum(nc[:main_head])
+    # Candidate filtering by the configured main task confidence
+    xc = prediction[:, main_offset:main_offset + nc[main_head]].amax(1) > conf_thres
     xinds = torch.arange(prediction.shape[-1], device=prediction.device).expand(bs, -1)[..., None]
 
     time_limit = 2.0 + max_time_img * bs
@@ -185,8 +192,8 @@ def non_max_suppression(
                 clss.append(j_i.float())
                 offset += nc_i
 
-            # Filter by first task confidence
-            conf_mask = confs[0].view(-1) > conf_thres
+            # Filter by configured main task confidence
+            conf_mask = confs[main_head].view(-1) > conf_thres
             box = box[conf_mask]
             mask = mask[conf_mask]
             confs = [c[conf_mask] for c in confs]
@@ -197,8 +204,10 @@ def non_max_suppression(
             # Layout: [box, conf0, cls0, conf1, cls1, ..., extra]
             x = torch.cat([box] + sum([[c, j] for c, j in zip(confs, clss)], []) + [mask], 1)
 
-        conf = x[:, 4]
-        j = x[:, 5]
+        main_conf_col = 4 + 2 * main_head
+        main_cls_col = 5 + 2 * main_head
+        conf = x[:, main_conf_col]
+        j = x[:, main_cls_col]
 
         # Filter by class
         if classes is not None:
@@ -206,7 +215,7 @@ def non_max_suppression(
             x = x[filt]
             if return_idxs:
                 xk = xk[filt]
-            conf, j = x[:, 4], x[:, 5]
+            conf, j = x[:, main_conf_col], x[:, main_cls_col]
 
         # Check shape
         n = x.shape[0]
@@ -217,7 +226,7 @@ def non_max_suppression(
             x = x[filt]
             if return_idxs:
                 xk = xk[filt]
-            conf, j = x[:, 4], x[:, 5]
+            conf, j = x[:, main_conf_col], x[:, main_cls_col]
 
         # NMS class offsets
         if agnostic:

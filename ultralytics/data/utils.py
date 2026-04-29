@@ -41,6 +41,162 @@ VID_FORMATS = {"asf", "avi", "gif", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "
 FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
 
 
+def _int_keys(d: dict) -> dict:
+    """Return a shallow copy of a YAML dict with integer keys where possible."""
+    return {int(k): v for k, v in d.items()}
+
+
+def _is_compact_multitask_hierarchy(data: dict) -> bool:
+    """Detect the semantic-task YAML format before ``check_class_names`` flattens it."""
+    names = data.get("names")
+    child_parent_map = data.get("child_parent_map")
+    if not isinstance(names, dict) or not isinstance(child_parent_map, dict):
+        return False
+    sample_name = next(iter(names.values()), None)
+    sample_map = next(iter(child_parent_map.values()), None)
+    return isinstance(sample_name, (list, tuple, dict)) and isinstance(sample_map, dict) and (
+        "main_task" in data or any(isinstance(v, dict) and "connections" in v for v in sample_map.values())
+    )
+
+
+def _normalize_name_list(names, dataset) -> dict[int, str]:
+    """Normalize one class-name list/dict to the repo's list[dict] class-name contract."""
+    normalized = check_class_names(names)
+    if len(normalized) != 1:
+        raise SyntaxError(emojis(f"{dataset} nested class-name entries must describe exactly one class set."))
+    return normalized[0]
+
+
+def _normalize_compact_multitask_hierarchy(data: dict, dataset) -> None:
+    """Normalize compact semantic-task hierarchy YAML into flat heads plus routing metadata."""
+    semantic_names = _int_keys(data["names"])
+    raw_maps = _int_keys(data["child_parent_map"])
+    main_task = int(data.get("main_task", 0))
+    main_level = data.get("main_level", None)
+    main_level = None if main_level is None else int(main_level)
+    if main_task not in semantic_names:
+        raise SyntaxError(emojis(f"{dataset} main_task={main_task} is not present in names."))
+
+    flat_names, flat_nc, flat_to_semantic = [], [], []
+    semantic_to_flat, label_nc, child_parent_map = {}, [], {}
+    hierarchy_parent_heads = []
+    source_label_heads = []
+
+    for task_id in sorted(semantic_names):
+        semantic_to_flat[task_id] = {}
+        label_nc.append(len(_normalize_name_list(semantic_names[task_id], dataset)))
+        task_map = raw_maps.get(task_id)
+
+        if task_map is None:
+            # No hierarchy block means a flat auxiliary semantic task.
+            task_names = _normalize_name_list(semantic_names[task_id], dataset)
+            flat_idx = len(flat_names)
+            semantic_to_flat[task_id][0] = flat_idx
+            flat_names.append(task_names)
+            flat_nc.append(len(task_names))
+            flat_to_semantic.append({"task": task_id, "level": 0})
+            hierarchy_parent_heads.append(-1)
+            source_label_heads.append(flat_idx)
+            continue
+
+        task_map = _int_keys(task_map)
+        deepest_level = max(task_map)
+        for level in sorted(task_map):
+            level_info = task_map[level]
+            if not isinstance(level_info, dict) or "names" not in level_info or "connections" not in level_info:
+                raise SyntaxError(
+                    emojis(f"{dataset} child_parent_map[{task_id}][{level}] must contain 'connections' and 'names'.")
+                )
+            level_names = _normalize_name_list(level_info["names"], dataset)
+            flat_idx = len(flat_names)
+            semantic_to_flat[task_id][level] = flat_idx
+            flat_names.append(level_names)
+            flat_nc.append(len(level_names))
+            flat_to_semantic.append({"task": task_id, "level": level})
+
+            connections = level_info["connections"]
+            if connections == -1:
+                hierarchy_parent_heads.append(-1)
+            else:
+                connections = _int_keys(connections)
+                if level - 1 not in semantic_to_flat[task_id]:
+                    raise SyntaxError(emojis(f"{dataset} hierarchy level {level} has no previous parent level."))
+                parent_head = semantic_to_flat[task_id][level - 1]
+                hierarchy_parent_heads.append(parent_head)
+                child_parent_map[flat_idx] = connections
+
+        deepest_names = flat_names[semantic_to_flat[task_id][deepest_level]]
+        declared_names = _normalize_name_list(semantic_names[task_id], dataset)
+        if list(deepest_names.values()) != list(declared_names.values()):
+            raise SyntaxError(
+                emojis(f"{dataset} names[{task_id}] must match child_parent_map[{task_id}][{deepest_level}].names.")
+            )
+        source_label_heads.append(semantic_to_flat[task_id][deepest_level])
+
+    if main_level is None:
+        main_head = source_label_heads[sorted(semantic_names).index(main_task)]
+    else:
+        if main_level not in semantic_to_flat.get(main_task, {}):
+            raise SyntaxError(emojis(f"{dataset} main_level={main_level} is not present in main_task={main_task}."))
+        main_head = semantic_to_flat[main_task][main_level]
+    compact_ignore = _int_keys(data.get("ignore_class", {})) if isinstance(data.get("ignore_class"), dict) else {}
+    flat_ignore = {}
+    for task_id, levels in compact_ignore.items():
+        if not isinstance(levels, dict):
+            continue
+        for level, classes in _int_keys(levels).items():
+            flat_idx = semantic_to_flat.get(int(task_id), {}).get(int(level))
+            if flat_idx is not None:
+                flat_ignore[flat_idx] = [int(c) for c in classes]
+
+    data["names"] = flat_names
+    data["nc"] = flat_nc
+    data["child_parent_map"] = child_parent_map
+    data["ignore_class"] = flat_ignore
+    data["task_schema"] = {
+        "format": "compact_multitask_hierarchy",
+        "semantic_tasks": sorted(semantic_names),
+        "semantic_nc": label_nc,
+        "label_nc": label_nc,
+        "semantic_to_flat": semantic_to_flat,
+        "flat_to_semantic": flat_to_semantic,
+        "source_label_heads": source_label_heads,
+        "main_task": main_task,
+        "main_level": main_level,
+        "main_head": main_head,
+        "hierarchy_parent_heads": hierarchy_parent_heads,
+        "child_parent_map": child_parent_map,
+        "ignore_class": flat_ignore,
+    }
+
+
+def _expand_compact_label_rows(lb: np.ndarray, task_schema: dict) -> np.ndarray:
+    """Expand compact semantic-task labels to one class column per flat model head."""
+    compact_cols = len(task_schema["label_nc"])
+    flat_heads = len(task_schema["flat_to_semantic"])
+    expanded = np.zeros((lb.shape[0], flat_heads), dtype=lb.dtype)
+    hierarchy_parent_heads = task_schema["hierarchy_parent_heads"]
+    child_parent_map = {int(k): _int_keys(v) for k, v in task_schema.get("child_parent_map", {}).items()}
+
+    for label_col, source_head in enumerate(task_schema["source_label_heads"]):
+        source_head = int(source_head)
+        cls_values = lb[:, label_col].astype(np.int64, copy=False)
+        expanded[:, source_head] = cls_values
+        child_head = source_head
+        child_cls = cls_values
+        while int(hierarchy_parent_heads[child_head]) >= 0:
+            parent_head = int(hierarchy_parent_heads[child_head])
+            mapping = child_parent_map.get(child_head, {})
+            try:
+                parent_cls = np.array([mapping[int(c)] for c in child_cls], dtype=np.int64)
+            except KeyError as e:
+                raise ValueError(f"compact hierarchy label class {int(e.args[0])} has no parent mapping") from e
+            expanded[:, parent_head] = parent_cls
+            child_head, child_cls = parent_head, parent_cls
+
+    return np.concatenate((expanded, lb[:, compact_cols : compact_cols + 4]), axis=1)
+
+
 def img2label_paths(img_paths):
     """Define label paths as a function of image paths."""
     sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"  # /images/, /labels/ substrings
@@ -95,12 +251,20 @@ def verify_image(args, min_imgsz=25):
 
 def verify_image_label(args, min_imgsz=9):
     """Verify one image-label pair."""
-    im_file, lb_file, prefix, keypoint, use_tags, n_tag_attrs, nkpt, ndim, single_cls, nc = args
+    if len(args) == 10:
+        im_file, lb_file, prefix, keypoint, use_tags, n_tag_attrs, nkpt, ndim, single_cls, nc = args
+        task_schema = None
+    else:
+        im_file, lb_file, prefix, keypoint, use_tags, n_tag_attrs, nkpt, ndim, single_cls, nc, task_schema = args
     # nc is a list with number of classes for each attribute (multi-head support)
     if not isinstance(nc, (list, tuple)):
         raise ValueError("'nc' must be a list specifying number of classes per attribute (multi-head labels)")
     # Number (missing, found, empty, corrupt), message, segments, keypoints
-    nm, nf, ne, ncpt, msg, segments, keypoints, tags, nattrs = 0, 0, 0, 0, "", [], None, None, len(nc)
+    compact_schema = (
+        task_schema if isinstance(task_schema, dict) and task_schema.get("format") == "compact_multitask_hierarchy" else None
+    )
+    label_nc = compact_schema["label_nc"] if compact_schema else nc
+    nm, nf, ne, ncpt, msg, segments, keypoints, tags, nattrs = 0, 0, 0, 0, "", [], None, None, len(label_nc)
     try:
         # Verify images
         im = Image.open(im_file)
@@ -173,7 +337,7 @@ def verify_image_label(args, min_imgsz=9):
                 assert lb.min() >= -0.01, f"negative class labels {lb[lb < -0.01]}"
 
                 # All labels
-                for i, nc_i in enumerate(nc):
+                for i, nc_i in enumerate(label_nc):
                     # TODO make single cls work with multi-head labels
                     if single_cls and i == 0:
                         lb[:, i] = 0
@@ -201,6 +365,8 @@ def verify_image_label(args, min_imgsz=9):
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
         lb = lb[:, : nattrs + 4]
+        if compact_schema:
+            lb = _expand_compact_label_rows(lb, compact_schema)
         return im_file, lb, shape, segments, keypoints, tags, nm, nf, ne, ncpt, msg
     except Exception as e:
         ncpt = 1
@@ -330,6 +496,8 @@ def check_det_dataset(dataset, autodownload=True):
             data["val"] = data.pop("validation")  # replace 'validation' key with 'val' key
     if "names" not in data and "nc" not in data:
         raise SyntaxError(emojis(f"{dataset} key missing ❌.\n either 'names' or 'nc' are required in all data YAMLs."))
+    if _is_compact_multitask_hierarchy(data):
+        _normalize_compact_multitask_hierarchy(data, dataset)
     if "names" in data and "nc" in data and \
         (len(data["names"]) != len(data["nc"]) or \
         not all(len(names) == nci for names, nci in zip(data["names"], data["nc"]))):

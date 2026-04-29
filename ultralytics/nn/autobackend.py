@@ -618,6 +618,8 @@ class AutoBackend(nn.Module):
             names = default_class_names(data)
 
         names = check_class_names(names)
+        if "main_head" not in locals():
+            main_head = int(getattr(model, "main_head", 0)) if "model" in locals() else 0
 
         # Disable gradients
         if pt:

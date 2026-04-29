@@ -785,6 +785,8 @@ class v8DetectionLoss:
         iou_ratio: float = 0.5,
         dependency_loss: bool = False,
         child_parent_map: dict | None = None,
+        task_schema: dict | None = None,
+        ignore_class: dict | None = None,
         verbose: bool = True,
     ):  # model must be de-paralleled
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings."""
@@ -794,6 +796,19 @@ class v8DetectionLoss:
         self.nc: list[int] = m.nc if isinstance(m.nc, list) else [m.nc]
         self.n_tasks = len(self.nc)
         assert self.n_tasks >= 1, "nc must be at least 1."
+        self.task_schema = task_schema or getattr(model, "task_schema", None) or {}
+        self.main_head = int(self.task_schema.get("main_head", getattr(model, "main_head", 0)))
+        if not 0 <= self.main_head < self.n_tasks:
+            raise ValueError(f"main_head={self.main_head} is outside model head range 0-{self.n_tasks - 1}")
+        self.main_offset = sum(self.nc[:self.main_head])
+        raw_parents = self.task_schema.get("hierarchy_parent_heads")
+        self.hierarchy_parent_heads = (
+            [int(p) for p in raw_parents]
+            if raw_parents is not None
+            else [-1] + list(range(self.n_tasks - 1))
+        )
+        raw_ignore = ignore_class if ignore_class is not None else self.task_schema.get("ignore_class", {})
+        self.ignore_class = {int(k): {int(c) for c in v} for k, v in (raw_ignore or {}).items()}
         
         # Per-task classification loss weights
         self.clf_loss_weights = [
@@ -824,7 +839,7 @@ class v8DetectionLoss:
 
         self.assigner = TaskAlignedAssigner(
             topk=tal_topk,
-            num_classes=self.nc[0],  # Use first task for assignment
+            num_classes=self.nc[self.main_head],
             alpha=0.5,
             beta=3.0,
             stride=self.stride.tolist() if hasattr(self.stride, 'tolist') else self.stride,
@@ -853,6 +868,16 @@ class v8DetectionLoss:
         # Per-task cls loss weights (higher weight = more gradient for that task).
         # Normalized so sum == n_tasks to preserve total cls loss magnitude.
         if task_loss_weights is not None and self.n_tasks > 1:
+            if (
+                self.task_schema
+                and len(task_loss_weights) == len(self.task_schema.get("semantic_tasks", []))
+                and len(task_loss_weights) != self.n_tasks
+            ):
+                semantic_tasks = list(self.task_schema["semantic_tasks"])
+                task_loss_weights = [
+                    task_loss_weights[semantic_tasks.index(flat_info["task"])]
+                    for flat_info in self.task_schema["flat_to_semantic"]
+                ]
             assert len(task_loss_weights) == self.n_tasks, (
                 f"task_loss_weights length {len(task_loss_weights)} != n_tasks {self.n_tasks}"
             )
@@ -914,7 +939,12 @@ class v8DetectionLoss:
         norm_map = {int(k): v for k, v in raw_map.items()}
 
         self.child_parent_maps = {}
-        for level in range(1, self.n_tasks):
+        expected_levels = (
+            [i for i, parent in enumerate(self.hierarchy_parent_heads) if int(parent) >= 0]
+            if self.task_schema
+            else range(1, self.n_tasks)
+        )
+        for level in expected_levels:
             if level not in norm_map:
                 LOGGER.warning(
                     f"{colorstr('Dependency Loss')}: No mapping for level {level} in child_parent_map."
@@ -952,7 +982,7 @@ class v8DetectionLoss:
         Returns:
             Scalar penalty value.
         """
-        if task_idx == 0 or task_idx not in self.child_parent_maps:
+        if task_idx == 0 or task_idx not in self.child_parent_maps or parent_target_scores is None:
             return torch.tensor(0.0, device=pred_scores.device)
 
         parent_map = self.child_parent_maps[task_idx]  # (nc_child,) -> parent cls in level-1
@@ -1079,10 +1109,10 @@ class v8DetectionLoss:
         # GT (not just the topk-aligned ones); the embedding loss uses that to get many
         # same-tag positive pairs per object.
         assigner_out = self.assigner(
-            pred_scores[..., :self.nc[0]].detach().sigmoid(),
+            pred_scores[..., self.main_offset : self.main_offset + self.nc[self.main_head]].detach().sigmoid(),
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
             anchor_points * stride_tensor,
-            gt_labels[..., 0, None],
+            gt_labels[..., self.main_head, None],
             gt_bboxes,
             mask_gt,
             return_reid=self.has_embed,
@@ -1098,7 +1128,7 @@ class v8DetectionLoss:
         target_scores_sum, offset = max(norm_align_metric.sum(), 1), 0
 
         # Cls loss - iterate over each classification task/head
-        prev_target_scores_task = None
+        target_scores_by_task = [None] * self.n_tasks
         for task_idx, (cls_loss_fn, n_cls_task) in enumerate(zip(self.cls_losses, self.nc)):
             pred_scores_task = pred_scores[..., offset: offset + n_cls_task]
 
@@ -1110,8 +1140,15 @@ class v8DetectionLoss:
             )
 
             target_scores_task = target_scores_task * norm_align_metric
+            ignored_classes = self.ignore_class.get(task_idx)
+            if ignored_classes:
+                ignored = torch.zeros_like(target_labels_task, dtype=torch.bool)
+                for cls_idx in ignored_classes:
+                    ignored |= target_labels_task == cls_idx
+                valid_cls_mask = (~ignored).unsqueeze(-1)
+                target_scores_task = target_scores_task * valid_cls_mask
 
-            task_cls_loss = cls_loss_fn(
+            task_cls_loss_raw = cls_loss_fn(
                 pred_scores=pred_scores_task,
                 gt_scores=target_scores_task,
                 pred_bboxes=pred_bboxes,
@@ -1119,14 +1156,23 @@ class v8DetectionLoss:
                 fg_mask=fg_mask,
                 anchor_points=anchor_points,
                 stride_tensor=stride_tensor,
-            ).sum() / target_scores_sum
+            )
+            if ignored_classes:
+                task_cls_loss_raw = task_cls_loss_raw * valid_cls_mask
+            task_cls_loss = task_cls_loss_raw.sum() / target_scores_sum
+            target_scores_by_task[task_idx] = target_scores_task
 
             # Hierarchical dependency penalty (levels > 0) in its own slot
-            if self.dependency_loss and task_idx > 0:
+            parent_idx = (
+                int(self.hierarchy_parent_heads[task_idx])
+                if task_idx < len(self.hierarchy_parent_heads)
+                else task_idx - 1
+            )
+            if self.dependency_loss and parent_idx >= 0 and task_idx in self.child_parent_maps:
                 dep_penalty = self._compute_dependency_penalty(
                     pred_scores,
                     target_scores_task,
-                    prev_target_scores_task,
+                    target_scores_by_task[parent_idx],
                     offset,
                     task_idx,
                 )
@@ -1136,7 +1182,6 @@ class v8DetectionLoss:
 
             loss[self.cls_idx] += task_cls_loss * self.task_loss_weights[task_idx]
 
-            prev_target_scores_task = target_scores_task
             offset += n_cls_task
 
         # Bbox loss
@@ -1187,9 +1232,9 @@ class v8DetectionLoss:
         loss[self.cls_idx] *= self.hyp.cls / len(self.nc)
         loss[self.dfl_idx] *= self.hyp.dfl
         if self.dependency_loss:
-            # dep accumulates over n_tasks-1 levels (skip root), so divide by that count
+            # dep accumulates only over configured hierarchy edges, not auxiliary heads.
             # to keep the per-level magnitude on the same scale as cls.
-            loss[self.dep_idx] *= self.hyp.dep / max(len(self.nc) - 1, 1)
+            loss[self.dep_idx] *= self.hyp.dep / max(len(self.child_parent_maps or {}), 1)
         if self.has_embed:
             loss[self.reid_idx] *= self.hyp.reid
 

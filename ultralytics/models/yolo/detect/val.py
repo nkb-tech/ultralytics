@@ -87,7 +87,8 @@ class DetectionValidator(BaseValidator):
         self.names = model.names
         self.nc = [len(d) for d in self.names]
         self.num_tasks = len(self.nc)
-        self.class_map = converter.coco80_to_coco91_class() if self.is_coco else list(range(self.nc[0]))
+        self.main_head = int(getattr(model, "main_head", 0))
+        self.class_map = converter.coco80_to_coco91_class() if self.is_coco else list(range(self.nc[self.main_head]))
         self.args.save_json |= (self.is_coco or self.is_lvis) and not self.training
 
         # Per-task metrics and confusion matrices
@@ -216,6 +217,7 @@ class DetectionValidator(BaseValidator):
             agnostic=self.args.single_cls or self.args.agnostic_nms,
             max_det=self.args.max_det,
             nc=[1] if self.args.single_cls else self.nc,
+            main_head=0 if self.args.single_cls else self.main_head,
             end2end=self.end2end,
             rotated=self.args.task == "obb",
             multi_label=True,
@@ -479,6 +481,7 @@ class DetectionValidator(BaseValidator):
                 agnostic=self.args.single_cls or self.args.agnostic_nms,
                 max_det=self.args.max_det,
                 nc=self.nc,
+                main_head=self.main_head,
                 nms_strategy=self.nms_strategy,
             )
             # Aggregated predictions are always in multitask layout (from raw one2many/one2one

@@ -87,7 +87,12 @@ class YOLODataset(BaseDataset):
         desc = f"{desc_prefix}..."
         total = len(self.im_files)
         nkpt, ndim = self.data.get("kpt_shape", (0, 0))
-        num_cls_cols = 1 if self.single_cls else (len(self.nc) if isinstance(self.nc, (list, tuple)) else 1)
+        task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+        num_cls_cols = (
+            1 if self.single_cls
+            else len(task_schema.get("label_nc", [])) if task_schema
+            else (len(self.nc) if isinstance(self.nc, (list, tuple)) else 1)
+        )
         if self.use_keypoints and (nkpt <= 0 or ndim not in {2, 3}):
             raise ValueError(
                 "'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
@@ -107,6 +112,7 @@ class YOLODataset(BaseDataset):
                     repeat(ndim),
                     repeat(self.single_cls),
                     repeat(self.nc),
+                    repeat(task_schema),
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
@@ -161,6 +167,7 @@ class YOLODataset(BaseDataset):
         if nf == 0:
             LOGGER.warning(f"{self.prefix}WARNING ⚠️ No labels found in {path}. {HELP_URL}")
         x["hash"] = get_hash(self.label_files + self.im_files)
+        x["task_schema"] = self.data.get("task_schema") if isinstance(self.data, dict) else None
         x["results"] = nf, nm, ne, ncpt, len(self.im_files)
         x["msgs"] = msgs  # warnings
         save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
@@ -174,6 +181,7 @@ class YOLODataset(BaseDataset):
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
             assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
             assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash
+            assert cache.get("task_schema") == (self.data.get("task_schema") if isinstance(self.data, dict) else None)
         except (FileNotFoundError, AssertionError, AttributeError):
             cache, exists = self.cache_labels(cache_path), False  # run cache ops
 
@@ -187,7 +195,7 @@ class YOLODataset(BaseDataset):
                 LOGGER.info("\n".join(cache["msgs"]))  # display warnings
 
         # Read cache
-        [cache.pop(k) for k in ("hash", "version", "msgs")]  # remove items
+        [cache.pop(k, None) for k in ("hash", "version", "msgs", "task_schema")]  # remove items
         labels = cache["labels"]
         if not labels:
             LOGGER.warning(f"WARNING ⚠️ No images found in {cache_path}, training may not work correctly. {HELP_URL}")

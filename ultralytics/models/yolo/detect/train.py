@@ -114,6 +114,8 @@ class DetectionTrainer(BaseTrainer):
         """Attach nc, names, args, and the parsed dataset dict (with hierarchy metadata) to the model."""
         self.model.nc = [1] if self.args.single_cls else self.data["nc"]
         self.model.names = [{0: 0}] if self.args.single_cls else self.data["names"]
+        self.model.task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+        self.model.main_head = 0 if self.args.single_cls else self.data.get("task_schema", {}).get("main_head", 0)
         self.model.args = self.args
         if getattr(self.model, "end2end"):
             self.model.set_head_attr(max_det=self.args.max_det)
@@ -122,12 +124,21 @@ class DetectionTrainer(BaseTrainer):
         """Return a YOLO detection model."""
         if isinstance(cfg, (str, Path)):
             cfg = yaml_model_load(cfg)
+        if isinstance(cfg, dict):
+            cfg = dict(cfg)
+            if getattr(self.args, "hierarchical", False):
+                cfg["hierarchical"] = True
+            task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+            if task_schema:
+                cfg["hierarchy_parent_heads"] = task_schema.get("hierarchy_parent_heads")
 
         model = DetectionModel(
             cfg,
             nc=[1] if self.args.single_cls else self.data["nc"],
             verbose=verbose and RANK == -1,
         )
+        model.task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+        model.main_head = 0 if self.args.single_cls else self.data.get("task_schema", {}).get("main_head", 0)
 
         # Materialize the Re-ID head BEFORE loading weights.
         if self.reid_dim and not getattr(model.model[-1], "embed_dim", 0):

@@ -47,6 +47,7 @@ class DetectionPredictor(BasePredictor):
                 self.args.iou,
                 agnostic=self.args.agnostic_nms or self.is_multitask,
                 nc=self.nc,
+                main_head=self.main_head,
                 max_det=self.args.max_det,
                 classes=self.args.classes,
                 end2end=getattr(self.model, "end2end", False),
@@ -158,6 +159,7 @@ class DetectionPredictor(BasePredictor):
                     preds, self.args.conf, self.args.iou,
                     agnostic=self.args.agnostic_nms or self.is_multitask,
                     max_det=self.args.max_det, classes=self.args.classes, nc=self.nc,
+                    main_head=self.main_head,
                     end2end=getattr(self.model, "end2end", False),
                     rotated=self.args.task == "obb",
                 )[0]
@@ -205,6 +207,7 @@ class DetectionPredictor(BasePredictor):
             agnostic=self.args.agnostic_nms or self.is_multitask,
             max_det=self.args.max_det, classes=self.args.classes,
             nc=self.nc, nms_strategy=nms_strategy,
+            main_head=self.main_head,
             end2end=getattr(self.model, "end2end", False),
             rotated=self.args.task == "obb",
         )[0]

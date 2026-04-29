@@ -1199,6 +1199,11 @@ def plot_labels(
 
     # Plot dataset labels
     LOGGER.info(f"Plotting labels to {save_dir / 'labels.jpg'}... ")
+    if boxes.size == 0 or cls.size == 0:
+        LOGGER.warning("WARNING ⚠️ No labels available for labels plot, skipping labels.jpg generation.")
+        return
+    if cls.ndim == 1:
+        cls = cls[:, None]
     num_tasks = cls.shape[1]
 
     boxes = boxes[:1000000]  # limit to 1M boxes
@@ -1213,10 +1218,18 @@ def plot_labels(
 
     # Matplotlib labels
     _, axs = plt.subplots(ncols=3, nrows=num_rows, figsize=(8, 8), tight_layout=True)
+    axs = np.atleast_2d(axs)
     for i in range(num_tasks):
         cls_i = cls[..., i]
         names_i = list(names[i].values())
-        nc = int(cls_i.max() + 1)
+        if cls_i.size == 0:
+            axs[tmp_i][tmp_j].set_visible(False)
+            tmp_j += 1
+            if tmp_j == 3:
+                tmp_i += 1
+                tmp_j = 0
+            continue
+        nc = max(int(cls_i.max() + 1), len(names_i))
         y = axs[tmp_i][tmp_j].hist(cls_i, bins=np.linspace(0, nc, nc + 1) - 0.5, rwidth=0.8)
         for i in range(nc):
             y[2].patches[i].set_color([x / 255 for x in colors(i)])
@@ -1233,7 +1246,7 @@ def plot_labels(
             tmp_j = 0
 
     if num_tasks % 3 != 0:
-        for j in range(tmp_j, num_rows + 1):
+        for j in range(tmp_j, 3):
             axs[tmp_i][j].set_visible(False)
     
     # Histograms

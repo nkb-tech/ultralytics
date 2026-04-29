@@ -374,6 +374,17 @@ class BaseTrainer:
                 # Get clf_loss_weights from args if provided
                 if hasattr(self.args, 'clf_loss_weights') and self.args.clf_loss_weights is not None:
                     clf_loss_weights = self.args.clf_loss_weights
+                    task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+                    if (
+                        isinstance(clf_loss_weights, list)
+                        and task_schema
+                        and len(clf_loss_weights) == len(task_schema.get("label_nc", []))
+                        and len(clf_loss_weights) != len(nc_list)
+                    ):
+                        expanded_weights = [[1.0] * nc for nc in nc_list]
+                        for label_col, flat_head in enumerate(task_schema.get("source_label_heads", [])):
+                            expanded_weights[int(flat_head)] = clf_loss_weights[label_col]
+                        clf_loss_weights = expanded_weights
                     # Validate and convert to list of lists if needed
                     if isinstance(clf_loss_weights, list):
                         # Validate number of weights matches number of classes
@@ -397,7 +408,7 @@ class BaseTrainer:
                                     )
                                     valid = False
                                     break
-                                if not all(isinstance(w, (float)) and w > 0 for w in task_weights):
+                                if not all(isinstance(w, (float, int)) and w > 0 for w in task_weights):
                                     LOGGER.warning(
                                         f"WARNING Some class weights are not positive for task {task_idx}, "
                                         "using automatic calculation"
@@ -418,14 +429,22 @@ class BaseTrainer:
 
         # Initialize criterion
         child_parent_map = self.data.get("child_parent_map") if isinstance(self.data, dict) else None
+        task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+        ignore_class = self.data.get("ignore_class") if isinstance(self.data, dict) else None
         if world_size > 1:
             criterion = self.model.module.init_criterion(
-                clf_loss_weights=clf_loss_weights, child_parent_map=child_parent_map
+                clf_loss_weights=clf_loss_weights,
+                child_parent_map=child_parent_map,
+                task_schema=task_schema,
+                ignore_class=ignore_class,
             )
             self.model.module.criterion = criterion
         else:
             criterion = self.model.init_criterion(
-                clf_loss_weights=clf_loss_weights, child_parent_map=child_parent_map
+                clf_loss_weights=clf_loss_weights,
+                child_parent_map=child_parent_map,
+                task_schema=task_schema,
+                ignore_class=ignore_class,
             )
             self.model.criterion = criterion
 
@@ -647,6 +666,7 @@ class BaseTrainer:
         all_weights = []
         # Collect all class counts for all tasks at once
         all_counts = [np.zeros(nc, dtype=np.float32) for nc in nc_list]
+        ignore_class = self.data.get("ignore_class", {}) if isinstance(self.data, dict) else {}
         for label in self.train_loader.dataset.labels:
             if 'cls' in label:
                 cls_data = label['cls']  # Shape: (n_objects, n_tasks) or (n_objects,)
@@ -658,6 +678,8 @@ class BaseTrainer:
                     cls_for_task = cls_data[:, task_idx].astype(int)
                     # Count valid class instances for this task
                     valid_mask = (cls_for_task >= 0) & (cls_for_task < nc)
+                    for ignored_cls in ignore_class.get(task_idx, []):
+                        valid_mask &= cls_for_task != int(ignored_cls)
                     valid_classes = cls_for_task[valid_mask]
                     # Count occurrences 
                     if len(valid_classes) > 0:

@@ -334,6 +334,7 @@ class BasePredictor:
         names = getattr(self.model, "names", None)
         self.is_multitask = len(names) > 1 if names else False
         self.nc = [len(nc) for nc in names] if names else [1]
+        self.main_head = int(getattr(self.model, "main_head", getattr(getattr(self.model, "model", None), "main_head", 0)))
 
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half

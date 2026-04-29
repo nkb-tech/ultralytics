@@ -182,6 +182,7 @@ def non_max_suppression(
     in_place=True,
     rotated=False,
     end2end=False,
+    main_head=0,
 ):
     """
     Perform non-maximum suppression (NMS) on a set of boxes, with support for masks and multiple labels per box.
@@ -224,11 +225,16 @@ def non_max_suppression(
         prediction = prediction[0]  # select only inference output
     if classes is not None:
         classes = torch.tensor(classes, device=prediction.device)
+    main_head = int(main_head)
+    if not 0 <= main_head < len(nc):
+        raise ValueError(f"main_head={main_head} is outside task head range 0-{len(nc) - 1}")
 
     if prediction.shape[-1] == 6 or prediction.shape[-2] == max_det or end2end:  # end-to-end model (BNC, i.e. 1,300,6)
-        output = [pred[pred[:, 4] > conf_thres] for pred in prediction]
+        main_conf_col = 4 + 2 * main_head if prediction.shape[-1] >= 4 + 2 * len(nc) else 4
+        main_cls_col = main_conf_col + 1
+        output = [pred[pred[:, main_conf_col] > conf_thres] for pred in prediction]
         if classes is not None:
-            output = [pred[(pred[:, 5:6] == classes).any(1)] for pred in output]
+            output = [pred[(pred[:, main_cls_col : main_cls_col + 1] == classes).any(1)] for pred in output]
         # nms for yolov10
         # output = [
         #     pred[torchvision.ops.nms(pred[:, :4], pred[:, 4], iou_thres)]
@@ -239,9 +245,10 @@ def non_max_suppression(
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
     nm = prediction.shape[1] - 4 - sum(nc)
 
-    # candidate boxes determined by first head confidence only
-    first_nc = nc[0] or nm
-    xc = prediction[:, 4: 4 + first_nc].amax(1) > conf_thres
+    # Candidate boxes are determined by the configured main head confidence.
+    main_nc = nc[main_head] or nm
+    main_offset = 4 + sum(nc[:main_head])
+    xc = prediction[:, main_offset : main_offset + main_nc].amax(1) > conf_thres
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
@@ -286,7 +293,7 @@ def non_max_suppression(
             start += nc_i
         mask = x[:, start:]
 
-        conf_mask = confs[0].view(-1) > conf_thres
+        conf_mask = confs[main_head].view(-1) > conf_thres
         box = box[conf_mask]
         mask = mask[conf_mask]
         confs = [c[conf_mask] for c in confs]
@@ -294,31 +301,33 @@ def non_max_suppression(
 
         # final layout becomes [box, conf0,cls0, conf1,cls1, ..., mask]
         x = torch.cat([box] + sum([[c, j] for c, j in zip(confs, clss)], []) + [mask], 1)
-        conf, j = confs[0].view(-1), clss[0].view(-1)
+        main_conf_col = 4 + 2 * main_head
+        main_cls_col = 5 + 2 * main_head
+        conf, j = x[:, main_conf_col], x[:, main_cls_col]
 
         # Filter by class
         if classes is not None:
             x = x[(j.view(-1, 1) == classes).any(1)]
-            conf = x[:, 4]
-            j = x[:, 5]
+            conf = x[:, main_conf_col]
+            j = x[:, main_cls_col]
 
         # Check shape
         n = x.shape[0]  # number of boxes
         if not n:  # no boxes
             continue
         if n > max_nms:  # excess boxes
-            x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
-            conf = x[:, 4]
-            j = x[:, 5]
+            x = x[x[:, main_conf_col].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
+            conf = x[:, main_conf_col]
+            j = x[:, main_cls_col]
 
         if agnostic:
             c = torch.zeros_like(j.view(-1, 1))  # No offset for agnostic NMS
         else:
             if len(nc) > 1:  # multi-task
-                unique_id = j.view(-1, 1)
+                unique_id = x[:, 5].view(-1, 1)
                 multiplier = nc[0]
                 for head_idx in range(1, len(nc)):
-                    attr_class = clss[head_idx].view(-1, 1)
+                    attr_class = x[:, 5 + 2 * head_idx].view(-1, 1)
                     unique_id = unique_id + attr_class * multiplier
                     multiplier *= nc[head_idx]
                 c = unique_id * max_wh

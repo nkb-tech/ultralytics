@@ -93,6 +93,7 @@ class Detect(nn.Module):
         ch: Tuple[int, ...] = (),
         embed_dim: int = 0,
         hierarchical: bool = False,
+        hierarchy_parent_heads: list[int] | None = None,
     ):
         """Initialize the YOLO detection layer with specified number of classes and channels.
 
@@ -116,6 +117,11 @@ class Detect(nn.Module):
         self.stride = torch.zeros(self.nl)  # strides computed during build
         self._end2end = end2end
         self._hierarchical = hierarchical and len(nc) > 1
+        if hierarchy_parent_heads is None:
+            hierarchy_parent_heads = [-1] + list(range(len(nc) - 1))
+        self.hierarchy_parent_heads = [int(p) if p is not None else -1 for p in hierarchy_parent_heads]
+        if len(self.hierarchy_parent_heads) != len(nc):
+            raise ValueError("hierarchy_parent_heads length must match nc length")
 
         # Channel dimensions
         c2 = max((16, ch[0] // 4, self.reg_max * 4))
@@ -130,13 +136,14 @@ class Detect(nn.Module):
             for i in range(len(nc))
         )
 
-        # Hierarchical late fusion: 1x1 conv that merges current level + previous level class logits
+        # Hierarchical late fusion: 1x1 conv that merges current level + configured parent logits.
         if self._hierarchical:
-            self.cv3_fuse = nn.ModuleList(
-                nn.ModuleList(
-                    nn.Conv2d(nc[i] + nc[i - 1], nc[i], 1) for _ in ch
-                )
-                for i in range(1, len(nc))
+            self.cv3_fuse = nn.ModuleDict(
+                {
+                    str(i): nn.ModuleList(nn.Conv2d(nc[i] + nc[parent], nc[i], 1) for _ in ch)
+                    for i, parent in enumerate(self.hierarchy_parent_heads)
+                    if parent >= 0
+                }
             )
 
         # Build embedding head (emb) for Re-ID — single head shared between one2many and one2one in end2end models
@@ -250,23 +257,27 @@ class Detect(nn.Module):
         boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
 
         if self.hierarchical:
-            # hYOLO Detect4: fuse 1x1 takes concat(current_raw_logits, prev_raw_logits),
-            # not the previous level's fused output (see hyolo Detect4 forward).
+            # hYOLO Detect4: fuse current raw logits with the configured parent raw logits.
             is_one2one = hasattr(self, "one2one_cv3") and cls_head is self.one2one_cv3
             fuse_heads = (
                 getattr(self, "one2one_cv3_fuse", None) if is_one2one
                 else getattr(self, "cv3_fuse", None)
             )
             scores_list = []
-            prev_raw = None
+            raw_by_task = []
+            parents = getattr(self, "hierarchy_parent_heads", [-1] + list(range(len(cls_head) - 1)))
             for task_idx, task_head in enumerate(cls_head):
                 feat_maps = []
                 raw_maps = []
                 for i in range(self.nl):
                     raw = task_head[i](x[i])
                     raw_maps.append(raw)
-                    if task_idx > 0 and fuse_heads is not None:
-                        feat = fuse_heads[task_idx - 1][i](torch.cat([raw, prev_raw[i]], dim=1))
+                    parent = int(parents[task_idx]) if task_idx < len(parents) else task_idx - 1
+                    if parent >= 0 and fuse_heads is not None:
+                        if isinstance(fuse_heads, nn.ModuleDict):
+                            feat = fuse_heads[str(task_idx)][i](torch.cat([raw, raw_by_task[parent][i]], dim=1))
+                        else:  # Backward compatibility for checkpoints with sequential adjacent fusion.
+                            feat = fuse_heads[task_idx - 1][i](torch.cat([raw, raw_by_task[parent][i]], dim=1))
                     else:
                         feat = raw
                     feat_maps.append(feat)
@@ -274,7 +285,7 @@ class Detect(nn.Module):
                     [fm.view(bs, -1, fm.shape[-2] * fm.shape[-1]) for fm in feat_maps], dim=-1
                 )
                 scores_list.append(task_scores)
-                prev_raw = raw_maps
+                raw_by_task.append(raw_maps)
             scores = torch.cat(scores_list, dim=1)
         else:
             scores_list = []
