@@ -437,6 +437,7 @@ class DetectionModel(BaseModel):
             task_loss_weights=self.args.task_loss_weights,
             dependency_loss=getattr(self.args, "dependency_loss", False),
             child_parent_map=child_parent_map,
+            reid_loss=getattr(self.args, "reid_loss", "supcon"),
         )
 
         return E2ELoss(self, v8DetectionLoss, **kwargs) if getattr(self, "end2end", False) else v8DetectionLoss(self, **kwargs)
@@ -1278,7 +1279,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                    Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect, v10Pose, v10Segment):
             args.extend([reg_max, end2end, [ch[x] for x in f]])
             if m is Detect:
-                args.append(hierarchical)
+                args.extend([0, hierarchical])
             m.legacy = legacy
             if m in (Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Segment_LADH, Segment_LSCSBD):
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)

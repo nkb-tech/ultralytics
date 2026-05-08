@@ -233,13 +233,22 @@ class Detect(nn.Module):
         # RKNN export: return raw outputs per scale/task as ordered dict
         if self.export and self.format == "rknn":
             y = dict()
+            is_one2one = hasattr(self, "one2one_cv3") and cls_head is self.one2one_cv3
+            fuse_heads = (
+                getattr(self, "one2one_cv3_fuse", None) if is_one2one
+                else getattr(self, "cv3_fuse", None)
+            ) if self.hierarchical else None
             for i in range(self.nl):
                 y[f"box_p{i}"] = box_head[i](x[i])
+                prev_raw = None
                 for t, task_head in enumerate(cls_head):
+                    raw = task_head[i](x[i])
+                    cls = fuse_heads[t - 1][i](torch.cat([raw, prev_raw], dim=1)) if t > 0 and fuse_heads is not None else raw
+                    prev_raw = raw
                     if self.end2end:
-                        y[f"cls_t{t}_p{i}"] = task_head[i](x[i])
+                        y[f"cls_t{t}_p{i}"] = cls
                     else:
-                        cls = task_head[i](x[i]).sigmoid_()
+                        cls = cls.sigmoid_()
                         y[f"cls_t{t}_p{i}"] = cls
                         y[f"obj_t{t}_p{i}"] = cls.sum(dim=1, keepdim=True).clamp_(0, 1)
                 if emb_head is not None:

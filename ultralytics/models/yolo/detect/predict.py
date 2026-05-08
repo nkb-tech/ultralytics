@@ -93,7 +93,9 @@ class DetectionPredictor(BasePredictor):
                 preds_list = [self._sahi_single_image(im0, idx, *args, **kwargs)
                               for idx, im0 in enumerate(im0s)]
 
-                self._build_results(preds_list, im0s, paths, s)
+                # Preprocess the batch once for plotting/saving in write_results()
+                im = self.preprocess(im0s)
+                self._build_results(preds_list, im, im0s, paths, s)
                 self.run_callbacks("on_predict_batch_end")
                 yield from self.results
 
@@ -209,7 +211,7 @@ class DetectionPredictor(BasePredictor):
             rotated=self.args.task == "obb",
         )[0]
 
-    def _build_results(self, preds_list, im0s, paths, s):
+    def _build_results(self, preds_list, im, im0s, paths, s):
         """Build Results objects and write output for a batch."""
         im0s_list = ops.convert_torch2numpy_batch(im0s) if not isinstance(im0s, list) else im0s
         self._orig_imgs = im0s_list
@@ -224,11 +226,7 @@ class DetectionPredictor(BasePredictor):
             self.results[i].speed = {k: self.profilers[j].dt * 1e3 / n
                                      for j, k in enumerate(("preprocess", "inference", "postprocess"))}
             if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
-                orig_img = self._orig_imgs[i]
-                bit_depth = getattr(self.args, "image_bit_depth", 8)
-                norm = 65_535.0 if bit_depth == 16 else 255.0
-                orig_t = torch.from_numpy(orig_img).permute(2, 0, 1).unsqueeze(0).float().to(self.device) / norm
-                s[i] += self.write_results(i, Path(paths[i]), orig_t, s)
+                s[i] += self.write_results(i, Path(paths[i]), im, s)
 
         if self.args.verbose:
             LOGGER.info("\n".join(s))

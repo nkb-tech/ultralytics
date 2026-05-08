@@ -22,6 +22,7 @@ from ultralytics.utils import (
     DATASETS_DIR,
     LOGGER,
     NUM_THREADS,
+    RANK,
     ROOT,
     SETTINGS_FILE,
     TQDM,
@@ -186,6 +187,8 @@ def verify_image_label(args, min_imgsz=9):
                 _, i = np.unique(lb, axis=0, return_index=True)
                 if len(i) < nl:
                     lb = lb[i]
+                    if tags is not None:
+                        tags = tags[i]
                     if segments:
                         segments = [segments[x] for x in i]
                     msg = f"{prefix}{im_file}: {nl - len(i)} duplicate labels removed"
@@ -292,7 +295,59 @@ def find_dataset_yaml(path: Path) -> Path:
     return files[0]
 
 
-def check_det_dataset(dataset, autodownload=True):
+def _remove_dataset_cache_files(data: dict) -> int:
+    """Remove dataset cache files under the resolved dataset roots."""
+    if RANK not in {-1, 0}:  # DDP workers should not delete caches after rank 0 recreates them.
+        return 0
+
+    roots = []
+
+    def add_root(path):
+        if not path:
+            return
+        path = Path(path).resolve()
+        if not path.exists():
+            return
+        if path.is_file():
+            path = path.parent
+        roots.append(path)
+        if path.name == "images":
+            roots.append(path.parent)
+
+    add_root(data.get("path"))
+    for k in "train", "val", "test", "minival":
+        paths = data.get(k)
+        if paths:
+            for path in paths if isinstance(paths, list) else [paths]:
+                add_root(path)
+
+    unique_roots = []
+    for root in sorted(set(roots), key=lambda x: len(x.parts)):
+        if not any(root == parent or parent in root.parents for parent in unique_roots):
+            unique_roots.append(root)
+
+    cache_files = set()
+    for root in unique_roots:
+        for pattern in ("*.cache", "*.cache.npy"):
+            with contextlib.suppress(OSError):
+                cache_files.update(root.rglob(pattern))
+
+    deleted = 0
+    for cache_file in sorted(cache_files):
+        try:
+            cache_file.unlink()
+            deleted += 1
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            LOGGER.warning(f"WARNING ⚠️ Could not remove dataset cache {cache_file}: {e}")
+
+    if deleted:
+        LOGGER.info(f"Removed {deleted} dataset cache file{'s' if deleted != 1 else ''}.")
+    return deleted
+
+
+def check_det_dataset(dataset, autodownload=True, rm_cache=False):
     """
     Download, verify, and/or unzip a dataset if not found locally.
 
@@ -303,6 +358,8 @@ def check_det_dataset(dataset, autodownload=True):
     Args:
         dataset (str): Path to the dataset or dataset descriptor (like a YAML file).
         autodownload (bool, optional): Whether to automatically download the dataset if not found. Defaults to True.
+        rm_cache (bool, optional): Whether to remove existing dataset cache files before scanning labels.
+            Defaults to False.
 
     Returns:
         (dict): Parsed dataset information and paths.
@@ -372,6 +429,9 @@ def check_det_dataset(dataset, autodownload=True):
                 data[k] = str(x)
             else:
                 data[k] = [str((path / x).resolve()) for x in data[k]]
+
+    if rm_cache:
+        _remove_dataset_cache_files(data)
 
     # Parse YAML
     val, s = (data.get(x) for x in ("val", "download"))

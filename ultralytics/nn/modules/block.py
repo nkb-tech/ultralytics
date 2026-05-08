@@ -1123,11 +1123,32 @@ class Attention(nn.Module):
             [self.key_dim, self.key_dim, self.head_dim], dim=2
         )
 
-        attn = (q.transpose(-2, -1) @ k) * self.scale
+        attn = q.transpose(-2, -1) @ k
+        if self.scale != 1.0:
+            attn = attn * self.scale
         attn = attn.softmax(dim=-1)
-        x = (v @ attn.transpose(-2, -1)).view(B, C, H, W) + self.pe(v.reshape(B, C, H, W))
+        x = (attn @ v.transpose(-2, -1)).transpose(-2, -1).contiguous().view(B, C, H, W)
+        x = x + self.pe(v.reshape(B, C, H, W))
         x = self.proj(x)
         return x
+
+    def fuse_query_scale(self):
+        """Fold attention scale into fused Q projection weights for RKNN SDPA export."""
+        if self.scale == 1.0:
+            return self
+        if hasattr(self.qkv, "bn"):
+            raise RuntimeError("Attention query scale must be folded after Conv-BN fusion.")
+
+        block = self.key_dim * 2 + self.head_dim
+        with torch.no_grad():
+            for i in range(self.num_heads):
+                start = i * block
+                end = start + self.key_dim
+                self.qkv.conv.weight[start:end].mul_(self.scale)
+                if self.qkv.conv.bias is not None:
+                    self.qkv.conv.bias[start:end].mul_(self.scale)
+        self.scale = 1.0
+        return self
 
 
 class PSABlock(nn.Module):

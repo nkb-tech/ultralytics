@@ -175,6 +175,7 @@ CFG_BOOL_KEYS = {  # boolean-only arguments
     "save_json",
     "half",
     "dnn",
+    "rm_cache",
     "plots",
     "show",
     "save_txt",

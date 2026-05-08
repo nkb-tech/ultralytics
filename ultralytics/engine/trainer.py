@@ -370,7 +370,7 @@ class BaseTrainer:
                 clf_loss_weights = torch.tensor(clf_loss_weights, device=self.device, dtype=torch.float)
             else:
                 # Get number of classes for validation
-                nc_list = self.model.model[-1].nc
+                nc_list = unwrap_model(self.model).model[-1].nc
                 # Get clf_loss_weights from args if provided
                 if hasattr(self.args, 'clf_loss_weights') and self.args.clf_loss_weights is not None:
                     clf_loss_weights = self.args.clf_loss_weights
@@ -749,7 +749,7 @@ class BaseTrainer:
                 if self.args.task == "classify":
                     data = check_cls_dataset(self.args.data)
                 else:
-                    data = check_det_dataset(self.args.data)
+                    data = check_det_dataset(self.args.data, rm_cache=self.args.rm_cache)
                 if "yaml_file" in data:
                     self.args.data = data["yaml_file"]  # for validating 'yolo train data=url.zip' usage
         except Exception as e:

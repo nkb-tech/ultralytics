@@ -354,7 +354,7 @@ class DetectionCompressor(BaseTrainer):
             if self.args.task == 'classify':
                 self.data = check_cls_dataset(self.args.data)
             elif self.args.data.split('.')[-1] in ('yaml', 'yml') or self.args.task in ('detect', 'segment', 'pose'):
-                self.data = check_det_dataset(self.args.data)
+                self.data = check_det_dataset(self.args.data, rm_cache=self.args.rm_cache)
                 if 'yaml_file' in self.data:
                     self.args.data = self.data['yaml_file']  # for validating 'yolo train data=url.zip' usage
         except Exception as e:

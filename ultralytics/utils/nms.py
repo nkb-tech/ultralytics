@@ -68,12 +68,13 @@ def non_max_suppression(
     num_tasks = len(nc)
     total_nc = sum(nc)
 
-    # Post-processed format: (batch, N, 4+2*num_tasks) with [x1, y1, x2, y2, conf0, cls0, ...]
-    # Already xyxy — must NOT go through BCN path (xywh2xyxy would corrupt coordinates).
-    # Disambiguate from BCN (batch, channels, anchors): in postprocessed, last dim (cols) < dim 1 (N);
-    # in BCN, last dim (anchors) > dim 1 (channels).
+    # Post-processed format: (batch, N, 4+2*num_tasks+extra) with [x1, y1, x2, y2, conf0, cls0, ...].
+    # Raw model output is BCN: (batch, channels, anchors). Some models carry `end2end=True` metadata while still
+    # returning BCN from the PyTorch forward path, so layout must be inferred from shape instead of metadata alone.
     n_cols = prediction.shape[-1]
-    is_postprocessed = ((n_cols == 4 + 2 * num_tasks) and n_cols < prediction.shape[1]) or end2end
+    min_raw_channels = 4 + total_nc
+    is_raw_bcn = prediction.ndim == 3 and prediction.shape[1] >= min_raw_channels and prediction.shape[2] > prediction.shape[1]
+    is_postprocessed = prediction.ndim == 3 and n_cols >= 4 + 2 * num_tasks and not is_raw_bcn
 
     if is_postprocessed:
         output = []

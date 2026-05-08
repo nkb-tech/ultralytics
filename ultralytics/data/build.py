@@ -358,17 +358,16 @@ def build_dataloader(
 
     kwargs = dict(batch_sampler=None, sampler=None)
     
-    if is_sahi and shuffle:
+    if is_sahi and shuffle and rank == -1:
         # Use SAHI-optimized sampler for better buffer efficiency
-        if rank == -1:
-            batch_sampler = SAHIBatchSampler(
-                dataset.slice_indices,
-                batch_size=batch,
-                drop_last=drop_last and len(dataset) % batch != 0,
-                shuffle=shuffle,
-            )
+        batch_sampler = SAHIBatchSampler(
+            dataset.slice_indices,
+            batch_size=batch,
+            drop_last=drop_last and len(dataset) % batch != 0,
+            shuffle=shuffle,
+        )
 
-            kwargs['batch_sampler'] = batch_sampler
+        kwargs['batch_sampler'] = batch_sampler
     else:
         # Standard sampler for non-SAHI or non-shuffle
         kwargs['sampler'] = (

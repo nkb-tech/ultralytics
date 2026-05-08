@@ -1079,6 +1079,8 @@ class MixUp(BaseMixTransform):
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
         if "tags" in labels and "tags" in labels2:
             labels["tags"] = np.concatenate([labels["tags"], labels2["tags"]], 0)
+        elif "tags" in labels and len(labels2["cls"]):
+            labels.pop("tags", None)
         return labels
 
     def __repr__(self):

@@ -122,6 +122,9 @@ class DetectionTrainer(BaseTrainer):
         """Return a YOLO detection model."""
         if isinstance(cfg, (str, Path)):
             cfg = yaml_model_load(cfg)
+        if getattr(self.args, "hierarchical", False):
+            cfg = copy(cfg)
+            cfg["hierarchical"] = True
 
         model = DetectionModel(
             cfg,

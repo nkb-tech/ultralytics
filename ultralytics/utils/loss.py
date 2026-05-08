@@ -8,6 +8,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from pytorch_metric_learning import distances, losses, miners, reducers
 
 from ultralytics.utils import LOGGER, colorstr
 from ultralytics.utils.metrics import OKS_SIGMA, RLE_WEIGHT
@@ -28,80 +29,130 @@ from .metrics import bbox_iou, probiou, WiseIoULoss, wasserstein_loss
 
 
 class MetricLearningLoss(nn.Module):
-    """Self-supervised Re-ID embedding loss (SupCon-style).
+    """Self-supervised Re-ID embedding loss using pytorch-metric-learning.
 
-    Hand-rolled supervised contrastive loss (Khosla et al., https://arxiv.org/abs/2004.11362)
-    over the unique-per-instance tags emitted by the dataset. Each anchor compares against
-    every other anchor in the batch as either same-tag positive or different-tag negative,
-    giving a much smoother gradient than triplet-margin mining. Background anchors
-    (tag <= 0) are kept as pure negatives. Embeddings are L2-normalized inside this module
-    so callers don't need to normalize first.
-
-    Magnitude normalization
-    -----------------------
-    Raw SupCon at τ=0.1 with N≈1k anchors lands at ~log(N)/τ ≈ 70 untrained, while the
-    other YOLO loss components (box/cls/dfl/dep) sit at ~0.05–0.4 in the same regime.
-    To put reid on the same magnitude scale — so ``hyp.reid = 1.0`` is consistent with
-    ``hyp.box = 1.0`` etc. without needing per-coefficient hand tuning — we divide the
-    per-anchor SupCon loss by ``log(N - 1) / τ`` (its untrained upper bound). After
-    normalization the loss is ~1.0 for random embeddings and decreases toward 0 as the
-    embedding head learns.
-
-    Args:
-        temperature: SupCon temperature τ. 0.1 is the canonical default.
-        max_samples: optional cap on anchors per step (random sub-sample when exceeded).
-            Keeps the (NxN) similarity matrix from blowing up on large batches.
+    Anchors are balanced per object tag before metric learning so large boxes do not
+    dominate. Tags <= 0 are converted to unique labels, making them negatives only.
     """
 
-    def __init__(self, temperature: float = 0.1, max_samples: int = 4096):
+    def __init__(
+        self,
+        temperature: float = 0.1,
+        max_samples: int = 4096,
+        max_samples_per_tag: int = 32,
+        max_background_samples: int = 512,
+        reid_loss: str = "supcon",
+        triplet_margin: float = 0.2,
+        triplet_weight: float = 0.5,
+        pair_loss_weight: float = 1.0,
+    ):
         super().__init__()
         self.temperature = temperature
         self.max_samples = max_samples
+        self.max_samples_per_tag = max_samples_per_tag
+        self.max_background_samples = max_background_samples
+        self.reid_loss = reid_loss.lower().replace("-", "_")
+        self.triplet_margin = triplet_margin
+        self.triplet_weight = triplet_weight
+        self.pair_loss_weight = pair_loss_weight
+        self.distance = distances.CosineSimilarity()
+        reducer = reducers.MeanReducer()
+        self.pair_loss, self.pair_miner = self._build_pair_loss(temperature, reducer)
+        self.triplet_loss = losses.TripletMarginLoss(margin=triplet_margin, distance=self.distance, reducer=reducer)
+        self.triplet_miner = miners.BatchEasyHardMiner(
+            pos_strategy="hard",
+            neg_strategy="semihard",
+            distance=self.distance,
+        )
+
+    def _build_pair_loss(self, temperature: float, reducer):
+        """Create the selected pair loss and optional miner."""
+        if self.reid_loss == "supcon":
+            return losses.SupConLoss(temperature=temperature, distance=self.distance, reducer=reducer), None
+        if self.reid_loss in {"multi_similarity", "multisimilarity", "ms"}:
+            self.reid_loss = "multi_similarity"
+            loss = losses.MultiSimilarityLoss(alpha=2, beta=50, base=0.5, distance=self.distance, reducer=reducer)
+            miner = miners.MultiSimilarityMiner(epsilon=0.1, distance=self.distance)
+            return loss, miner
+        raise ValueError("reid_loss must be 'supcon' or 'multi_similarity'")
+
+    def _sample(self, embeddings: torch.Tensor, tags: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Balance anchors per object tag and cap the total pairwise matrix size."""
+        tags = tags.view(-1)
+        idx = self._balanced_indices(tags)
+        if idx.numel() > self.max_samples:
+            idx = idx[torch.randperm(idx.numel(), device=idx.device)[: self.max_samples]]
+        return embeddings[idx], tags[idx]
+
+    def _balanced_indices(self, tags: torch.Tensor) -> torch.Tensor:
+        """Return sampled indices with per-tag limits."""
+        keep = []
+        for tag in tags.unique():
+            idx = torch.where(tags == tag)[0]
+            limit = self.max_samples_per_tag if tag > 0 else self.max_background_samples
+            if limit > 0 and idx.numel() > limit:
+                idx = idx[torch.randperm(idx.numel(), device=idx.device)[:limit]]
+            keep.append(idx)
+        return torch.cat(keep) if keep else torch.empty(0, dtype=torch.long, device=tags.device)
+
+    def _pair_loss(self, embeddings: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Compute selected pair loss."""
+        if self.pair_loss_weight <= 0:
+            return embeddings.sum() * 0.0
+        if self.reid_loss == "supcon":
+            denom = math.log(max(embeddings.shape[0] - 1, 2)) / self.temperature
+            return self.pair_loss(embeddings, labels) / denom
+        indices_tuple = self.pair_miner(embeddings, labels)
+        return (
+            self.pair_loss(embeddings, labels, indices_tuple)
+            if any(t.numel() for t in indices_tuple)
+            else embeddings.sum() * 0.0
+        )
+
+    def _triplet_loss(self, embeddings: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        """Compute hard-positive/semi-hard-negative triplet loss."""
+        if self.triplet_weight <= 0:
+            return embeddings.sum() * 0.0
+        indices_tuple = self.triplet_miner(embeddings, labels)
+        return (
+            self.triplet_loss(embeddings, labels, indices_tuple)
+            if indices_tuple[0].numel()
+            else embeddings.sum() * 0.0
+        )
+
+    @staticmethod
+    def _labels_with_unique_background(tags: torch.Tensor) -> torch.Tensor:
+        """Make tags <= 0 pure negatives by assigning each one a unique label."""
+        labels = tags.long().view(-1).clone()
+        bg = labels <= 0
+        if bg.any():
+            min_label = labels.min().clamp(max=0)
+            labels[bg] = min_label - torch.arange(1, int(bg.sum()) + 1, device=labels.device)
+        return labels
+
+    @staticmethod
+    def _has_positive_pair(labels: torch.Tensor) -> bool:
+        """Return True if at least one label appears twice."""
+        return bool((torch.bincount(labels - labels.min()).max() > 1).item()) if labels.numel() else False
 
     def forward(self, embeddings, tags, confidences=None, normalize=True):  # confidences kept for back-compat
         if embeddings.numel() == 0:
             return embeddings.sum() * 0.0
 
-        n = embeddings.shape[0]
-        if n > self.max_samples:
-            idx = torch.randperm(n, device=embeddings.device)[: self.max_samples]
-            embeddings = embeddings[idx]
-            tags = tags[idx]
-            n = self.max_samples
+        embeddings, tags = self._sample(embeddings, tags)
+        if embeddings.shape[0] < 2:
+            return embeddings.sum() * 0.0
 
         if normalize:
             embeddings = F.normalize(embeddings.float(), p=2, dim=1)
-
-        tags = tags.view(-1)
-        # Same-tag mask, exclude self pairs.
-        pos_mask = (tags.unsqueeze(0) == tags.unsqueeze(1)).float()
-        pos_mask.fill_diagonal_(0.0)
-        # Background tags (tag <= 0) act as pure negatives: they keep their negative
-        # comparisons (everyone else is anchor) but never contribute as a positive.
-        bg = (tags <= 0).float()
-        pos_mask = pos_mask * (1.0 - bg).unsqueeze(0) * (1.0 - bg).unsqueeze(1)
-
-        # Skip cleanly when no positives are available (e.g. all-unique-tags batch).
-        n_pos_per_anchor = pos_mask.sum(dim=1)
-        if n_pos_per_anchor.sum() == 0:
+        labels = self._labels_with_unique_background(tags)
+        if not self._has_positive_pair(labels):
             return embeddings.sum() * 0.0
 
-        sim = embeddings @ embeddings.t() / self.temperature
-        # Mask self-similarity in the denominator for numerical stability.
-        sim = sim - sim.detach().max()
-        logits_mask = 1.0 - torch.eye(n, device=embeddings.device, dtype=sim.dtype)
-        exp_sim = torch.exp(sim) * logits_mask
-        log_prob = sim - torch.log(exp_sim.sum(dim=1, keepdim=True).clamp_min(1e-12))
-
-        # Mean over positives per anchor; skip anchors with no positives.
-        valid_anchor = n_pos_per_anchor > 0
-        loss_per_anchor = -(pos_mask * log_prob).sum(dim=1) / n_pos_per_anchor.clamp_min(1)
-        raw = loss_per_anchor[valid_anchor].mean()
-
-        # Magnitude normalization to match box/cls/dfl/dep dynamic range.
-        # Untrained upper bound is ~log(N - 1)/τ; dividing by it puts loss in [~0, ~1].
-        denom = math.log(max(n - 1, 2)) / self.temperature
-        return raw / denom
+        return (
+            self.pair_loss_weight * self._pair_loss(embeddings, labels)
+            + self.triplet_weight * self._triplet_loss(embeddings, labels)
+        )
 
 
 class DistillationLoss(nn.Module):
@@ -785,6 +836,7 @@ class v8DetectionLoss:
         iou_ratio: float = 0.5,
         dependency_loss: bool = False,
         child_parent_map: dict | None = None,
+        reid_loss: str = "supcon",
         verbose: bool = True,
     ):  # model must be de-paralleled
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings."""
@@ -882,7 +934,7 @@ class v8DetectionLoss:
         self.embed_dim = getattr(m, "embed_dim", 0)
         self.has_embed = self.embed_dim > 0
         if self.has_embed:
-            self.embed_loss = MetricLearningLoss().to(device)
+            self.embed_loss = MetricLearningLoss(reid_loss=reid_loss).to(device)
         # Fixed-order loss layout: box, cls, dfl, [dep], [reid]
         self.loss_names = ["box", "cls", "dfl"]
         if self.dependency_loss:
@@ -924,9 +976,56 @@ class v8DetectionLoss:
             parent_indices = torch.full((self.nc[level],), -1, dtype=torch.long, device=device)
             for child_key, parent_idx in level_map.items():
                 child_idx = int(child_key)
-                if child_idx < self.nc[level]:
-                    parent_indices[child_idx] = int(parent_idx)
+                parent_idx = int(parent_idx)
+                if not (0 <= child_idx < self.nc[level]):
+                    LOGGER.warning(
+                        f"{colorstr('Dependency Loss')}: child class {child_idx} is outside level {level} "
+                        f"class range 0-{self.nc[level] - 1}; ignoring mapping."
+                    )
+                    continue
+                if not (0 <= parent_idx < self.nc[level - 1]):
+                    LOGGER.warning(
+                        f"{colorstr('Dependency Loss')}: parent class {parent_idx} for level {level} child "
+                        f"{child_idx} is outside parent level range 0-{self.nc[level - 1] - 1}; ignoring mapping."
+                    )
+                    continue
+                parent_indices[child_idx] = parent_idx
             self.child_parent_maps[level] = parent_indices
+
+    def _hierarchy_logits(
+        self,
+        pred_scores: torch.Tensor,
+        offset: int,
+        task_idx: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return parent logits, child logits, and child-to-parent map for a hierarchy level."""
+        nc_child = self.nc[task_idx]
+        nc_parent = self.nc[task_idx - 1]
+        parent_offset = offset - nc_parent
+        return (
+            pred_scores[..., parent_offset:offset],
+            pred_scores[..., offset : offset + nc_child],
+            self.child_parent_maps[task_idx],
+        )
+
+    @staticmethod
+    def _group_child_probs(child_prob: torch.Tensor, parent_map: torch.Tensor, nc_parent: int) -> torch.Tensor:
+        """Aggregate child probabilities into their parent slots with max pooling."""
+        return torch.stack(
+            [
+                child_prob[..., parent_map == parent_idx].amax(dim=-1)
+                if (parent_map == parent_idx).any()
+                else torch.zeros_like(child_prob[..., 0])
+                for parent_idx in range(nc_parent)
+            ],
+            dim=-1,
+        )
+
+    @staticmethod
+    def _bce_from_prob(input_prob: torch.Tensor, target_prob: torch.Tensor) -> torch.Tensor:
+        """BCE for probability inputs, with clamping for AMP-safe numerical stability."""
+        input_prob = input_prob.clamp(1e-6, 1 - 1e-6)
+        return -(target_prob * input_prob.log() + (1.0 - target_prob) * (1.0 - input_prob).log())
 
     def _compute_dependency_penalty(
         self,
@@ -936,59 +1035,24 @@ class v8DetectionLoss:
         offset: int,
         task_idx: int,
     ) -> torch.Tensor:
-        """Compute hierarchical dependency penalty for a given task level.
-
-        Penalizes false-positive predictions that are inconsistent with the parent level.
-        A prediction is inconsistent if it's a false positive at level k AND its corresponding
-        parent class at level k-1 is also not a true positive.
-
-        Args:
-            pred_scores: Full predicted scores (bs, num_anchors, sum(nc)) - raw logits.
-            target_scores: Full target scores (bs, num_anchors, nc[task]) for current task.
-            offset: Start index of current task in the score dimension.
-            task_idx: Current hierarchy level index.
-            prev_offset: Start index of parent task in the score dimension.
-
-        Returns:
-            Scalar penalty value.
-        """
+        """Compute bidirectional soft consistency between a child level and its parent level."""
         if task_idx == 0 or task_idx not in self.child_parent_maps:
             return torch.tensor(0.0, device=pred_scores.device)
 
-        parent_map = self.child_parent_maps[task_idx]  # (nc_child,) -> parent cls in level-1
-        nc_child = self.nc[task_idx]
-
-        # Child confidences for current hierarchy level.
-        child_preds = pred_scores[..., offset : offset + nc_child].sigmoid()
-        child_is_tp = target_scores > 0
-        fp_conf = child_preds * (~child_is_tp).float()
-
-        # hyolo-style: only consider anchors that are active in both adjacent levels.
-        common_anchor = (target_scores.sum(-1, keepdim=True) > 0) & (parent_target_scores.sum(-1, keepdim=True) > 0)
-        fp_conf = fp_conf * common_anchor.float()
-
-        # Filter tiny confidences.
-        fp_conf = fp_conf * (fp_conf > 0.001).float()
-        if fp_conf.sum() == 0:
+        active_anchor = (target_scores.sum(-1) > 0) | (parent_target_scores.sum(-1) > 0)
+        if not active_anchor.any():
             return torch.tensor(0.0, device=pred_scores.device)
 
-        # Map each child class to its parent class and keep only inconsistent FPs
-        # (i.e. mapped parent class is NOT a TP at this anchor).
-        valid_child = parent_map >= 0
-        safe_parent_map = parent_map.clamp(min=0)  # avoid gather OOB for invalid entries
+        parent_logits, child_logits, parent_map = self._hierarchy_logits(pred_scores, offset, task_idx)
+        parent_prob = parent_logits.sigmoid()
+        child_group_prob = self._group_child_probs(child_logits.sigmoid(), parent_map, parent_logits.shape[-1])
 
-        # parent_tp_mapped: [B, A, nc_child], value 1 if mapped parent is TP, else 0.
-        parent_tp = (parent_target_scores > 0).float()
-        gather_idx = safe_parent_map.view(1, 1, -1).expand(parent_tp.shape[0], parent_tp.shape[1], -1)
-        parent_tp_mapped = torch.gather(parent_tp, 2, gather_idx)
-        if (~valid_child).any():
-            parent_tp_mapped[..., ~valid_child] = 0.0
-
-        inconsistent_fp = fp_conf * (1.0 - parent_tp_mapped)
-        fp_count = (inconsistent_fp > 0).float().sum()
-        if fp_count > 0:
-            return inconsistent_fp.sum() / fp_count
-        return torch.tensor(0.0, device=pred_scores.device)
+        # Symmetric consistency: high child requires high parent, and high parent expects
+        # at least one child under it. Detaching the opposite side avoids self-chasing.
+        parent_from_child = F.binary_cross_entropy_with_logits(parent_logits, child_group_prob.detach(), reduction="none")
+        child_from_parent = self._bce_from_prob(child_group_prob, parent_prob.detach())
+        consistency = 0.5 * (parent_from_child + child_from_parent)
+        return consistency[active_anchor].mean()
 
     @staticmethod
     def _build_cls_loss(name: str, weight, nc: int, detect_module, verbose: bool = True):
@@ -1130,9 +1194,7 @@ class v8DetectionLoss:
                     offset,
                     task_idx,
                 )
-                # Clamp penalty so it cannot exceed base cls loss magnitude
-                dep_term = (dep_penalty * self.hyp.dep).clamp(max=task_cls_loss.detach())
-                loss[self.dep_idx] += dep_term * self.task_loss_weights[task_idx]
+                loss[self.dep_idx] += dep_penalty * self.task_loss_weights[task_idx]
 
             loss[self.cls_idx] += task_cls_loss * self.task_loss_weights[task_idx]
 

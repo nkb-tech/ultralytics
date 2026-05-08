@@ -18,6 +18,7 @@ min_imgsz: 25 # (int) min size of original image
 save: True # (bool) save train checkpoints and predict results
 save_period: -1 # (int) Save checkpoint every x epochs (disabled if < 1)
 cache: False # (bool) True/ram, low-ram, disk or False. Use cache for data loading. Use low-ram if you have unsufficient ram memory, but want better speed than False variant
+rm_cache: False # (bool) remove dataset *.cache files before scanning labels
 device: # (int | str | list, optional) device to run on, i.e. cuda device=0 or device=0,1,2,3 or device=cpu
 workers: 8 # (int) number of worker threads for data loading (per RANK if DDP)
 project: # (str, optional) project name
@@ -117,7 +118,7 @@ warmup_bias_lr: 0.1 # (float) warmup initial bias lr
 box: 7.5 # (float) box loss gain
 cls: 0.5 # (float) cls loss gain (scale with pixels)
 dfl: 1.5 # (float) dfl loss gain
-reid: 2.0 # (float) Re-ID embedding loss gain
+reid: 1.0 # (float) Re-ID embedding loss gain
 dep: 10.0 # (float) dependency loss gain
 pose: 12.0 # (float) pose loss gain
 kobj: 1.0 # (float) keypoint obj loss gain
@@ -191,6 +192,7 @@ tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yam
 
 # ReID settings --------------------------------------------------------------------------------------------------------
 reid_dim: 0 # (int) Re-ID embedding dimension for self-supervised Re-ID head (e.g. 128); 0 = disabled
+reid_loss: supcon # (str) Re-ID pair loss, choices=[supcon, ms]
 
 # Hierarchical detection (hYOLO / multitask nc list + Detect fusion) ---------------------------------------------------
 hierarchical: False # (bool) training flag: inject hierarchical:true into model yaml when building from weights

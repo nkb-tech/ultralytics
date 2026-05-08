@@ -78,7 +78,7 @@ from ultralytics.data import build_dataloader
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
 from ultralytics.nn.autobackend import check_class_names, default_class_names
-from ultralytics.nn.modules import C2f, Detect, RTDETRDecoder, PostDetectTRTNMS, PostDetectONNXNMS
+from ultralytics.nn.modules import Attention, C2f, Detect, RTDETRDecoder, PostDetectTRTNMS, PostDetectONNXNMS
 from ultralytics.nn.tasks import ClassificationModel, DetectionModel, OBBModel, PoseModel, SegmentationModel, WorldModel
 from ultralytics.utils import (
     ARM64,
@@ -472,6 +472,10 @@ class Exporter:
         model.eval()
         model.float()
         model = model.fuse()
+        if rknn:
+            for m in model.modules():
+                if isinstance(m, Attention):
+                    m.fuse_query_scale()
         head_mode = 'legacy'
         end2end = False
         embed_dim = 0

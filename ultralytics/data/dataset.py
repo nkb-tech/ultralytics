@@ -300,15 +300,31 @@ class YOLODataset(BaseDataset):
     def collate_fn(batch):
         """Collates data samples into batches (key-safe)."""
         new_batch = {}
-        keys = batch[0].keys()
+        # collate every key that appears in any sample int the batch
+        keys = set().union(*(b.keys() for b in batch))
 
         for k in keys:
             vals = [b.get(k) for b in batch]
 
             if k == "img":
                 new_batch[k] = torch.stack(vals, 0)
-            elif k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb", "tags"}:
-                # some entries may be missing tags -> treat as empty
+            elif k == "tags":
+                vals_present = [v for v in vals if v is not None]
+                if len(vals_present):
+                    tag_dim = vals_present[0].shape[1] if vals_present[0].ndim > 1 else 1
+                    dtype = vals_present[0].dtype
+                    filled = []
+                    for b, v in zip(batch, vals):
+                        if v is None:
+                            n = len(b.get("cls", []))
+                            filled.append(torch.zeros((n, tag_dim), dtype=dtype))
+                        else:
+                            filled.append(v if v.ndim > 1 else v[:, None])
+                    new_batch[k] = torch.cat(filled, 0)
+                else:
+                    new_batch[k] = None
+            elif k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
+                # Some optional tensor fields may be absent for empty samples.
                 vals = [v for v in vals if v is not None]
                 if len(vals):
                     new_batch[k] = torch.cat(vals, 0)

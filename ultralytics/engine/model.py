@@ -795,7 +795,10 @@ class Model(nn.Module):
 
         self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
         if not args.get("resume"):  # manually set model only if not resuming
-            self.trainer.model = self.trainer.get_model(weights=self.model if self.ckpt else None, cfg=self.model.yaml)
+            weights = self.model if self.ckpt else None
+            if weights is None and isinstance(args.get("pretrained"), (str, Path)):
+                weights, _ = attempt_load_one_weight(args["pretrained"])
+            self.trainer.model = self.trainer.get_model(weights=weights, cfg=self.model.yaml)
             self.model = self.trainer.model
 
         self.trainer.hub_session = self.session  # attach optional HUB session
