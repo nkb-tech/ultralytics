@@ -74,10 +74,11 @@ def non_max_suppression(
 
     # Post-processed format: (batch, N, 4+2*num_tasks) with [x1, y1, x2, y2, conf0, cls0, ...]
     # Already xyxy — must NOT go through BCN path (xywh2xyxy would corrupt coordinates).
-    # Disambiguate from BCN (batch, channels, anchors): in postprocessed, last dim (cols) < dim 1 (N);
-    # in BCN, last dim (anchors) > dim 1 (channels).
+    # Disambiguate from BCN (batch, channels, anchors). Postprocessed rows have an exact
+    # compact width of 4+2*num_tasks; N may be smaller than that on sparse SAHI crops.
+    # Note: multitask end2end heads in this fork intentionally return BCN for standard multitask NMS.
     n_cols = prediction.shape[-1]
-    is_postprocessed = ((n_cols == 4 + 2 * num_tasks) and n_cols < prediction.shape[1]) or end2end
+    is_postprocessed = n_cols == 4 + 2 * num_tasks
 
     if is_postprocessed:
         output = []

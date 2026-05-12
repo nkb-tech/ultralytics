@@ -197,7 +197,18 @@ class DetectionPredictor(BasePredictor):
             if len(novel) == 0:
                 return full_preds
 
-            return torch.cat([full_preds, self._nms(novel)], dim=0)
+            merged_extra = self._nms(novel)
+            if full_preds.shape[1] != merged_extra.shape[1]:
+                LOGGER.warning(
+                    "SAHI merge skipped: detection tensors have incompatible widths "
+                    f"{full_preds.shape[1]} vs {merged_extra.shape[1]} "
+                    f"(shapes {tuple(full_preds.shape)} vs {tuple(merged_extra.shape)}). "
+                    "Using full-image predictions only. Typical causes: multitask/end2end head layout vs "
+                    "predictor nc mismatch — pass data=<training yaml> to predict(), or set sahi=False."
+                )
+                return full_preds
+
+            return torch.cat([full_preds, merged_extra], dim=0)
 
     def _nms(self, preds):
         """Run NMS on post-processed predictions."""

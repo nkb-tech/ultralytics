@@ -801,8 +801,8 @@ class v8DetectionLoss:
         if not 0 <= self.main_head < self.n_tasks:
             raise ValueError(f"main_head={self.main_head} is outside model head range 0-{self.n_tasks - 1}")
         self.main_offset = sum(self.nc[:self.main_head])
-        raw_parents = self.task_schema.get("hierarchy_parent_heads")
-        self.hierarchy_parent_heads = (
+        raw_parents = self.task_schema.get("dependency_parent_heads", self.task_schema.get("hierarchy_parent_heads"))
+        self.dependency_parent_heads = (
             [int(p) for p in raw_parents]
             if raw_parents is not None
             else [-1] + list(range(self.n_tasks - 1))
@@ -940,7 +940,7 @@ class v8DetectionLoss:
 
         self.child_parent_maps = {}
         expected_levels = (
-            [i for i, parent in enumerate(self.hierarchy_parent_heads) if int(parent) >= 0]
+            [i for i, parent in enumerate(self.dependency_parent_heads) if int(parent) >= 0]
             if self.task_schema
             else range(1, self.n_tasks)
         )
@@ -1164,8 +1164,8 @@ class v8DetectionLoss:
 
             # Hierarchical dependency penalty (levels > 0) in its own slot
             parent_idx = (
-                int(self.hierarchy_parent_heads[task_idx])
-                if task_idx < len(self.hierarchy_parent_heads)
+                int(self.dependency_parent_heads[task_idx])
+                if task_idx < len(self.dependency_parent_heads)
                 else task_idx - 1
             )
             if self.dependency_loss and parent_idx >= 0 and task_idx in self.child_parent_maps:

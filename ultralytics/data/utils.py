@@ -80,6 +80,7 @@ def _normalize_compact_multitask_hierarchy(data: dict, dataset) -> None:
     flat_names, flat_nc, flat_to_semantic = [], [], []
     semantic_to_flat, label_nc, child_parent_map = {}, [], {}
     hierarchy_parent_heads = []
+    dependency_parent_heads = []
     source_label_heads = []
 
     for task_id in sorted(semantic_names):
@@ -96,6 +97,7 @@ def _normalize_compact_multitask_hierarchy(data: dict, dataset) -> None:
             flat_nc.append(len(task_names))
             flat_to_semantic.append({"task": task_id, "level": 0})
             hierarchy_parent_heads.append(-1)
+            dependency_parent_heads.append(-1)
             source_label_heads.append(flat_idx)
             continue
 
@@ -117,12 +119,14 @@ def _normalize_compact_multitask_hierarchy(data: dict, dataset) -> None:
             connections = level_info["connections"]
             if connections == -1:
                 hierarchy_parent_heads.append(-1)
+                dependency_parent_heads.append(-1)
             else:
                 connections = _int_keys(connections)
                 if level - 1 not in semantic_to_flat[task_id]:
                     raise SyntaxError(emojis(f"{dataset} hierarchy level {level} has no previous parent level."))
                 parent_head = semantic_to_flat[task_id][level - 1]
                 hierarchy_parent_heads.append(parent_head)
+                dependency_parent_heads.append(parent_head)
                 child_parent_map[flat_idx] = connections
 
         deepest_names = flat_names[semantic_to_flat[task_id][deepest_level]]
@@ -132,6 +136,29 @@ def _normalize_compact_multitask_hierarchy(data: dict, dataset) -> None:
                 emojis(f"{dataset} names[{task_id}] must match child_parent_map[{task_id}][{deepest_level}].names.")
             )
         source_label_heads.append(semantic_to_flat[task_id][deepest_level])
+
+    for task_id, task_map in raw_maps.items():
+        task_map = _int_keys(task_map)
+        for level, level_info in task_map.items():
+            if not isinstance(level_info, dict) or "feature_parent" not in level_info:
+                continue
+            flat_idx = semantic_to_flat[int(task_id)][int(level)]
+            feature_parent = level_info["feature_parent"]
+            if isinstance(feature_parent, dict):
+                parent_task = int(feature_parent["task"])
+                parent_level = int(feature_parent["level"])
+                if parent_task not in semantic_to_flat or parent_level not in semantic_to_flat[parent_task]:
+                    raise SyntaxError(
+                        emojis(
+                            f"{dataset} feature_parent task={parent_task} level={parent_level} "
+                            f"for task={task_id} level={level} is not defined."
+                        )
+                    )
+                hierarchy_parent_heads[flat_idx] = semantic_to_flat[parent_task][parent_level]
+            elif feature_parent in {-1, None}:
+                hierarchy_parent_heads[flat_idx] = -1
+            else:
+                raise SyntaxError(emojis(f"{dataset} feature_parent must be a dict with task/level or -1."))
 
     if main_level is None:
         main_head = source_label_heads[sorted(semantic_names).index(main_task)]
@@ -165,6 +192,7 @@ def _normalize_compact_multitask_hierarchy(data: dict, dataset) -> None:
         "main_level": main_level,
         "main_head": main_head,
         "hierarchy_parent_heads": hierarchy_parent_heads,
+        "dependency_parent_heads": dependency_parent_heads,
         "child_parent_map": child_parent_map,
         "ignore_class": flat_ignore,
     }
@@ -175,7 +203,7 @@ def _expand_compact_label_rows(lb: np.ndarray, task_schema: dict) -> np.ndarray:
     compact_cols = len(task_schema["label_nc"])
     flat_heads = len(task_schema["flat_to_semantic"])
     expanded = np.zeros((lb.shape[0], flat_heads), dtype=lb.dtype)
-    hierarchy_parent_heads = task_schema["hierarchy_parent_heads"]
+    parent_heads = task_schema.get("dependency_parent_heads", task_schema["hierarchy_parent_heads"])
     child_parent_map = {int(k): _int_keys(v) for k, v in task_schema.get("child_parent_map", {}).items()}
 
     for label_col, source_head in enumerate(task_schema["source_label_heads"]):
@@ -184,8 +212,8 @@ def _expand_compact_label_rows(lb: np.ndarray, task_schema: dict) -> np.ndarray:
         expanded[:, source_head] = cls_values
         child_head = source_head
         child_cls = cls_values
-        while int(hierarchy_parent_heads[child_head]) >= 0:
-            parent_head = int(hierarchy_parent_heads[child_head])
+        while int(parent_heads[child_head]) >= 0:
+            parent_head = int(parent_heads[child_head])
             mapping = child_parent_map.get(child_head, {})
             try:
                 parent_cls = np.array([mapping[int(c)] for c in child_cls], dtype=np.int64)
