@@ -168,6 +168,8 @@ class YOLODataset(BaseDataset):
             LOGGER.warning(f"{self.prefix}WARNING ⚠️ No labels found in {path}. {HELP_URL}")
         x["hash"] = get_hash(self.label_files + self.im_files)
         x["task_schema"] = self.data.get("task_schema") if isinstance(self.data, dict) else None
+        x["min_bbox"] = self.min_bbox
+        x["min_imgsz"] = self.min_imgsz
         x["results"] = nf, nm, ne, ncpt, len(self.im_files)
         x["msgs"] = msgs  # warnings
         save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
@@ -177,11 +179,16 @@ class YOLODataset(BaseDataset):
         """Returns dictionary of labels for YOLO training."""
         self.label_files = img2label_paths(self.im_files)
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
+        min_bbox_tag = str(self.min_bbox).replace(".", "p")
+        min_imgsz_tag = str(self.min_imgsz).replace(".", "p")
+        cache_path = cache_path.with_name(f"{cache_path.stem}.minbbox{min_bbox_tag}.minimgsz{min_imgsz_tag}.cache")
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
             assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
             assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash
             assert cache.get("task_schema") == (self.data.get("task_schema") if isinstance(self.data, dict) else None)
+            assert cache.get("min_bbox") == self.min_bbox
+            assert cache.get("min_imgsz") == self.min_imgsz
         except (FileNotFoundError, AssertionError, AttributeError):
             cache, exists = self.cache_labels(cache_path), False  # run cache ops
 
@@ -195,7 +202,7 @@ class YOLODataset(BaseDataset):
                 LOGGER.info("\n".join(cache["msgs"]))  # display warnings
 
         # Read cache
-        [cache.pop(k, None) for k in ("hash", "version", "msgs", "task_schema")]  # remove items
+        [cache.pop(k, None) for k in ("hash", "version", "msgs", "task_schema", "min_bbox", "min_imgsz")]  # remove items
         labels = cache["labels"]
         if not labels:
             LOGGER.warning(f"WARNING ⚠️ No images found in {cache_path}, training may not work correctly. {HELP_URL}")

@@ -845,6 +845,9 @@ class v8DetectionLoss:
             stride=self.stride.tolist() if hasattr(self.stride, 'tolist') else self.stride,
             topk2=tal_topk2,
             iou_loss_fn=iou_loss_fn,
+            assign_metric=getattr(h, "assign_metric", "iou"),
+            assign_nwd_lambda=getattr(h, "assign_nwd_lambda", 0.0),
+            assign_nwd_small_thr=getattr(h, "assign_nwd_small_thr", 0.0),
         )
 
         self.bbox_loss = BboxLoss(
@@ -1152,7 +1155,8 @@ class v8DetectionLoss:
                 pred_scores=pred_scores_task,
                 gt_scores=target_scores_task,
                 pred_bboxes=pred_bboxes,
-                gt_bboxes=target_bboxes / stride_tensor,
+                # target_bboxes are in image pixels; PPLoss mu/sigma are pixel-sized stride priors.
+                gt_bboxes=target_bboxes,
                 fg_mask=fg_mask,
                 anchor_points=anchor_points,
                 stride_tensor=stride_tensor,

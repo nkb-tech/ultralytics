@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from . import LOGGER
-from .metrics import bbox_iou, probiou
+from .metrics import bbox_iou, probiou, wasserstein_loss
 from .tf import xywh2xyxy, xywhr2xyxyxyxy, xyxy2xywh
 from .torch_utils import TORCH_1_11
 
@@ -39,6 +39,9 @@ class TaskAlignedAssigner(nn.Module):
         eps: float = 1e-9,
         topk2: int | None = None,
         iou_loss_fn: str = "ciou",
+        assign_metric: str = "iou",
+        assign_nwd_lambda: float = 0.0,
+        assign_nwd_small_thr: float = 0.0,
     ):
         """Initialize a TaskAlignedAssigner object with customizable hyperparameters.
 
@@ -51,6 +54,9 @@ class TaskAlignedAssigner(nn.Module):
             eps (float, optional): A small value to prevent division by zero.
             topk2 (int, optional): Secondary topk value for additional filtering.
             iou_loss_fn (str, optional): The IoU loss function to use for calculation.
+            assign_metric (str, optional): Assignment overlap mode, "iou" or "nwd_mix".
+            assign_nwd_lambda (float, optional): NWD blend weight for "nwd_mix".
+            assign_nwd_small_thr (float, optional): Apply NWD blend only to GT boxes with sqrt area <= this threshold.
         """
         super().__init__()
         self.topk = topk
@@ -62,6 +68,9 @@ class TaskAlignedAssigner(nn.Module):
         self.stride_val = self.stride[1] if len(self.stride) > 1 else self.stride[0]
         self.eps = eps
         self.iou_loss_fn = iou_loss_fn.lower()
+        self.assign_metric = assign_metric
+        self.assign_nwd_lambda = float(assign_nwd_lambda)
+        self.assign_nwd_small_thr = float(assign_nwd_small_thr)
 
     @torch.no_grad()
     def forward(self, pd_scores, pd_bboxes, anc_points, gt_labels, gt_bboxes, mask_gt, return_reid: bool = False):
@@ -233,7 +242,19 @@ class TaskAlignedAssigner(nn.Module):
         Returns:
             (torch.Tensor): IoU values between each pair of boxes.
         """
-        return bbox_iou(gt_bboxes, pd_bboxes, xywh=False, **{self.iou_loss_fn: True}).squeeze(-1).clamp_(0)
+        iou_quality = bbox_iou(gt_bboxes, pd_bboxes, xywh=False, **{self.iou_loss_fn: True}).squeeze(-1).clamp_(0)
+        if self.assign_metric == "iou" or self.assign_nwd_lambda <= 0:
+            return iou_quality
+        if self.assign_metric != "nwd_mix":
+            raise ValueError(f"Unknown assign_metric={self.assign_metric!r}")
+
+        nwd_quality = wasserstein_loss(pd_bboxes, gt_bboxes).squeeze(-1).clamp_(0)
+        mixed = (1.0 - self.assign_nwd_lambda) * iou_quality + self.assign_nwd_lambda * nwd_quality
+        if self.assign_nwd_small_thr > 0:
+            gt_wh = (gt_bboxes[..., 2:] - gt_bboxes[..., :2]).clamp_min(0)
+            gt_size = torch.sqrt(gt_wh[..., 0] * gt_wh[..., 1] + self.eps)
+            return torch.where(gt_size <= self.assign_nwd_small_thr, mixed, iou_quality)
+        return mixed
 
     def select_topk_candidates(self, metrics, topk_mask=None):
         """Select the top-k candidates based on the given metrics.
