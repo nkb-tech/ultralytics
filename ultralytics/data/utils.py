@@ -312,23 +312,17 @@ def check_det_dataset(dataset, autodownload=True):
         raise SyntaxError(emojis(f"{dataset} 'names' length {data['names']} and 'nc: {data['nc']}' must match."))
     if "names" in data:
         raw_names = data.get("names")
-        if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
-            data["names"] = [check_class_names(n) for n in raw_names]
-        elif isinstance(raw_names, (dict, list)):
-            names_list = check_class_names(raw_names)
-            data["names"] = [names_list]
+        if isinstance(raw_names, (dict, list, tuple)):
+            data["names"] = check_class_names(raw_names)
         else:
             raise SyntaxError(emojis(f"{dataset} 'names' must be a list of lists, a list, or a dictionary."))
         data["nc"] = [len(names) for names in data["names"]]
     elif "nc" in data:
         nc = data["nc"]
-        if isinstance(nc, list):
-            data["names"] = [
-                {i: f"class_{i}" for i in range(nci)}
-                for nci in nc
-            ]
-        else:
-            raise SyntaxError(emojis(f"{dataset} 'nc' must be a list."))
+        if not isinstance(nc, list):
+            nc = [nc]
+            data["nc"] = nc
+        data["names"] = [{i: f"class_{i}" for i in range(nci)} for nci in nc]
 
     # Resolve paths
     path = Path(extract_dir or data.get("path") or Path(data.get("yaml_file", "")).parent)  # dataset root

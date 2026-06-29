@@ -243,6 +243,10 @@ class SAHISegmentAggregator:
         if len(crop_preds_filtered) == 0:
             return
         
+        import os
+        if os.environ.get('YOLO_DEBUG') and slice_idx == 0:
+            print(f"[_process_single_crop] img={img_idx}, slice={slice_idx}, filtered={len(crop_preds_filtered)}, conf_max={conf[valid_mask].max():.3f}")
+
         # Store ORIGINAL model-space boxes BEFORE transformation
         # These are needed for process_mask() later
         boxes_xywh_model = crop_preds_filtered[:, :4].clone()

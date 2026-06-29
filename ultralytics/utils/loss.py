@@ -1094,11 +1094,36 @@ class E2ESegmentLoss:
         self.one2one = v8SegmentationLoss(model, tal_topk=1)
 
     def __call__(self, preds, batch):
-        """"""
-        preds = preds[1] if isinstance(preds, tuple) else preds
-        one2many = preds["one2many"]
+        """Compute E2E segmentation loss for one2many and one2one branches."""
+        # Handle two formats:
+        # 1. Training: preds = dict {"one2many": (feats, mc, p), "one2one": (feats, mc, p)}
+        # 2. Validation: preds = ((y_post, mc, proto), {"one2one": ..., "one2many": ...})
+
+        if isinstance(preds, dict):
+            # Training format
+            one2many = preds["one2many"]
+            one2one = preds["one2one"]
+        elif isinstance(preds, tuple) and len(preds) == 2 and isinstance(preds[1], dict):
+            # Validation/inference format: (postprocessed, raw_dict)
+            raw_dict = preds[1]
+            one2many = raw_dict["one2many"]
+            one2one = raw_dict["one2one"]
+        else:
+            raise ValueError(f"Unexpected preds format: {type(preds)}")
+
+        # Extract and process proto (may be tuple from Proto26)
+        # one2many/one2one = (feats, mc, proto) where proto may be (proto_masks, semseg)
+        if isinstance(one2many, tuple) and len(one2many) == 3:
+            feats, mc, proto = one2many
+            proto_masks = proto[0] if isinstance(proto, tuple) else proto
+            one2many = (feats, mc, proto_masks)
+
+        if isinstance(one2one, tuple) and len(one2one) == 3:
+            feats, mc, proto = one2one
+            proto_masks = proto[0] if isinstance(proto, tuple) else proto
+            one2one = (feats, mc, proto_masks)
+
         loss_one2many = self.one2many(one2many, batch)
-        one2one = preds["one2one"]
         loss_one2one = self.one2one(one2one, batch)
         return loss_one2many[0] + loss_one2one[0], loss_one2many[1] + loss_one2one[1]
 

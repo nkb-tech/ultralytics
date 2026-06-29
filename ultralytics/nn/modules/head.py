@@ -1046,12 +1046,115 @@ class Segment26(Segment):
         p = self.proto(x)  # mask protos with optional semantic segmentation
         bs = x[0].shape[0]
         mc = torch.cat([self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2)  # mask coefficients
-        x = Detect.forward(self, x)
-        if self.training:
-            return x, mc, p
-        # For inference, p is just the proto masks (not tuple)
+
+        # Get proto tensor (Proto26 returns tuple during training)
         proto = p[0] if isinstance(p, tuple) else p
-        return (torch.cat([x, mc], 1), proto) if self.export else (torch.cat([x[0], mc], 1), (x[1], mc, proto))
+
+        x = Detect.forward(self, x)
+
+        if self.training:
+            # For end2end, x is dict {"one2many": ..., "one2one": ...}
+            # Pack mc and proto with each branch like v10Segment
+            if isinstance(x, dict):
+                x["one2one"] = x["one2one"], mc, p
+                x["one2many"] = x["one2many"], mc, p
+                return x
+            return x, mc, p
+
+        # For inference - decode masks and postprocess together
+        # Handle end2end inference: x = (y_postprocessed, raw_dict)
+        if isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], dict):
+            # End2end inference mode - need to redo postprocess with masks
+            raw_dict = x[1]  # {"one2many": ..., "one2one": ...}
+            one2one_feats = raw_dict["one2one"]
+
+            # Decode masks from mc and proto
+            pred_masks = self.mask_decode(mc, proto)  # [batch, anchors, h, w]
+
+            # Get raw detections from one2one branch and postprocess with masks
+            det_preds = self._inference(one2one_feats)  # [batch, 4+nc, anchors]
+            y, masks = self.postprocess_with_masks(
+                det_preds.permute(0, 2, 1),  # [batch, anchors, 4+nc]
+                pred_masks,  # [batch, anchors, h, w] - no permute needed, 4D handled in postprocess
+                max_det=self.max_det,
+                nc=self.nc
+            )
+
+            # Pack for each branch
+            one2one = (one2one_feats, mc, proto)
+            one2many = (raw_dict["one2many"], mc, proto)
+            return (y, masks, proto), {"one2one": one2one, "one2many": one2many}
+
+        result = (torch.cat([x, mc], 1), proto) if self.export else (torch.cat([x[0], mc], 1), (x[1], mc, proto))
+        import os
+        if os.environ.get('YOLO_DEBUG'):
+            print(f"[Segment26.forward] Returning type: {type(result).__name__}, len: {len(result)}")
+            print(f"[Segment26.forward] result[0] type: {type(result[0]).__name__}, shape: {result[0].shape if hasattr(result[0], 'shape') else 'N/A'}")
+            print(f"[Segment26.forward] result[1] type: {type(result[1]).__name__}")
+        return result
+
+    def mask_decode(self, mask_coeffs, proto):
+        """Decode mask coefficients into masks using proto features.
+
+        Args:
+            mask_coeffs: [batch, nm, anchors] mask coefficients
+            proto: [batch, nm, h, w] prototype masks
+
+        Returns:
+            masks: [batch, anchors, h, w] decoded masks
+        """
+        # mask_coeffs: [batch, nm, anchors]
+        # proto: [batch, nm, h, w]
+        c, mh, mw = proto.shape[1:]
+        # Einsum: for each anchor, compute weighted sum of proto masks
+        # Result: [batch, anchors, h, w]
+        masks = torch.einsum("bcn,bchw->bnhw", mask_coeffs, proto)
+        return masks.sigmoid()
+
+    def postprocess_with_masks(self, detect_preds, masks, max_det, nc):
+        """Postprocess detections and masks together.
+
+        Args:
+            detect_preds: [batch, anchors, 4+sum(nc)] detection predictions
+            masks: [batch, anchors, h*w] or [batch, anchors, h, w] mask predictions
+            max_det: maximum detections
+            nc: list of number of classes per task
+
+        Returns:
+            detections: [batch, max_det, 6] (x,y,w,h,conf,cls)
+            masks: [batch, max_det, h, w] selected masks
+        """
+        total_classes = sum(nc) if isinstance(nc, list) else nc
+        boxes, scores = detect_preds.split([4, total_classes], dim=-1)
+
+        # Get max scores for ranking
+        max_scores, max_labels = scores.max(dim=-1)
+
+        # Top-k selection
+        topk = min(max_det, max_scores.shape[1])
+        topk_scores, topk_idx = torch.topk(max_scores, topk, dim=-1)
+
+        # Gather selected boxes, scores, labels
+        batch_idx = torch.arange(boxes.shape[0], device=boxes.device).unsqueeze(-1)
+        selected_boxes = boxes[batch_idx, topk_idx]  # [batch, topk, 4]
+        selected_labels = max_labels[batch_idx, topk_idx]  # [batch, topk]
+
+        # Gather selected masks
+        if masks.dim() == 3:
+            # [batch, anchors, h*w]
+            selected_masks = masks[batch_idx, topk_idx]  # [batch, topk, h*w]
+        else:
+            # [batch, anchors, h, w]
+            selected_masks = masks[batch_idx, topk_idx]  # [batch, topk, h, w]
+
+        # Combine: [batch, topk, 6] = [x, y, w, h, conf, cls]
+        detections = torch.cat([
+            selected_boxes,
+            topk_scores.unsqueeze(-1),
+            selected_labels.unsqueeze(-1).float()
+        ], dim=-1)
+
+        return detections, selected_masks
 
     def fuse(self):
         """Remove the proto semantic segmentation head for inference optimization."""

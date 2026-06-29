@@ -116,7 +116,7 @@ class BaseValidator:
             if trainer.args.compile and hasattr(model, "_orig_mod"):
                 model = model._orig_mod  # validate non-compiled original model to avoid issues
             model = model.half() if self.args.half else model.float()
-            # self.model = model
+            self.model = model  # Store model reference for postprocess
             if isinstance(trainer.loss_items, torch.Tensor):
                 self.loss = torch.zeros_like(trainer.loss_items, device=trainer.device)
             else:
@@ -140,7 +140,7 @@ class BaseValidator:
                 data=self.args.data,
                 fp16=self.args.half,
             )
-            # self.model = model
+            self.model = model  # Store model reference for postprocess
             self.device = model.device  # update device
             self.args.half = model.fp16  # update half
             self.rknn = getattr(model, 'rknn', False)  # RKNN format flag

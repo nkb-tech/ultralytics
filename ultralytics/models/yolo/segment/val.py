@@ -24,6 +24,7 @@ SAHI Mask Generation:
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 import cv2
+import os
 
 import numpy as np
 import torch
@@ -214,13 +215,227 @@ class SegmentationValidator(DetectionValidator):
         Returns both detections and proto features.
         
         Args:
-            preds: Model predictions (detections + proto)
+            preds: Model predictions - formats:
+                - Standard: (detection_tensor, proto) or (detection_tensor, (raw, mc, proto))
+                - Segment26 end2end: ((y_post, mc, proto), {"one2one": ..., "one2many": ...})
             
         Returns:
             Tuple of (post-NMS detections, proto tensor)
         """
         sahi_enabled = getattr(self, 'sahi_enabled', False)
         
+        # Debug: show preds structure
+        debug = os.environ.get('YOLO_DEBUG')
+        if debug:
+            print(f"[POSTPROCESS] preds type: {type(preds).__name__}, sahi_enabled={sahi_enabled}, validator.training={self.training}")
+            if isinstance(preds, (tuple, list)) and len(preds) >= 1:
+                print(f"[POSTPROCESS] preds len: {len(preds)}")
+                print(f"[POSTPROCESS] preds[0] type: {type(preds[0]).__name__}")
+                if hasattr(preds[0], 'shape'):
+                    print(f"[POSTPROCESS] preds[0] shape: {preds[0].shape}")
+                elif isinstance(preds[0], (tuple, list)):
+                    print(f"[POSTPROCESS] preds[0] len: {len(preds[0])}")
+                    if len(preds[0]) > 0 and hasattr(preds[0][0], 'shape'):
+                        print(f"[POSTPROCESS] preds[0][0] shape: {preds[0][0].shape}")
+                if len(preds) > 1:
+                    print(f"[POSTPROCESS] preds[1] type: {type(preds[1]).__name__}")
+                    if isinstance(preds[1], dict):
+                        print(f"[POSTPROCESS] preds[1] keys: {list(preds[1].keys())}")
+                    elif isinstance(preds[1], (tuple, list)) and len(preds[1]) >= 1:
+                        print(f"[POSTPROCESS] preds[1] len: {len(preds[1])}")
+                        if hasattr(preds[1][0], 'shape'):
+                            print(f"[POSTPROCESS] preds[1][0] shape: {preds[1][0].shape}")
+
+        # Handle Segment26 end2end format: ((y, masks, proto), raw_dict)
+        # y is already post-processed with masks selected
+        # Accept both tuple and list (AutoBackend may convert)
+        if isinstance(preds, (tuple, list)) and len(preds) == 2 and isinstance(preds[1], dict):
+            # Segment26 end2end inference format
+            y_post, pred_masks, proto = preds[0]  # Unpack (y, masks, proto)
+
+            # Store masks for use in _prepare_pred
+            self._segment26_masks = pred_masks  # [batch, max_det, h, w] or [batch, max_det, h*w]
+
+            if sahi_enabled:
+                # For SAHI, we need DECODED predictions with mask coefficients
+                # preds[0] = (y_post, masks, proto) where model already did postprocess (after NMS)
+                # We need raw decoded predictions BEFORE NMS
+                #
+                # KEY INSIGHT: one2one branch is for end-to-end inference (post-NMS),
+                # but one2many branch uses standard cv2/cv3 convolutions which produce
+                # higher confidence predictions better suited for SAHI aggregation.
+                raw_dict = preds[1]
+
+                # Use one2many branch - it uses standard cv2/cv3 with better confidence predictions
+                # The one2one branch has lower confidence due to end-to-end training dynamics
+                branch = raw_dict.get("one2many", None)
+
+                debug = os.environ.get('YOLO_DEBUG')
+                if debug:
+                    print(f"[POSTPROCESS DEBUG] using one2many, type: {type(branch)}, len: {len(branch) if isinstance(branch, tuple) else 'N/A'}")
+
+                if branch is not None and isinstance(branch, tuple) and len(branch) >= 2:
+                    # branch = (feats, mc, proto) where feats is raw features
+                    raw_feats = branch[0]  # Raw feature maps (before decoding)
+                    mc = branch[1]  # Mask coefficients [batch, nm, anchors]
+
+                    if debug:
+                        print(f"[POSTPROCESS DEBUG] raw_feats type: {type(raw_feats)}, mc shape: {mc.shape}")
+                        if isinstance(raw_feats, list) and len(raw_feats) > 0:
+                            print(f"[POSTPROCESS DEBUG] raw_feats[0] shape: {raw_feats[0].shape}, len: {len(raw_feats)}")
+                            # Check head parameters
+                            model_ref = self.model.model if hasattr(self.model, 'model') else self.model
+                            if hasattr(model_ref, 'model'):
+                                head = model_ref.model[-1]
+                                print(f"[POSTPROCESS DEBUG] head.reg_max: {getattr(head, 'reg_max', 'N/A')}, head.no: {getattr(head, 'no', 'N/A')}, head.nc: {getattr(head, 'nc', 'N/A')}")
+
+                    # Need to decode raw features to get boxes
+                    # Use model's _inference if available, otherwise approximate
+                    model = getattr(self, 'model', None)
+
+                    if debug:
+                        print(f"[POSTPROCESS DEBUG] model: {model is not None}, type: {type(model).__name__ if model else 'None'}")
+
+                    # Get detection head - handle both AutoBackend wrapper and raw model
+                    head = None
+                    if model is not None:
+                        # Try to get the inner model if wrapped (e.g., AutoBackend)
+                        inner_model = model
+                        if hasattr(model, 'model') and hasattr(model.model, 'model'):
+                            # AutoBackend: model.model is the actual model, model.model.model is nn.Sequential
+                            inner_model = model.model
+
+                        if hasattr(inner_model, 'model') and hasattr(inner_model.model, '__getitem__'):
+                            # Get head from model's layer list
+                            head = inner_model.model[-1]
+                        elif hasattr(model, 'model') and hasattr(model.model, '__getitem__'):
+                            # Training mode: model is raw model, model.model is nn.Sequential
+                            head = model.model[-1]
+
+                    if debug:
+                        print(f"[POSTPROCESS DEBUG] head type: {type(head).__name__ if head else 'None'}, has _inference: {hasattr(head, '_inference') if head else False}")
+
+                    if head is not None and hasattr(head, '_inference'):
+                        # Decode raw features to [batch, 4+nc, anchors]
+                        det_decoded = head._inference(raw_feats if isinstance(raw_feats, list) else [raw_feats])
+                        if debug:
+                            print(f"[POSTPROCESS DEBUG] det_decoded shape: {det_decoded.shape}, head.end2end={getattr(head, 'end2end', False)}")
+                            # Check class scores (after sigmoid in _inference)
+                            cls_scores = det_decoded[:, 4:, :]  # [batch, nc, anchors]
+                            max_cls = cls_scores.max(dim=1)[0]  # [batch, anchors]
+                            print(f"[POSTPROCESS DEBUG] cls_scores conf range: [{max_cls.min():.4f}, {max_cls.max():.4f}]")
+                            # Find which class has highest score for first anchor
+                            top_cls_idx = cls_scores[0, :, 0].argmax().item()
+                            top_cls_score = cls_scores[0, :, 0].max().item()
+                            print(f"[POSTPROCESS DEBUG] anchor 0 top class: {top_cls_idx}, score: {top_cls_score:.4f}")
+
+                        # Check if head uses end2end mode (xyxy output) or standard (xywh output)
+                        is_end2end = getattr(head, 'end2end', False)
+
+                        if is_end2end:
+                            # Convert xyxy to xywh for SAHI
+                            det_decoded_xywh = det_decoded.clone()
+                            det_decoded_xywh[:, 0] = (det_decoded[:, 0] + det_decoded[:, 2]) / 2  # cx
+                            det_decoded_xywh[:, 1] = (det_decoded[:, 1] + det_decoded[:, 3]) / 2  # cy
+                            det_decoded_xywh[:, 2] = det_decoded[:, 2] - det_decoded[:, 0]  # w
+                            det_decoded_xywh[:, 3] = det_decoded[:, 3] - det_decoded[:, 1]  # h
+                        else:
+                            # Already in xywh format - use as-is
+                            det_decoded_xywh = det_decoded
+
+                        # Concatenate with mask coefficients
+                        self._last_raw_preds = torch.cat([det_decoded_xywh, mc], dim=1)
+                        if debug:
+                            print(f"[POSTPROCESS DEBUG] _last_raw_preds shape: {self._last_raw_preds.shape}")
+                    else:
+                        # Fallback: use raw features directly (may not work well)
+                        if debug:
+                            print(f"[POSTPROCESS DEBUG] Using fallback - head={head is not None}")
+                        if isinstance(raw_feats, list):
+                            bs = raw_feats[0].shape[0]
+                            det_feats = torch.cat([f.view(bs, f.shape[1], -1) for f in raw_feats], 2)
+                        else:
+                            det_feats = raw_feats
+                        self._last_raw_preds = torch.cat([det_feats, mc], dim=1)
+                else:
+                    if debug:
+                        print(f"[POSTPROCESS WARNING] one2one not available or wrong format for SAHI")
+                self._last_proto = proto
+
+                # Verify raw preds were set
+                if debug:
+                    has_raw = hasattr(self, '_last_raw_preds') and self._last_raw_preds is not None
+                    print(f"[POSTPROCESS SAHI] _last_raw_preds set: {has_raw}")
+
+            # y_post shape: [batch, max_det, 6] - convert to list of per-image detections
+            # Format: [x, y, w, h, conf, cls] -> [x1, y1, x2, y2, conf, cls]
+            p = []
+            for i in range(y_post.shape[0]):
+                det = y_post[i]  # [max_det, 6]
+                # Filter out zero detections (padding)
+                valid_mask = det[:, 4] > 0  # conf > 0
+                det = det[valid_mask]
+
+                if len(det) > 0:
+                    # Convert xywh to xyxy
+                    boxes = det[:, :4].clone()
+                    boxes[:, 0] = det[:, 0] - det[:, 2] / 2  # x1
+                    boxes[:, 1] = det[:, 1] - det[:, 3] / 2  # y1
+                    boxes[:, 2] = det[:, 0] + det[:, 2] / 2  # x2
+                    boxes[:, 3] = det[:, 1] + det[:, 3] / 2  # y2
+
+                    # Reconstruct: [x1, y1, x2, y2, conf, cls]
+                    det = torch.cat([boxes, det[:, 4:6]], dim=1)
+                p.append(det)
+
+            return p, (pred_masks, proto)
+
+        # Handle case where preds[0] is tuple (e.g., fused Segment26)
+        if isinstance(preds[0], tuple):
+            # Segment26 fused format: preds = ((y, masks, proto), (raw, mc, proto)) or similar
+            y_post = preds[0][0]  # First element of the tuple
+            if len(preds[0]) >= 3:
+                pred_masks = preds[0][1]
+                proto = preds[0][2]
+                self._segment26_masks = pred_masks
+            else:
+                proto = preds[1][-1] if isinstance(preds[1], tuple) else preds[1]
+
+            if sahi_enabled:
+                self._last_raw_preds = y_post.clone() if hasattr(y_post, 'clone') else y_post
+                self._last_proto = proto
+
+            # Convert batch format to list of per-image detections
+            if y_post.dim() == 3:  # [batch, max_det, 6]
+                p = []
+                for i in range(y_post.shape[0]):
+                    det = y_post[i]
+                    valid_mask = det[:, 4] > 0
+                    det = det[valid_mask]
+                    if len(det) > 0:
+                        boxes = det[:, :4].clone()
+                        boxes[:, 0] = det[:, 0] - det[:, 2] / 2
+                        boxes[:, 1] = det[:, 1] - det[:, 3] / 2
+                        boxes[:, 2] = det[:, 0] + det[:, 2] / 2
+                        boxes[:, 3] = det[:, 1] + det[:, 3] / 2
+                        det = torch.cat([boxes, det[:, 4:6]], dim=1)
+                    p.append(det)
+                return p, (self._segment26_masks, proto) if hasattr(self, '_segment26_masks') else (p, proto)
+            else:
+                # Standard detection tensor - apply NMS
+                p = ops.non_max_suppression(
+                    y_post,
+                    self.args.conf,
+                    self.args.iou,
+                    labels=self.lb,
+                    multi_label=True,
+                    agnostic=self.args.single_cls or self.args.agnostic_nms,
+                    max_det=self.args.max_det,
+                    nc=self.nc,
+                )
+                return p, proto
+
+        # Standard Segment format
         # Clone raw predictions BEFORE NMS modifies them in-place
         if sahi_enabled:
             self._last_raw_preds = preds[0].clone()
@@ -280,7 +495,7 @@ class SegmentationValidator(DetectionValidator):
         Args:
             pred: Predictions tensor
             pbatch: Prepared batch dict
-            proto: Proto features tensor
+            proto: Proto features tensor (or tuple (masks, proto) for Segment26)
             
         Returns:
             Tuple of (scaled predictions, prediction masks)
@@ -291,6 +506,46 @@ class SegmentationValidator(DetectionValidator):
             ratio_pad=pbatch["ratio_pad"]
         )
         
+        # Handle Segment26 format: proto is (pred_masks, proto_tensor)
+        # where pred_masks are already decoded and selected
+        if isinstance(proto, tuple) and len(proto) == 2:
+            pred_masks_all, proto_tensor = proto
+            si = pbatch.get("batch_idx_single", 0)
+
+            # Get masks for this sample
+            if pred_masks_all is not None and pred_masks_all.dim() >= 3:
+                # pred_masks_all: [batch, max_det, h, w] or [batch, max_det, h*w]
+                masks_i = pred_masks_all[si]  # [max_det, h, w] or [max_det, h*w]
+
+                # Filter to match number of valid predictions
+                n_pred = len(pred)
+                if n_pred > 0 and masks_i.shape[0] >= n_pred:
+                    masks_i = masks_i[:n_pred]
+
+                    # Reshape if needed
+                    if masks_i.dim() == 2:
+                        # [n_pred, h*w] -> need to get h, w from proto
+                        proto_h, proto_w = proto_tensor.shape[-2:]
+                        masks_i = masks_i.view(n_pred, proto_h, proto_w)
+
+                    # Process masks (crop and resize to original image)
+                    pred_masks = self.process(
+                        masks_i.unsqueeze(0),  # Add proto dim for process function
+                        torch.ones(n_pred, 1, device=pred.device),  # Dummy coeffs
+                        pred[:, :4],
+                        shape=pbatch["imgsz"],
+                        upsample=True
+                    )
+                    # Actually, process expects proto and coeffs - use masks directly instead
+                    pred_masks = ops.crop_mask(
+                        F.interpolate(masks_i.unsqueeze(0), pbatch["imgsz"], mode='bilinear', align_corners=False)[0],
+                        pred[:, :4]
+                    )
+                    return predn, pred_masks
+
+            # Fallback to standard processing
+            proto = proto_tensor
+
         # Handle proto shape
         proto_in = proto
         if isinstance(proto, (list, tuple)):
@@ -303,7 +558,13 @@ class SegmentationValidator(DetectionValidator):
         num_tasks = len(self.nc) if hasattr(self, 'nc') else 1
         mask_start_col = 4 + 2 * num_tasks
         
-        pred_masks = self.process(proto_in, pred[:, mask_start_col:], pred[:, :4], shape=pbatch["imgsz"])
+        # Check if we have mask coefficients
+        if pred.shape[1] > mask_start_col:
+            pred_masks = self.process(proto_in, pred[:, mask_start_col:], pred[:, :4], shape=pbatch["imgsz"])
+        else:
+            # No mask coefficients (Segment26 format) - return empty masks
+            pred_masks = torch.zeros((len(pred), *pbatch["imgsz"]), device=pred.device)
+
         return predn, pred_masks
 
     # ==================== Metrics Update ====================
@@ -427,6 +688,15 @@ class SegmentationValidator(DetectionValidator):
         has_raw = hasattr(self, '_last_raw_preds') and self._last_raw_preds is not None
         has_proto = hasattr(self, '_last_proto') and self._last_proto is not None
         
+        # Check if Segment26 end2end mode (masks already decoded)
+        is_segment26 = hasattr(self, '_segment26_masks') and self._segment26_masks is not None
+
+        # Debug: print state
+        if os.environ.get('YOLO_DEBUG'):
+            print(f"[SAHI DEBUG] has_raw={has_raw}, has_proto={has_proto}, is_segment26={is_segment26}")
+            if has_raw:
+                print(f"[SAHI DEBUG] raw_preds shape: {self._last_raw_preds.shape}")
+
         if not (has_raw and has_proto):
             LOGGER.warning(f"Raw predictions not available for SAHI (raw={has_raw}, proto={has_proto})")
             return
@@ -434,11 +704,16 @@ class SegmentationValidator(DetectionValidator):
         raw_preds = self._last_raw_preds
         proto = self._last_proto
         
+        # For Segment26, set flag to skip mask coefficient processing
+        if is_segment26:
+            self._segment26_sahi_mode = True
+
         success = self.sahi_aggregator.add_crop_predictions(batch, raw_preds, preds[0], proto)
         
         # Clear references
         self._last_raw_preds = None
         self._last_proto = None
+        self._segment26_masks = None
         
         if not success:
             LOGGER.warning("Cannot add_crop_predictions for SAHI segmentation")
@@ -454,6 +729,7 @@ class SegmentationValidator(DetectionValidator):
                 traceback.print_exc()
             finally:
                 self.sahi_aggregator.cleanup_image(img_key)
+                self._segment26_sahi_mode = False
 
     # ==================== SAHI Image Processing ====================
 
@@ -472,6 +748,10 @@ class SegmentationValidator(DetectionValidator):
         original_shape = self.sahi_aggregator.image_crops[img_key]['original_shape']
         img_idx = self.sahi_aggregator.image_crops[img_key]['original_img_idx']
         
+        debug = os.environ.get('YOLO_DEBUG')
+        if debug:
+            print(f"[_process_complete] img_key={img_key}, aggregated len={len(aggregated_preds_raw)}, shape={aggregated_preds_raw.shape if len(aggregated_preds_raw) > 0 else 'empty'}")
+
         # For single task: mask_start_col = 6 (after xyxy, conf, cls)
         # NMS output format: [x1, y1, x2, y2, conf, cls, mask_coeffs...]
         mask_start_col = 4 + 2 * len(self.nc)
@@ -499,6 +779,11 @@ class SegmentationValidator(DetectionValidator):
                 nc=nc_for_nms,  # Pass as list (fork's NMS uses sum(nc))
             )
             
+            if debug:
+                nms_len = len(nms_results[0]) if nms_results and len(nms_results) > 0 else 0
+                nms_shape = nms_results[0].shape if nms_results and len(nms_results) > 0 and len(nms_results[0]) > 0 else 'empty'
+                print(f"[_process_complete NMS] nms_results len={nms_len}, shape={nms_shape}, conf={self.args.conf}")
+
             if nms_results and len(nms_results[0]) > 0:
                 preds_with_ids = nms_results[0]
                 
@@ -534,6 +819,9 @@ class SegmentationValidator(DetectionValidator):
         if gt_cls.dim() == 1:
             gt_cls = gt_cls.unsqueeze(1)
         
+        if debug:
+            print(f"[_process_complete GT] img_idx={img_idx}, gt_cls={gt_cls.shape}, gt_bboxes={gt_bboxes.shape}, preds={aggregated_preds.shape if len(aggregated_preds) > 0 else 'empty'}")
+
         # Build GT masks
         gt_segments = original_labels.get("segments", [])
         gt_masks = self._build_gt_masks(gt_segments, original_shape)
@@ -658,6 +946,17 @@ class SegmentationValidator(DetectionValidator):
             stat[t]["conf"] = aggregated_preds[..., conf_idx]
             stat[t]["pred_cls"] = aggregated_preds[..., cls_idx]
             
+            debug = os.environ.get('YOLO_DEBUG')
+            if debug:
+                pred_boxes = aggregated_preds[:, :4]
+                pred_cls = aggregated_preds[:, cls_idx]
+                pred_conf = aggregated_preds[:, conf_idx]
+                print(f"[SAHI METRICS] pred_boxes range: x=[{pred_boxes[:, 0].min():.1f}, {pred_boxes[:, 0].max():.1f}], y=[{pred_boxes[:, 1].min():.1f}, {pred_boxes[:, 1].max():.1f}]")
+                print(f"[SAHI METRICS] pred_boxes wh: w=[{(pred_boxes[:, 2]-pred_boxes[:, 0]).min():.1f}, {(pred_boxes[:, 2]-pred_boxes[:, 0]).max():.1f}], h=[{(pred_boxes[:, 3]-pred_boxes[:, 1]).min():.1f}, {(pred_boxes[:, 3]-pred_boxes[:, 1]).max():.1f}]")
+                print(f"[SAHI METRICS] gt_boxes range: x=[{gt_bboxes_xyxy[:, 0].min():.1f}, {gt_bboxes_xyxy[:, 0].max():.1f}], y=[{gt_bboxes_xyxy[:, 1].min():.1f}, {gt_bboxes_xyxy[:, 1].max():.1f}]")
+                print(f"[SAHI METRICS] pred_cls unique: {pred_cls.unique()[:10].tolist()}, gt_cls: {gt_cls_task.unique().tolist()}")
+                print(f"[SAHI METRICS] conf range: [{pred_conf.min():.4f}, {pred_conf.max():.4f}]")
+
             if nl > 0:
                 stat[t]["tp"] = self._process_batch(aggregated_preds, gt_bboxes_xyxy, gt_cls_task)
                 
@@ -728,6 +1027,12 @@ class SegmentationValidator(DetectionValidator):
         if len(aggregated_preds) == 0:
             return None
         
+        # For Segment26 end2end, masks are already decoded - skip coefficient processing
+        # Return empty masks for now (box metrics will still work)
+        if getattr(self, '_segment26_sahi_mode', False):
+            h, w = original_shape
+            return torch.zeros((len(aggregated_preds), h, w), device=self.device, dtype=torch.bool)
+
         if aggregated_preds.shape[1] <= mask_start_col:
             return None
         
@@ -1040,6 +1345,10 @@ class SegmentationValidator(DetectionValidator):
                 )
         else:
             iou = box_iou(gt_bboxes, detections[:, :4])
+            debug = os.environ.get('YOLO_DEBUG')
+            if debug:
+                print(f"[_process_batch] box_iou max: {iou.max():.4f}, mean: {iou.mean():.4f}, >0.5: {(iou > 0.5).sum()}")
+                print(f"[_process_batch] pred_cls[:5]: {detections[:5, 5].tolist()}, gt_cls: {gt_cls.tolist()}")
 
         return self.match_predictions(detections[:, 5], gt_cls, iou)
 

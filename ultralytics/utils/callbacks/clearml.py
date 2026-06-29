@@ -1,17 +1,22 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
+# ClearML integration disabled to avoid offline mode errors
 
 from ultralytics.utils import LOGGER, SETTINGS, TESTS_RUNNING
 
-try:
-    assert not TESTS_RUNNING  # do not log pytest
-    assert SETTINGS["clearml"] is True  # verify integration is enabled
-    import clearml
-    from clearml import Task
+# Disabled: ClearML causes issues in offline mode
+clearml = None
 
-    assert hasattr(clearml, "__version__")  # verify package is not directory
-
-except (ImportError, AssertionError):
-    clearml = None
+# Original code (disabled):
+# try:
+#     assert not TESTS_RUNNING  # do not log pytest
+#     assert SETTINGS["clearml"] is True  # verify integration is enabled
+#     import clearml
+#     from clearml import Task
+#
+#     assert hasattr(clearml, "__version__")  # verify package is not directory
+#
+# except (ImportError, AssertionError):
+#     clearml = None
 
 
 def _log_debug_samples(files, title="Debug Samples") -> None:
