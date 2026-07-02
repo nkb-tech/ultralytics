@@ -29,6 +29,14 @@ class SegmentationPredictor(DetectionPredictor):
 
     def postprocess(self, preds, img, orig_imgs):
         """Applies non-max suppression and processes detections for each image in an input batch."""
+        # PyTorch Segment.forward returns ((detections, proto), raw_dict) for inference.
+        # Exported models may return the older (detections, proto) layout.
+        if isinstance(preds, (list, tuple)) and len(preds) == 2 and isinstance(preds[0], (list, tuple)):
+            det_preds, proto = preds[0]
+        else:
+            det_preds = preds[0]
+            proto = preds[1][-1] if isinstance(preds[1], tuple) else preds[1]
+
         # nc must be a list for multi-task NMS compatibility (fork modification)
         # Get nc from model architecture - search in multiple places
         nc = None
@@ -50,7 +58,7 @@ class SegmentationPredictor(DetectionPredictor):
         # Fallback: calculate from prediction shape
         # preds[0] shape: [batch, channels, anchors] where channels = 4 + nc + 32 (mask coeffs)
         if nc is None:
-            pred_channels = preds[0].shape[1]
+            pred_channels = det_preds.shape[1]
             nc = pred_channels - 4 - 32  # bbox(4) + classes(nc) + masks(32)
             if nc < 1:
                 nc = len(self.model.names)  # last resort
@@ -63,7 +71,7 @@ class SegmentationPredictor(DetectionPredictor):
         else:
             nc_list = [nc]
         p = nms.non_max_suppression(
-            preds[0],
+            det_preds,
             self.args.conf,
             self.args.iou,
             agnostic=self.args.agnostic_nms,
@@ -76,8 +84,7 @@ class SegmentationPredictor(DetectionPredictor):
             orig_imgs = ops.convert_torch2numpy_batch(orig_imgs)
 
         results = []
-        proto = preds[1][-1] if isinstance(preds[1], tuple) else preds[1]  # tuple if PyTorch model or array if exported
-        
+
         # Calculate mask coefficient start column based on proto channels
         # Fork's NMS output: [x1,y1,x2,y2, conf0,cls0, conf1,cls1, ..., mask_coeffs]
         # Mask coefficients are always the last `proto.shape[0]` columns (typically 32)
