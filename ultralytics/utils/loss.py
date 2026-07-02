@@ -1321,14 +1321,16 @@ class v8SegmentationLoss(v8DetectionLoss):
         else:
             pred_semseg = None
             
-        (fg_mask, target_gt_idx, target_bboxes, _, _), det_loss, _ = self.get_assigned_targets_and_loss(preds, batch)
+        (fg_mask, target_gt_idx, target_bboxes, _, stride_tensor), det_loss, _ = self.get_assigned_targets_and_loss(
+            preds, batch
+        )
         loss[0], loss[2], loss[3] = det_loss[0], det_loss[1], det_loss[2]
 
         batch_size, _, mask_h, mask_w = proto.shape
         if fg_mask.sum():
             masks = batch["masks"].to(self.device).float()
             if tuple(masks.shape[-2:]) != (mask_h, mask_w):
-                proto = F.interpolate(proto, masks.shape[-2:], mode="bilinear", align_corners=False)
+                masks = F.interpolate(masks[None], (mask_h, mask_w), mode="nearest")[0]
 
             imgsz = (
                 torch.tensor(preds["feats"][0].shape[2:], device=self.device, dtype=pred_masks.dtype) * self.stride[0]
@@ -1337,7 +1339,7 @@ class v8SegmentationLoss(v8DetectionLoss):
                 fg_mask,
                 masks,
                 target_gt_idx,
-                target_bboxes,
+                target_bboxes * stride_tensor,
                 batch["batch_idx"].view(-1, 1),
                 proto,
                 pred_masks,
@@ -1366,7 +1368,7 @@ class v8SegmentationLoss(v8DetectionLoss):
                 loss[4] += (pred_semseg * 0).sum()
 
         loss[1] *= self.hyp.box
-        return loss * batch_size, loss.detach()
+        return loss.sum() * batch_size, loss.detach()
 
     @staticmethod
     def single_mask_loss(
@@ -1392,14 +1394,17 @@ class v8SegmentationLoss(v8DetectionLoss):
         _, _, mask_h, mask_w = proto.shape
         loss = 0
 
-        target_bboxes_normalized = target_bboxes / imgsz[[1, 0, 1, 0]]
-        marea = xyxy2xywh(target_bboxes_normalized)[..., 2:].prod(2)
+        target_bboxes_normalized = target_bboxes / (imgsz[[1, 0, 1, 0]] + 1e-8)
+        marea = xyxy2xywh(target_bboxes_normalized)[..., 2:].prod(2).clamp_(min=1e-6)
         mxyxy = target_bboxes_normalized * torch.tensor([mask_w, mask_h, mask_w, mask_h], device=proto.device)
+        n_max_boxes = self.assigner.n_max_boxes
 
         for i, single_i in enumerate(zip(fg_mask, target_gt_idx, pred_masks, proto, mxyxy, marea, masks)):
             fg_mask_i, target_gt_idx_i, pred_masks_i, proto_i, mxyxy_i, marea_i, masks_i = single_i
             if fg_mask_i.any():
-                mask_idx = target_gt_idx_i[fg_mask_i]
+                # target_gt_idx is flattened across the batch by TaskAlignedAssigner.prepare_targets().
+                # Masks are indexed locally within each image, so convert global indices back to local ids.
+                mask_idx = target_gt_idx_i[fg_mask_i] % n_max_boxes
                 if self.overlap:
                     gt_mask = masks_i == (mask_idx + 1).view(-1, 1, 1)
                     gt_mask = gt_mask.float()
