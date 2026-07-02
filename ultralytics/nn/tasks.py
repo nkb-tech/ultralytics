@@ -471,7 +471,7 @@ class SegmentationModel(DetectionModel):
         """Initialize YOLOv8 segmentation model with given config and parameters."""
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self, clf_loss_weights=None):
+    def init_criterion(self, clf_loss_weights=None, **kwargs):
         """Initialize the loss criterion for the SegmentationModel."""
         kwargs = dict(
             clf_loss_weights=clf_loss_weights,
