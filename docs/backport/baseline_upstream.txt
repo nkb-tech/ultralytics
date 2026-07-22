@@ -1,0 +1,27 @@
+[KDownloading https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-sem.pt to 'yolo26n-sem.pt': 11% ━─────────── 400.0KB/3.3MB 3.9MB/s 0.1s<0.8s[KDownloading https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-sem.pt to 'yolo26n-sem.pt': 100% ━━━━━━━━━━━━ 3.3MB 18.1MB/s 0.2s
+Ultralytics 8.4.104 🚀 Python-3.12.3 torch-2.13.0+cu130 CUDA:0 (NVIDIA GeForce RTX 4090 D, 48508MiB)
+YOLO26n-sem summary (fused): 73 layers, 1,627,822 parameters, 0 gradients, 4.3 GFLOPs
+[34m[1mval: [0mFast image access ✅ (ping: 0.0±0.0 ms, read: 1415.9±642.9 MB/s, size: 2137.3 KB)
+[K[34m[1mval: [0mScanning /home/dimaal/datasets/cityscapes8/masks/val.cache... 4 masks, 0 missing, 0 corrupt: 100% ━━━━━━━━━━━━ 4/4 599.2Kit/s 0.0s
+[K                 Class     Images     Pixels       mIoU     PixAcc: 100% ━━━━━━━━━━━━ 1/1 2.1it/s 0.5s
+                   all          4     488963      0.521      0.933
+                  road          4     200379      0.984      0.995
+              sidewalk          4      27509      0.806      0.901
+              building          4     104470      0.847      0.916
+                  wall          2        437      0.685      0.716
+                 fence          4       6075      0.206      0.252
+                  pole          4       5955      0.286      0.413
+         traffic light          3        774       0.52      0.629
+          traffic sign          4       6183      0.725      0.825
+            vegetation          4      95522       0.87      0.925
+               terrain          2       2676      0.352      0.795
+                   sky          4      19603      0.919      0.952
+                person          3       1848      0.331      0.392
+                 rider          1         51          0          0
+                   car          4      17266      0.796      0.944
+            motorcycle          2        117          0          0
+               bicycle          1         98          0          0
+Speed: 0.2ms preprocess, 15.7ms inference, 0.0ms loss, 1.5ms postprocess per image
+Results saved to [1m/home/dimaal/work/sem/runs/semantic/val[0m
+💡 Learn more at https://docs.ultralytics.com/modes/val
+[34m[1mVS Code:[0m view Ultralytics VS Code Extension ⚡ at https://docs.ultralytics.com/integrations/vscode
