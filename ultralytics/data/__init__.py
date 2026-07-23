@@ -5,6 +5,7 @@ from .build import build_dataloader, build_grounding, build_yolo_dataset, load_i
 from .dataset import (
     ClassificationDataset,
     GroundingDataset,
+    PolygonSemanticDataset,
     SemanticDataset,
     YOLOConcatDataset,
     YOLODataset,
@@ -18,6 +19,7 @@ from .sahi_dataset import (
 __all__ = (
     "BaseDataset",
     "ClassificationDataset",
+    "PolygonSemanticDataset",
     "SemanticDataset",
     "YOLODataset",
     "YOLOMultiModalDataset",
