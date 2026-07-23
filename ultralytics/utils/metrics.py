@@ -12,6 +12,14 @@ import torch
 from ultralytics.utils import LOGGER, SimpleClass, TryExcept, plt_settings
 from ultralytics.utils.tf import xyxy2xywh
 
+# ENet inverse-log class weights for Cityscapes 19-class semantic segmentation (Paszke et al., 2016)
+CITYSCAPES_WEIGHT = np.array(
+    [
+        0.8373, 0.918, 0.866, 1.0345, 1.0166, 0.9969, 0.9754, 1.0489, 0.8786, 1.0023,
+        0.9539, 0.9843, 1.1116, 0.9037, 1.0865, 1.0955, 1.0865, 1.1529, 1.0507,
+    ]
+)
+
 OKS_SIGMA = (
     np.array([0.26, 0.25, 0.25, 0.35, 0.35, 0.79, 0.79, 0.72, 0.72, 0.62, 0.62, 1.07, 1.07, 0.87, 0.87, 0.89, 0.89])
     / 10.0

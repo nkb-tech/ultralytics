@@ -1,12 +1,14 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ultralytics.utils import LOGGER, colorstr
 
-from ultralytics.utils.metrics import OKS_SIGMA
+from ultralytics.utils.metrics import CITYSCAPES_WEIGHT, OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast, disable_dynamo
@@ -1008,3 +1010,129 @@ class E2ESegmentLoss:
         one2one = preds["one2one"]
         loss_one2one = self.one2one(one2one, batch)
         return loss_one2many[0] + loss_one2one[0], loss_one2many[1] + loss_one2one[1]
+
+
+class SemanticSegmentationLoss(nn.Module):
+    """Loss function for semantic segmentation using cross-entropy and Dice terms.
+
+    Attributes:
+        nc (int): Number of semantic classes.
+        ce (nn.CrossEntropyLoss): Cross-entropy loss with ignore_index=255.
+    """
+
+    def __init__(self, model: torch.nn.Module):
+        """Initialize semantic segmentation loss.
+
+        Args:
+            model (torch.nn.Module): Model containing the SemanticSegment head.
+        """
+        super().__init__()
+        m = model.model[-1]
+        self.nc = m.nc
+        self.device = next(model.parameters()).device
+        self.dtype = next(model.parameters()).dtype
+        # fork: model.args is a dict (set in attempt_load_*), upstream uses a namespace
+        _args = getattr(model, "args", None)
+        _data = ""
+        if isinstance(_args, dict):
+            _data = _args.get("data", "")
+        elif _args is not None:
+            _data = getattr(_args, "data", "")
+        data_name = Path(str(_data or "")).stem.lower()
+        self.use_cityscapes_weight = data_name in {"cityscapes", "cityscapes8"} and self.nc == len(CITYSCAPES_WEIGHT)
+        weight = getattr(model, "class_weights", None)  # cls_pw frequency weights, else hardcoded Cityscapes
+        if weight is None and self.use_cityscapes_weight:
+            weight = torch.from_numpy(CITYSCAPES_WEIGHT)
+        weight = None if weight is None else weight.to(device=self.device, dtype=self.dtype)
+        if self.nc == 1:
+            self.ce = nn.BCEWithLogitsLoss(reduction="sum")  # binary: class weighting intentionally unsupported
+        else:
+            self.ce = nn.CrossEntropyLoss(ignore_index=255, reduction="sum").to(device=self.device, dtype=self.dtype)
+            if weight is not None:
+                # Non-persistent: weight is a deterministic constant, no need to serialize into ckpt state_dict.
+                self.ce.register_buffer("weight", weight, persistent=False)
+
+    def _resize_masks(self, masks, target_shape):
+        """Resize masks to match prediction spatial dimensions."""
+        if masks.shape[1:] != target_shape:
+            return (
+                F.interpolate(masks.float().unsqueeze(1), size=target_shape, mode="nearest").squeeze(1).to(torch.int32)
+            )
+        return masks
+
+    def _ce_loss(self, preds, masks, valid):
+        """Compute cross-entropy on flattened pixels to avoid the CUDA nll_loss2d path."""
+        flat = masks.reshape(-1)
+        if self.nc == 1:
+            logits = preds.reshape(-1)[valid]
+            target = flat[valid].float()
+            denominator = valid.sum()
+        else:
+            logits = preds.permute(0, 2, 3, 1).reshape(-1, self.nc)
+            target = flat.long()
+            denominator = valid.sum() if self.ce.weight is None else self.ce.weight[target[valid]].sum()
+        return self.ce(logits, target) / denominator.clamp_min(1)
+
+    def _dice_loss(self, preds, masks, valid):
+        """Compute Dice loss excluding ignore pixels."""
+        if self.nc == 1:
+            return self._binary_dice_loss(preds, masks, valid)
+        flat_target = masks.reshape(-1)
+        pred_soft = F.softmax(preds, dim=1)
+        target = flat_target[valid].long()
+        flat_pred = pred_soft.float().permute(0, 2, 3, 1).reshape(-1, self.nc)[valid]
+        intersection = torch.zeros(self.nc, device=preds.device, dtype=torch.float32)
+        intersection.scatter_add_(0, target, flat_pred.gather(1, target[:, None]).squeeze(1))
+        pred_sum = flat_pred.sum(dim=0)
+        target_sum = torch.bincount(target, minlength=self.nc).to(device=preds.device, dtype=torch.float32)
+        cardinality = pred_sum + target_sum
+        return (1.0 - (2.0 * intersection + 1.0) / (cardinality + 1.0)).mean()
+
+    def _binary_dice_loss(self, preds, masks, valid):
+        """Compute Dice loss for single-class (binary) segmentation.
+
+        Pixels with value 255 are excluded from Dice terms to match BCE valid-pixel filtering.
+        """
+        valid = valid.reshape_as(masks).float()
+        pred_soft = preds.squeeze(1).sigmoid()
+        target = (masks == 1).float()
+        intersection = (pred_soft * target * valid).sum()
+        cardinality = ((pred_soft + target) * valid).sum()
+        return 1.0 - (2.0 * intersection + 1.0) / (cardinality + 1.0)
+
+    def forward(self, preds, batch):
+        """Compute semantic segmentation loss with optional auxiliary loss.
+
+        Args:
+            preds (torch.Tensor | tuple): Main logits [B, nc, H', W'], or (main, aux) tuple.
+            batch (dict): Batch dict with 'semantic_mask' [B, H, W] containing class IDs (255=ignore).
+
+        Returns:
+            (tuple[torch.Tensor, dict[str, torch.Tensor]]): Total loss * batch_size and a dict of detached loss items
+                (ce_loss, dice_loss, aux_loss).
+        """
+        # Unpack auxiliary logits when present.
+        aux_logits = None
+        if isinstance(preds, tuple):
+            preds, aux_logits = preds
+
+        masks = batch["semantic_mask"].to(preds.device)
+        valid = masks.reshape(-1) != 255
+        if preds.shape[2:] != masks.shape[1:]:
+            preds = F.interpolate(preds, size=masks.shape[1:], mode="bilinear", align_corners=False)
+
+        # Main cross-entropy and Dice loss.
+        ce_loss = self._ce_loss(preds, masks, valid)
+        dice_loss = self._dice_loss(preds, masks, valid)
+        total = ce_loss + dice_loss
+
+        # Auxiliary cross-entropy loss. Match ce_loss dtype so adding to total succeeds under AMP.
+        aux_loss = torch.tensor(0.0, device=preds.device, dtype=ce_loss.dtype)
+        if aux_logits is not None:
+            if aux_logits.shape[2:] != masks.shape[1:]:
+                aux_logits = F.interpolate(aux_logits, size=masks.shape[1:], mode="bilinear", align_corners=False)
+            aux_loss = self._ce_loss(aux_logits, masks, valid) * 0.4
+            total += aux_loss
+
+        loss_items = {"ce_loss": ce_loss.detach(), "dice_loss": dice_loss.detach(), "aux_loss": aux_loss.detach()}
+        return total * preds.shape[0], loss_items
