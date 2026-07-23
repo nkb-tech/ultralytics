@@ -416,6 +416,78 @@ class SegmentationModel(DetectionModel):
         return E2ESegmentLoss(self) if getattr(self, "end2end", False) else v8SegmentationLoss(self)
 
 
+class SemanticSegmentationModel(BaseModel):
+    """YOLO semantic segmentation model.
+
+    Produces per-pixel class predictions. Unlike SegmentationModel (instance
+    segmentation), no bounding boxes are produced.
+    """
+
+    def __init__(self, cfg="yolo26-sem.yaml", ch=3, nc=None, verbose=True):
+        """Initialize the YOLO semantic segmentation model."""
+        super().__init__()
+        # inline replacement for upstream _initialize_yolo_model()
+        self.yaml = cfg if isinstance(cfg, dict) else yaml_model_load(cfg)
+        ch = self.yaml["ch"] = self.yaml.get("ch", ch)
+        # fork's yaml_model_load() wraps nc into a list for multihead; semantic needs a scalar
+        nc_yaml = self.yaml.get("nc")
+        if isinstance(nc_yaml, (list, tuple)):
+            nc_yaml = nc_yaml[0]
+        if nc and nc != nc_yaml:
+            LOGGER.info(f"Overriding model.yaml nc={nc_yaml} with nc={nc}")
+            nc_yaml = nc
+        self.yaml["nc"] = nc_yaml  # scalar for parse_model and SemanticSegment
+        self.model, self.save = parse_model(deepcopy(self.yaml), ch=ch, verbose=verbose)
+        self.names = {i: f"{i}" for i in range(nc_yaml)}
+        self.inplace = self.yaml.get("inplace", True)
+
+        # Build strides: track smallest spatial size across all layers to find the deepest
+        # backbone stride (e.g. P5/32). Head input alone is insufficient: the FPN upsamples
+        # P5 away before the head, but the encoder still requires inputs aligned to that
+        # deepest stride or FPN concats fail on rounding mismatches.
+        m = self.model[-1]
+        if isinstance(m, SemanticSegment):
+            s = 256
+            self.model.eval()
+            m.training = True  # get training output
+            min_h = [s]
+
+            def _record(_m, _inp, out, _h=min_h):
+                if isinstance(out, torch.Tensor) and out.ndim == 4:
+                    _h[0] = min(_h[0], out.shape[-2])
+
+            hooks = [layer.register_forward_hook(_record) for layer in self.model]
+            try:
+                self.forward(torch.zeros(1, ch, s, s))
+            finally:
+                for h in hooks:
+                    h.remove()
+            m.stride = torch.tensor([s / min_h[0]], dtype=torch.float32)
+            self.stride = m.stride
+            self.model.train()
+        else:
+            self.stride = torch.Tensor([32])
+
+        initialize_weights(self)
+        if verbose:
+            self.info()
+            LOGGER.info("")
+
+    def init_criterion(self):
+        """Initialize the loss criterion for semantic segmentation."""
+        from ultralytics.utils.loss import SemanticSegmentationLoss
+
+        return SemanticSegmentationLoss(self)
+
+    def _apply(self, fn):
+        """Apply a function to all tensors in the model."""
+        self = super()._apply(fn)
+        m = self.model[-1]
+        if isinstance(m, SemanticSegment):
+            m.stride = fn(m.stride)
+        return self
+
+
 class PoseModel(DetectionModel):
     """YOLOv8 pose model."""
 
@@ -1172,6 +1244,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args[1] = make_divisible(min(args[1], max_channels) * width, 8)
             if m in (Pose_LSCD, Pose_TADDH, Pose_LSCSBD, OBB_LSCD, OBB_TADDH, OBB_LSCSBD):
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
+        elif m is SemanticSegment:
+            args.append([ch[x] for x in f])  # nc, ch tuple
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
             
@@ -1411,6 +1485,8 @@ def guess_model_task(model):
             return "classify"
         if "detect" in m:
             return "detect"
+        if m == "semanticsegment":
+            return "semantic"
         if m == "segment":
             return "segment"
         if m == "pose":
@@ -1433,7 +1509,9 @@ def guess_model_task(model):
                 return cfg2task(eval(x))
 
         for m in model.modules():
-            if isinstance(m, (Segment, v10Segment)):
+            if isinstance(m, SemanticSegment):
+                return "semantic"
+            elif isinstance(m, (Segment, v10Segment)):
                 return "segment"
             elif isinstance(m, Classify):
                 return "classify"
