@@ -14,6 +14,8 @@ from ultralytics.data.dataset import (
     YOLODataset,
     YOLOWeightedDataset,
     YOLOMultiModalDataset,
+    SemanticDataset,
+    PolygonSemanticDataset,
 )
 from ultralytics.data.loaders import (
     LOADERS,
@@ -95,7 +97,12 @@ def seed_worker(worker_id):  # noqa
 
 def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, stride=32, multi_modal=False):
     """Build YOLO Dataset."""
-    if multi_modal:
+    pad = 0.0 if mode == "train" else 0.5
+    if cfg.task == "semantic":
+        data_path = Path(data.get("path", ""))
+        dataset = SemanticDataset if ("masks_dir" in data or (data_path / "masks").exists()) else PolygonSemanticDataset
+        pad = 0.0  # no pad for semantic
+    elif multi_modal:
         dataset = YOLOMultiModalDataset
     elif cfg.weighted and mode == "train":
         dataset = YOLOWeightedDataset
@@ -124,7 +131,7 @@ def build_yolo_dataset(cfg, img_path, batch, data, mode="train", rect=False, str
         cache=cfg.cache or None,
         single_cls=cfg.single_cls or False,
         stride=int(stride),
-        pad=0.0 if mode == "train" else 0.5,
+        pad=pad,
         prefix=colorstr(f"{mode}: "),
         task=cfg.task,
         classes=cfg.classes,

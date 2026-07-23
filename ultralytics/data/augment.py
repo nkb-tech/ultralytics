@@ -2090,6 +2090,16 @@ class LetterBox:
         img = cv2.copyMakeBorder(
             img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114)
         )  # add border
+
+        # Semantic masks: nearest-neighbour resize (class IDs must not be interpolated) and
+        # pad with 255 (ignore_index) so letterbox borders are excluded from loss and metrics.
+        mask = labels.get("semantic_mask") if labels else None
+        if mask is not None:
+            if shape[::-1] != new_unpad:
+                mask = cv2.resize(mask, new_unpad, interpolation=cv2.INTER_NEAREST)
+            labels["semantic_mask"] = cv2.copyMakeBorder(
+                mask, top, bottom, left, right, cv2.BORDER_CONSTANT, value=255
+            )
         if labels.get("ratio_pad"):
             labels["ratio_pad"] = (labels["ratio_pad"], (left, top))  # for evaluation
 

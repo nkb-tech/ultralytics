@@ -507,11 +507,19 @@ class SemanticDataset(YOLODataset):
             data (dict): Dataset configuration dictionary.
             **kwargs (Any): Additional keyword arguments for the parent class.
         """
+        # fork wraps data["nc"] in a list for multihead detection; semantic needs a scalar.
+        # Shallow copy keeps the shared dict (used by trainer/validator) untouched.
+        if data is not None and isinstance(data.get("nc"), (list, tuple)):
+            data = {**data, "nc": data["nc"][0]}
         self.data = data or {}
         self.label_mapping = self._parse_label_mapping(self.data.get("label_mapping"))
         self.mask_files = []
         self.include_class = None
         super().__init__(*args, data=data, **kwargs)
+        # fork's YOLODataset.build_transforms() does len(self.nc) for multihead; keep it a list
+        # while self.data["nc"] stays scalar for the semantic code paths.
+        if not isinstance(self.nc, (list, tuple)):
+            self.nc = [self.nc]
 
     def update_labels(self, include_class: list[int] | None) -> None:
         """Update labels to include only specified classes.
@@ -732,6 +740,10 @@ class PolygonSemanticDataset(SemanticDataset, YOLODataset):
             data (dict): Dataset configuration dictionary.
             **kwargs (Any): Additional keyword arguments for the parent class.
         """
+        # fork wraps data["nc"] in a list for multihead detection; semantic needs a scalar.
+        # Shallow copy keeps the shared dict (used by trainer/validator) untouched.
+        if data is not None and isinstance(data.get("nc"), (list, tuple)):
+            data = {**data, "nc": data["nc"][0]}
         nc = (data or {}).get("nc") or len((data or {}).get("names", {}))
         self.bg_class_idx = data.get("bg_class_idx", max(int(nc) - 1, 0))
         super().__init__(*args, data=data, **kwargs)

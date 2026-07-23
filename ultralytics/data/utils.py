@@ -42,10 +42,16 @@ PIN_MEMORY = str(os.getenv("PIN_MEMORY", True)).lower() == "true"  # global pin_
 FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
 
 
-def img2label_paths(img_paths):
-    """Define label paths as a function of image paths."""
-    sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}labels{os.sep}"  # /images/, /labels/ substrings
-    return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + ".txt" for x in img_paths]
+def img2label_paths(img_paths, label_dir="labels", suffix=".txt"):
+    """Define label paths as a function of image paths.
+
+    Args:
+        img_paths (list[str]): Image file paths.
+        label_dir (str): Directory name replacing 'images' in the path ('masks' for semantic).
+        suffix (str): Label file extension ('.png' for semantic masks).
+    """
+    sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}{label_dir}{os.sep}"  # /images/, /labels/ substrings
+    return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + f"{suffix}" for x in img_paths]
 
 
 def get_hash(paths):
