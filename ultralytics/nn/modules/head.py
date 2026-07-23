@@ -10,6 +10,7 @@ import torch
 from torch import Tensor
 import torch.nn as nn
 from torch.nn.init import constant_, xavier_uniform_
+import torch.nn.functional as F
 
 from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import disable_dynamo
@@ -22,6 +23,7 @@ from .utils import bias_init_with_prob, linear_init
 __all__ = (
     "Detect",
     "Segment",
+    "SemanticSegment",
     "Pose",
     "Classify",
     "OBB",
@@ -1018,3 +1020,71 @@ class PostDetectONNXNMS(PostDetectTRTNMS):
         X = X.unsqueeze(1).float()
         return torch.cat([X, selected_boxes, selected_scores, selected_categories], 1)
     
+
+
+class SemanticSegment(nn.Module):
+    """YOLO semantic segmentation head for per-pixel classification.
+
+    This head produces dense per-pixel class predictions. Unlike instance segmentation, no bounding boxes or instance
+    masks are produced.
+
+    Attributes:
+        nc (int): Number of semantic classes.
+        nl (int): Number of input feature levels.
+        stride (torch.Tensor): Feature map strides.
+        export (bool): Export mode flag.
+        format (str): Export format.
+        classifier (nn.Sequential): Final convolutional classifier head.
+        aux_head (nn.Sequential | None): Auxiliary classifier on P4 for deep supervision.
+    """
+
+    export = False  # export mode
+    format = None  # export format
+    bake_argmax = False  # export: emit [B, H, W] class map (TensorRT>=10 and multi-class Hailo-10/15)
+
+    def __init__(self, nc=19, ch=()):
+        """Initialize the semantic segmentation head.
+
+        Args:
+            nc (int): Number of semantic classes.
+            ch (tuple): Tuple of channel sizes from neck feature maps (P3, P4).
+        """
+        super().__init__()
+        self.nc = nc
+        self.nl = len(ch)
+        self.stride = torch.zeros(self.nl)
+
+        c_mid = ch[0]  # use P3 channel width as intermediate dimension
+        # Final classifier
+        self.classifier = nn.Sequential(Conv(c_mid, c_mid, 3), nn.Conv2d(c_mid, nc, 1))
+        # Auxiliary head on P4 (index 1) for training
+        self.aux_head = nn.Sequential(Conv(ch[1], c_mid, 3), nn.Conv2d(c_mid, nc, 1)) if len(ch) > 1 else None
+
+    def forward(self, x):
+        """Forward pass: fuse multi-scale features and predict per-pixel classes.
+
+        Args:
+            x (list[torch.Tensor]): List of feature maps [P3, P4].
+
+        Returns:
+            (torch.Tensor | tuple): Logits of shape [B, nc, H/8, W/8] during training (or a (main, aux) tuple when
+                aux_head is present) and inference. ONNX, MNN, TensorRT>=10, and multi-class Hailo-10/15 export bake in
+                the class reduction and return a compact map of shape [B, H, W] (uint8 when nc <= 256, else int32).
+                Other export formats return upsampled logits of shape [B, nc, H, W].
+        """
+        # Classify
+        logits = self.classifier(x[0])  # [B, nc, H/8, W/8]
+        if self.training:
+            if self.aux_head is not None:
+                return logits, self.aux_head(x[1])  # main + aux (P4)
+            return logits
+        if self.export:
+            y = F.interpolate(logits, scale_factor=8, mode="bilinear", align_corners=False)  # [B, nc, H, W]
+            # Bake class reduction: emit [B, H, W] map, shrinking the D2H copy ~80x. ONNX/MNN and multi-class
+            # Hailo-10/15 preserve the integer output; TensorRT supports uint8 graph outputs only on TRT>=10, so
+            # engine and Hailo baking are gated by the exporter.
+            if self.format in {"onnx", "mnn"} or (self.format in {"engine", "hailo"} and self.bake_argmax):
+                cls = y.argmax(1) if self.nc > 1 else y.squeeze(1) > 0
+                return cls.to(torch.uint8 if self.nc <= 256 else torch.int32)
+            return y
+        return logits

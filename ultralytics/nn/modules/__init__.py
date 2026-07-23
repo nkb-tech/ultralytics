@@ -103,6 +103,7 @@ from .head import (
     v11Detect,
     PostDetectTRTNMS,
     PostDetectONNXNMS,
+    SemanticSegment,
 )
 from .transformer import (
     AIFI,
@@ -162,6 +163,7 @@ __all__ = (
     "Proto",
     "Detect",
     "Segment",
+    "SemanticSegment",
     "Pose",
     "Classify",
     "TransformerEncoderLayer",
