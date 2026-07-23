@@ -2723,6 +2723,27 @@ class Format:
         return f"Format(bbox_format={self.bbox_format}, normalize={self.normalize})"
 
 
+
+
+class SemanticFormat(Format):
+    """Format transform for semantic segmentation: image + per-pixel mask to tensors.
+
+    NOTE: upstream 8.4.x overrides apply_image()/apply_instances() hooks, but this fork's
+    Format.__call__() is monolithic and never calls them, so __call__ is overridden directly.
+    """
+
+    def __call__(self, labels):
+        """Format image and semantic mask, dropping instance-level keys."""
+        img = labels.pop("img", None)
+        if img is not None:
+            labels["img"] = self._format_img(img)
+        mask = labels.get("semantic_mask")
+        if mask is not None:
+            labels["semantic_mask"] = torch.from_numpy(mask.copy()).to(torch.int32)
+        for k in ("cls", "instances", "resized_shape", "ori_shape", "ratio_pad"):
+            labels.pop(k, None)
+        return labels
+
 class RandomLoadText:
     """
     Randomly samples positive and negative texts and updates class indices accordingly.

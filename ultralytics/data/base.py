@@ -159,8 +159,14 @@ class BaseDataset(Dataset):
             if self.single_cls:
                 self.labels[i]["cls"][:, 0] = 0
     
-    def _resize(self, im, h0, w0, rect_mode):
+    def _resize(self, im, h0, w0, rect_mode, resize_short=False):
         if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
+            if resize_short:  # semantic: resize SHORT side to imgsz instead
+                r = self.imgsz / min(h0, w0)
+                if r != 1:
+                    w, h = (math.ceil(w0 * r), self.imgsz) if h0 < w0 else (self.imgsz, math.ceil(h0 * r))
+                    return cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+                return im
             r = self.imgsz / max(h0, w0)  # ratio
             if r != 1:  # if sizes are not equal
                 w = min(math.ceil(w0 * r), self.imgsz)
@@ -170,7 +176,7 @@ class BaseDataset(Dataset):
             return cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
         return im
 
-    def load_image(self, i, rect_mode=True):
+    def load_image(self, i, rect_mode=True, resize_short=False):
         stored, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
         if self.cache == "low-ram" and isinstance(
             stored, (bytes, bytearray)
@@ -182,7 +188,7 @@ class BaseDataset(Dataset):
             h0, w0 = im.shape[:2]
 
             if not self.sahi:
-                im = self._resize(im, h0, w0, rect_mode)
+                im = self._resize(im, h0, w0, rect_mode, resize_short)
 
             if self.augment:
                 self.im_hw0[i], self.im_hw[i] = (h0, w0), im.shape[:2]
@@ -210,7 +216,7 @@ class BaseDataset(Dataset):
 
         h0, w0 = im.shape[:2]  # orig hw
         if not self.sahi:
-            im = self._resize(im, h0, w0, rect_mode)
+            im = self._resize(im, h0, w0, rect_mode, resize_short)
 
         if self.augment:  # Add to buffer if training with augmentations
             self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
