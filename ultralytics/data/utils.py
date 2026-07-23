@@ -793,3 +793,82 @@ def save_dataset_cache_file(prefix, path, x, version):
         LOGGER.info(f"{prefix}New cache created: {path}")
     else:
         LOGGER.warning(f"{prefix}WARNING ⚠️ Cache directory {path.parent} is not writeable, cache not saved.")
+
+
+def check_image(im_file):
+    """Verify an image file for integrity and correct corrupt JPEGs if found.
+
+    Returns:
+        (str): Message describing corrective action taken, empty if valid.
+        (tuple[int, int]): Image shape as (height, width).
+    """
+    msg = ""
+    im = Image.open(im_file)
+    im.verify()  # PIL verify
+    shape = exif_size(im)  # image size
+    shape = (shape[1], shape[0])  # hw
+    assert (shape[0] > 9) & (shape[1] > 9), f"image size {shape} <10 pixels"
+    assert im.format.lower() in IMG_FORMATS, f"Invalid image format {im.format}. {FORMATS_HELP_MSG}"
+    if im.format.lower() in {"jpg", "jpeg"}:
+        with open(im_file, "rb") as f:
+            f.seek(-2, 2)
+            if f.read() != b"\xff\xd9":  # corrupt JPEG
+                ImageOps.exif_transpose(Image.open(im_file)).save(im_file, "JPEG", subsampling=0, quality=100)
+                msg = f"{im_file}: corrupt JPEG restored and saved"
+    return msg, shape
+
+
+def verify_image_mask(args):
+    """Verify that an image and its semantic mask exist, are readable, and have matching shapes."""
+    im_file, mask_file, prefix, check_bit_depth = args
+    nf, nm, nc, msg = 0, 0, 0, ""
+    try:
+        msg, shape = check_image(im_file)
+        msg = f"{prefix}{msg}" if msg else ""
+        if not os.path.isfile(mask_file):
+            for ext in IMG_FORMATS:  # check other suffixes
+                alt_mask_file = mask_file.rsplit(".", 1)[0] + f".{ext}"
+                if os.path.isfile(alt_mask_file):
+                    mask_file = alt_mask_file
+                    break
+        if os.path.isfile(mask_file):
+            mask = cv2.imread(mask_file, cv2.IMREAD_GRAYSCALE)
+            assert mask is not None, f"mask file {mask_file} is unreadable"
+            assert mask.shape[:2] == shape, f"mask size {mask.shape[:2]} does not match image size {shape}"
+            is_1bit = False
+            if check_bit_depth:
+                with Image.open(mask_file) as im:
+                    is_1bit = im.mode == "1"
+            nf = 1
+        else:
+            nm = 1
+            msg = f"{prefix}{im_file}: ignoring image with missing mask {mask_file}"
+            return None, None, None, None, nm, nf, nc, msg
+        return im_file, mask_file, shape, is_1bit, nm, nf, nc, msg
+    except Exception as e:
+        nc = 1
+        msg = f"{prefix}{im_file}: ignoring corrupt image/mask: {e}"
+    return None, None, None, None, nm, nf, nc, msg
+
+
+def add_polygon_background(data: dict) -> dict:
+    """Set up the background class for polygon-based semantic datasets without 'masks_dir'.
+
+    - nc > 1: appends a 'background' class at id=nc and bumps data['nc'] to nc+1; polygon
+      cls values are kept as foreground ids.
+    - nc == 1: keeps nc=1 (binary segmentation). Polygon rasterization
+      yields a {0=bg, 1=fg} mask regardless of the label cls value.
+    """
+    if data.get("masks_dir") or data.get("_polygon_bg_added"):
+        return data
+    nc = int(data.get("nc") or len(data.get("names") or {}))
+    if nc == 1:  # binary: bg=0, fg=1 (implicit); model uses BCE on a single output channel
+        data["bg_class_idx"] = 0
+    else:
+        names = dict(data.get("names") or {})
+        names[nc] = "background"
+        data["bg_class_idx"] = nc
+        data["nc"] = nc + 1
+        data["names"] = names
+    data["_polygon_bg_added"] = True
+    return data
