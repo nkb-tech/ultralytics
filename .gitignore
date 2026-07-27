@@ -172,8 +172,8 @@ calibration_*.npy
 tests/*
 multihead_training_test.py
 
-# Training scripts
-train.py
+# Training scripts (root only; bare pattern also swallowed task trainers)
+/train.py
 convert.ipynb
 
 # External dependencies
