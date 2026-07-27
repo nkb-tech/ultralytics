@@ -1,6 +1,6 @@
 # Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
 # YOLO26 semantic segmentation, backported to fork 8.3.6
-# NOTE: SPPF args trimmed from [1024, 5, 3, True] to [1024, 5] — fork SPPF is (c1, c2, k=5)
+# NOTE: uses SPPF26 (backported); the fork's own SPPF has a different cv1 activation
 
 nc: 19 # Cityscapes default
 scales:
@@ -20,7 +20,7 @@ backbone:
   - [-1, 2, C3k2, [512, True]]
   - [-1, 1, Conv, [1024, 3, 2]] # 7-P5/32
   - [-1, 2, C3k2, [1024, True]]
-  - [-1, 1, SPPF, [1024, 5]] # 9
+  - [-1, 1, SPPF26, [1024, 5, 3, True]] # 9
   - [-1, 2, C2PSA, [1024]] # 10
 
 head:

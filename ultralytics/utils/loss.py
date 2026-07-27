@@ -1134,5 +1134,7 @@ class SemanticSegmentationLoss(nn.Module):
             aux_loss = self._ce_loss(aux_logits, masks, valid) * 0.4
             total += aux_loss
 
-        loss_items = {"ce_loss": ce_loss.detach(), "dice_loss": dice_loss.detach(), "aux_loss": aux_loss.detach()}
+        # Форк 8.3.6: BaseTrainer/BaseValidator ждут ТЕНЗОР loss_items, не dict (upstream 8.4.x умеет dict).
+        # Порядок должен совпадать с SemanticSegmentationTrainer.loss_names.
+        loss_items = torch.stack([ce_loss.detach(), dice_loss.detach(), aux_loss.detach()])
         return total * preds.shape[0], loss_items

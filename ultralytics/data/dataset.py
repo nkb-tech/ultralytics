@@ -521,6 +521,17 @@ class SemanticDataset(YOLODataset):
         if not isinstance(self.nc, (list, tuple)):
             self.nc = [self.nc]
 
+    @staticmethod
+    def collate_fn(batch):
+        """Collate semantic batches: fork's YOLODataset.collate_fn requires batch_idx/cls, absent here."""
+        new_batch = {}
+        for k in batch[0]:
+            values = [b[k] for b in batch]
+            if k in {"img", "semantic_mask"}:
+                values = torch.stack(values, 0)
+            new_batch[k] = values
+        return new_batch
+
     def update_labels(self, include_class: list[int] | None) -> None:
         """Update labels to include only specified classes.
 
@@ -668,16 +679,13 @@ class SemanticDataset(YOLODataset):
         return mask.astype(np.uint8, copy=False)
 
     def build_transforms(self, hyp=None):
-        """Build transforms for semantic segmentation.
-
-        Args:
-            hyp (dict): Hyperparameters.
-
-        Returns:
-            (Compose): Composed transforms.
-        """
+        """Build transforms for semantic segmentation."""
+        # Форковые Mosaic/RandomPerspective/Albumentations не знают про semantic_mask и падают
+        # на пустом cls (Albumentations: cls.shape[1]). До переноса mask-aware версий собираем
+        # val-ветку (LetterBox + SemanticFormat) и для train.
+        # TODO: mask-aware аугментации — вернуть augment-ветку после переноса.
         transforms = super().build_transforms(hyp)
-        transforms[-1] = SemanticFormat()  # replace the last transform with SemanticFormat
+        transforms[-1] = SemanticFormat()
         return transforms
 
     def convert_label(self, label, inverse=False):

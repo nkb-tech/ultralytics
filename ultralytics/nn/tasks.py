@@ -473,8 +473,9 @@ class SemanticSegmentationModel(BaseModel):
             self.info()
             LOGGER.info("")
 
-    def init_criterion(self):
+    def init_criterion(self, weights=None, clf_loss_weights=None, **kwargs):
         """Initialize the loss criterion for semantic segmentation."""
+        # Форковый _setup_train зовёт с kwargs от детекции — принимаем и игнорируем.
         from ultralytics.utils.loss import SemanticSegmentationLoss
 
         return SemanticSegmentationLoss(self)
@@ -1149,7 +1150,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                         args[j] = a
 
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
-        if m in (Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, C2PSA, C2fPSA, C3k2, DWConv, DSConv, Focus,
+        # YOLO26 checkpoints embed their own yaml with SPPF(c2, k, n, shortcut); the fork's
+        # SPPF only takes (c1, c2, k), so 3+ args means the backported variant: SPPF -> SPPF26
+        if m is SPPF and len(args) > 2:
+            m = SPPF26
+        if m in (Classify, Conv, ConvTranspose, GhostConv, Bottleneck, GhostBottleneck, SPP, SPPF, SPPF26, C2PSA, C2fPSA, C3k2, DWConv, DSConv, Focus,
             BottleneckCSP, C1, C2, C2f, C3, C3TR, C3Ghost, nn.Conv2d, nn.ConvTranspose2d, DWConvTranspose2d, C3x, RepC3, C2f_Faster, C2f_ODConv,
             C2f_Faster_EMA, C2f_DBB, GSConv, GSConvns, VoVGSCSP, VoVGSCSPns, VoVGSCSPC, C2f_CloAtt, C3_CloAtt, SCConv, C2f_SCConv, C3_SCConv, C2f_ScConv, C3_ScConv,
             C3_EMSC, C3_EMSCP, C2f_EMSC, C2f_EMSCP, RCSOSA, KWConv, C2f_KW, C3_KW, DySnakeConv, C2f_DySnakeConv, C3_DySnakeConv,

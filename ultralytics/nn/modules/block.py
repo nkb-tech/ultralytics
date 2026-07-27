@@ -33,6 +33,7 @@ __all__ = (
     "HGStem",
     "SPP",
     "SPPF",
+    "SPPF26",
     "C1",
     "C2",
     "C3",
@@ -228,10 +229,42 @@ class SPPF(nn.Module):
         self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
 
     def forward(self, x):
-        """Forward pass through Ghost Convolution block."""
+        """Forward pass through SPPF layer.
+
+        Checkpoints are pickled model objects, so YOLO26 weights are unpickled into THIS class and
+        run THIS forward. getattr defaults keep existing fork checkpoints (no .n / .add) unchanged
+        while honouring the pooling count and residual shortcut stored in YOLO26 checkpoints.
+        """
         y = [self.cv1(x)]
-        y.extend(self.m(y[-1]) for _ in range(3))
-        return self.cv2(torch.cat(y, 1))
+        y.extend(self.m(y[-1]) for _ in range(getattr(self, "n", 3)))
+        y = self.cv2(torch.cat(y, 1))
+        return y + x if getattr(self, "add", False) else y
+
+
+class SPPF26(nn.Module):
+    """SPPF variant used by YOLO26, backported from upstream 8.4.104.
+
+    Differs from the fork's SPPF: cv1 has no activation (act=False), the pooling count is
+    configurable, and an optional residual shortcut is supported. Kept as a separate class so
+    existing detection configs using SPPF are unaffected.
+    """
+
+    def __init__(self, c1, c2, k=5, n=3, shortcut=False):
+        """Initialize SPPF26 with input/output channels, kernel size, pooling count and shortcut."""
+        super().__init__()
+        c_ = c1 // 2  # hidden channels
+        self.cv1 = Conv(c1, c_, 1, 1, act=False)
+        self.cv2 = Conv(c_ * (n + 1), c2, 1, 1)
+        self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+        self.n = n
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        """Apply sequential pooling operations and return concatenated feature maps."""
+        y = [self.cv1(x)]
+        y.extend(self.m(y[-1]) for _ in range(getattr(self, "n", 3)))
+        y = self.cv2(torch.cat(y, 1))
+        return y + x if getattr(self, "add", False) else y
 
 
 class C1(nn.Module):

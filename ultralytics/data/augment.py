@@ -1372,6 +1372,15 @@ class RandomPerspective:
         # Scale for func:`box_candidates`
         img, M, scale = self.affine_transform(img, border)
 
+        mask = labels.get("semantic_mask")
+        if mask is not None:
+            if (self.size[0] != mask.shape[1] or self.size[1] != mask.shape[0]) or (M != np.eye(3)).any():
+                if self.perspective:
+                    mask = cv2.warpPerspective(mask, M, dsize=self.size, flags=cv2.INTER_NEAREST, borderValue=255)
+                else:
+                    mask = cv2.warpAffine(mask, M[:2], dsize=self.size, flags=cv2.INTER_NEAREST, borderValue=255)
+            labels["semantic_mask"] = mask
+
         bboxes = self.apply_bboxes(instances.bboxes, M)
 
         segments = instances.segments
@@ -1957,17 +1966,24 @@ class RandomFlip:
         h = 1 if instances.normalized else h
         w = 1 if instances.normalized else w
 
+        mask = labels.get("semantic_mask")
         # Flip up-down
         if self.direction == "vertical" and random.random() < self.p:
             img = np.flipud(img)
             instances.flipud(h)
+            if mask is not None:
+                mask = np.flipud(mask)
         if self.direction == "horizontal" and random.random() < self.p:
             img = np.fliplr(img)
             instances.fliplr(w)
+            if mask is not None:
+                mask = np.fliplr(mask)
             # For keypoints
             if self.flip_idx is not None and instances.keypoints is not None:
                 instances.keypoints = np.ascontiguousarray(instances.keypoints[:, self.flip_idx, :])
         labels["img"] = np.ascontiguousarray(img)
+        if mask is not None:
+            labels["semantic_mask"] = np.ascontiguousarray(mask)
         labels["instances"] = instances
         return labels
 
@@ -2458,6 +2474,11 @@ class Albumentations:
             - Requires the Albumentations library to be installed.
         """
         if self.transform is None or random.random() > self.p:
+            return labels
+
+        if labels.get("semantic_mask") is not None:
+            # Боксов в semantic нет, а все трансформы здесь попиксельные — маску не трогаем.
+            labels["img"] = self.transform(image=labels["img"], bboxes=[], class_labels=[])["image"]
             return labels
 
         if self.contains_spatial:
