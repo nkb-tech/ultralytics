@@ -842,6 +842,22 @@ class Results(SimpleClass):
             )
             return results
 
+        if self.semantic_mask is not None:
+            d = self.semantic_mask.data
+            d = d.cpu().numpy() if hasattr(d, "cpu") else d
+            names = self.names[0] if isinstance(self.names, (list, tuple)) else self.names
+            uniq, counts = np.unique(d, return_counts=True)
+            return [
+                {
+                    "name": str(names.get(int(c), int(c))),
+                    "class": int(c),
+                    "pixels": int(n),
+                    "fraction": round(float(n) / d.size, decimals),
+                }
+                for c, n in zip(uniq, counts)
+                if int(c) != 255
+            ]
+
         is_obb = self.obb is not None
         data = self.obb if is_obb else self.boxes
         h, w = self.orig_shape if normalize else (1, 1)
