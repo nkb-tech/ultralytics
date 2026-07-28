@@ -19,11 +19,21 @@ def imread(filename: str, flags: int = cv2.IMREAD_COLOR):
     Args:
         filename (str): Path to the file to read.
         flags (int, optional): Flag that can take values of cv2.IMREAD_*. Defaults to cv2.IMREAD_COLOR.
+                              Uses cv2.IMREAD_UNCHANGED to support 16-bit images (e.g., X-ray images).
 
     Returns:
         (np.ndarray): The read image.
     """
-    return cv2.imdecode(np.fromfile(filename, np.uint8), flags)
+    # Use IMREAD_UNCHANGED to support 16-bit images (e.g., X-ray images)
+    # cv2.imread with IMREAD_UNCHANGED can read 16-bit images, while imdecode cannot
+    img = cv2.imread(filename, cv2.IMREAD_UNCHANGED)
+    # Handle single channel images by duplicating to 3 channels (for 16-bit grayscale support)
+    if img is not None and img.ndim == 2:
+        img = np.repeat(img[:, :, None], 3, axis=2)
+    # Handle RGBA images by dropping alpha channel
+    elif img is not None and img.ndim == 3 and img.shape[2] == 4:
+        img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+    return img
 
 
 def imwrite(filename: str, img: np.ndarray, params=None):

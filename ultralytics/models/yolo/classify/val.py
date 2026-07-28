@@ -41,7 +41,7 @@ class ClassificationValidator(BaseValidator):
     def init_metrics(self, model):
         """Initialize confusion matrix, class names, and top-1 and top-5 accuracy."""
         self.names = model.names
-        self.nc = len(model.names)
+        self.nc = len(model.names[0])
         self.confusion_matrix = ConfusionMatrix(nc=self.nc, conf=self.args.conf, task="classify")
         self.pred = []
         self.targets = []
@@ -55,7 +55,7 @@ class ClassificationValidator(BaseValidator):
 
     def update_metrics(self, preds, batch):
         """Updates running metrics with model predictions and batch targets."""
-        n5 = min(len(self.names), 5)
+        n5 = min(len(self.names[0]), 5)
         self.pred.append(preds.argsort(1, descending=True)[:, :n5].type(torch.int32).cpu())
         self.targets.append(batch["cls"].type(torch.int32).cpu())
 
@@ -65,7 +65,7 @@ class ClassificationValidator(BaseValidator):
         if self.args.plots:
             for normalize in True, False:
                 self.confusion_matrix.plot(
-                    save_dir=self.save_dir, names=self.names.values(), normalize=normalize, on_plot=self.on_plot
+                    save_dir=self.save_dir, names=self.names[0].values(), normalize=normalize, on_plot=self.on_plot
                 )
         self.metrics.speed = self.speed
         self.metrics.confusion_matrix = self.confusion_matrix

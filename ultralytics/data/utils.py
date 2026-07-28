@@ -14,6 +14,7 @@ from tarfile import is_tarfile
 
 import cv2
 import numpy as np
+import torch
 from PIL import Image, ImageOps
 
 from ultralytics.nn.autobackend import check_class_names
@@ -28,8 +29,7 @@ from ultralytics.utils import (
     colorstr,
     emojis,
     is_dir_writeable,
-    yaml_load,
-    yaml_save,
+    YAML,
 )
 from ultralytics.utils.checks import check_file, check_font, is_ascii
 from ultralytics.utils.downloads import download, safe_download, unzip_file
@@ -38,7 +38,6 @@ from ultralytics.utils.ops import segments2boxes
 HELP_URL = "See https://docs.ultralytics.com/datasets for dataset formatting guidance."
 IMG_FORMATS = {"bmp", "dng", "jpeg", "jpg", "mpo", "png", "tif", "tiff", "webp", "pfm"}  # image suffixes
 VID_FORMATS = {"asf", "avi", "gif", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ts", "wmv", "webm"}  # video suffixes
-PIN_MEMORY = str(os.getenv("PIN_MEMORY", True)).lower() == "true"  # global pin_memory for dataloaders
 FORMATS_HELP_MSG = f"Supported formats are:\nimages: {IMG_FORMATS}\nvideos: {VID_FORMATS}"
 
 
@@ -52,6 +51,190 @@ def img2label_paths(img_paths, label_dir="labels", suffix=".txt"):
     """
     sa, sb = f"{os.sep}images{os.sep}", f"{os.sep}{label_dir}{os.sep}"  # /images/, /labels/ substrings
     return [sb.join(x.rsplit(sa, 1)).rsplit(".", 1)[0] + f"{suffix}" for x in img_paths]
+def _int_keys(d: dict) -> dict:
+    """Return a shallow copy of a YAML dict with integer keys where possible."""
+    return {int(k): v for k, v in d.items()}
+
+
+def _is_compact_multitask_hierarchy(data: dict) -> bool:
+    """Detect the semantic-task YAML format before ``check_class_names`` flattens it."""
+    names = data.get("names")
+    child_parent_map = data.get("child_parent_map")
+    if not isinstance(names, dict) or not isinstance(child_parent_map, dict):
+        return False
+    sample_name = next(iter(names.values()), None)
+    sample_map = next(iter(child_parent_map.values()), None)
+    return isinstance(sample_name, (list, tuple, dict)) and isinstance(sample_map, dict) and (
+        "main_task" in data or any(isinstance(v, dict) and "connections" in v for v in sample_map.values())
+    )
+
+
+def _normalize_name_list(names, dataset) -> dict[int, str]:
+    """Normalize one class-name list/dict to the repo's list[dict] class-name contract."""
+    normalized = check_class_names(names)
+    if len(normalized) != 1:
+        raise SyntaxError(emojis(f"{dataset} nested class-name entries must describe exactly one class set."))
+    return normalized[0]
+
+
+def _normalize_compact_multitask_hierarchy(data: dict, dataset) -> None:
+    """Normalize compact semantic-task hierarchy YAML into flat heads plus routing metadata."""
+    semantic_names = _int_keys(data["names"])
+    raw_maps = _int_keys(data["child_parent_map"])
+    main_task = int(data.get("main_task", 0))
+    main_level = data.get("main_level", None)
+    main_level = None if main_level is None else int(main_level)
+    if main_task not in semantic_names:
+        raise SyntaxError(emojis(f"{dataset} main_task={main_task} is not present in names."))
+
+    flat_names, flat_nc, flat_to_semantic = [], [], []
+    semantic_to_flat, label_nc, child_parent_map = {}, [], {}
+    hierarchy_parent_heads = []
+    dependency_parent_heads = []
+    source_label_heads = []
+
+    for task_id in sorted(semantic_names):
+        semantic_to_flat[task_id] = {}
+        label_nc.append(len(_normalize_name_list(semantic_names[task_id], dataset)))
+        task_map = raw_maps.get(task_id)
+
+        if task_map is None:
+            # No hierarchy block means a flat auxiliary semantic task.
+            task_names = _normalize_name_list(semantic_names[task_id], dataset)
+            flat_idx = len(flat_names)
+            semantic_to_flat[task_id][0] = flat_idx
+            flat_names.append(task_names)
+            flat_nc.append(len(task_names))
+            flat_to_semantic.append({"task": task_id, "level": 0})
+            hierarchy_parent_heads.append(-1)
+            dependency_parent_heads.append(-1)
+            source_label_heads.append(flat_idx)
+            continue
+
+        task_map = _int_keys(task_map)
+        deepest_level = max(task_map)
+        for level in sorted(task_map):
+            level_info = task_map[level]
+            if not isinstance(level_info, dict) or "names" not in level_info or "connections" not in level_info:
+                raise SyntaxError(
+                    emojis(f"{dataset} child_parent_map[{task_id}][{level}] must contain 'connections' and 'names'.")
+                )
+            level_names = _normalize_name_list(level_info["names"], dataset)
+            flat_idx = len(flat_names)
+            semantic_to_flat[task_id][level] = flat_idx
+            flat_names.append(level_names)
+            flat_nc.append(len(level_names))
+            flat_to_semantic.append({"task": task_id, "level": level})
+
+            connections = level_info["connections"]
+            if connections == -1:
+                hierarchy_parent_heads.append(-1)
+                dependency_parent_heads.append(-1)
+            else:
+                connections = _int_keys(connections)
+                if level - 1 not in semantic_to_flat[task_id]:
+                    raise SyntaxError(emojis(f"{dataset} hierarchy level {level} has no previous parent level."))
+                parent_head = semantic_to_flat[task_id][level - 1]
+                hierarchy_parent_heads.append(parent_head)
+                dependency_parent_heads.append(parent_head)
+                child_parent_map[flat_idx] = connections
+
+        deepest_names = flat_names[semantic_to_flat[task_id][deepest_level]]
+        declared_names = _normalize_name_list(semantic_names[task_id], dataset)
+        if list(deepest_names.values()) != list(declared_names.values()):
+            raise SyntaxError(
+                emojis(f"{dataset} names[{task_id}] must match child_parent_map[{task_id}][{deepest_level}].names.")
+            )
+        source_label_heads.append(semantic_to_flat[task_id][deepest_level])
+
+    for task_id, task_map in raw_maps.items():
+        task_map = _int_keys(task_map)
+        for level, level_info in task_map.items():
+            if not isinstance(level_info, dict) or "feature_parent" not in level_info:
+                continue
+            flat_idx = semantic_to_flat[int(task_id)][int(level)]
+            feature_parent = level_info["feature_parent"]
+            if isinstance(feature_parent, dict):
+                parent_task = int(feature_parent["task"])
+                parent_level = int(feature_parent["level"])
+                if parent_task not in semantic_to_flat or parent_level not in semantic_to_flat[parent_task]:
+                    raise SyntaxError(
+                        emojis(
+                            f"{dataset} feature_parent task={parent_task} level={parent_level} "
+                            f"for task={task_id} level={level} is not defined."
+                        )
+                    )
+                hierarchy_parent_heads[flat_idx] = semantic_to_flat[parent_task][parent_level]
+            elif feature_parent in {-1, None}:
+                hierarchy_parent_heads[flat_idx] = -1
+            else:
+                raise SyntaxError(emojis(f"{dataset} feature_parent must be a dict with task/level or -1."))
+
+    if main_level is None:
+        main_head = source_label_heads[sorted(semantic_names).index(main_task)]
+    else:
+        if main_level not in semantic_to_flat.get(main_task, {}):
+            raise SyntaxError(emojis(f"{dataset} main_level={main_level} is not present in main_task={main_task}."))
+        main_head = semantic_to_flat[main_task][main_level]
+    compact_ignore = _int_keys(data.get("ignore_class", {})) if isinstance(data.get("ignore_class"), dict) else {}
+    flat_ignore = {}
+    for task_id, levels in compact_ignore.items():
+        if not isinstance(levels, dict):
+            continue
+        for level, classes in _int_keys(levels).items():
+            flat_idx = semantic_to_flat.get(int(task_id), {}).get(int(level))
+            if flat_idx is not None:
+                flat_ignore[flat_idx] = [int(c) for c in classes]
+
+    data["names"] = flat_names
+    data["nc"] = flat_nc
+    data["child_parent_map"] = child_parent_map
+    data["ignore_class"] = flat_ignore
+    data["task_schema"] = {
+        "format": "compact_multitask_hierarchy",
+        "semantic_tasks": sorted(semantic_names),
+        "semantic_nc": label_nc,
+        "label_nc": label_nc,
+        "semantic_to_flat": semantic_to_flat,
+        "flat_to_semantic": flat_to_semantic,
+        "source_label_heads": source_label_heads,
+        "main_task": main_task,
+        "main_level": main_level,
+        "main_head": main_head,
+        "hierarchy_parent_heads": hierarchy_parent_heads,
+        "dependency_parent_heads": dependency_parent_heads,
+        "child_parent_map": child_parent_map,
+        "ignore_class": flat_ignore,
+    }
+
+
+def _expand_compact_label_rows(lb: np.ndarray, task_schema: dict) -> np.ndarray:
+    """Expand compact semantic-task labels to one class column per flat model head."""
+    compact_cols = len(task_schema["label_nc"])
+    flat_heads = len(task_schema["flat_to_semantic"])
+    expanded = np.zeros((lb.shape[0], flat_heads), dtype=lb.dtype)
+    parent_heads = task_schema.get("dependency_parent_heads", task_schema["hierarchy_parent_heads"])
+    child_parent_map = {int(k): _int_keys(v) for k, v in task_schema.get("child_parent_map", {}).items()}
+
+    for label_col, source_head in enumerate(task_schema["source_label_heads"]):
+        source_head = int(source_head)
+        cls_values = lb[:, label_col].astype(np.int64, copy=False)
+        expanded[:, source_head] = cls_values
+        child_head = source_head
+        child_cls = cls_values
+        while int(parent_heads[child_head]) >= 0:
+            parent_head = int(parent_heads[child_head])
+            mapping = child_parent_map.get(child_head, {})
+            try:
+                parent_cls = np.array([mapping[int(c)] for c in child_cls], dtype=np.int64)
+            except KeyError as e:
+                raise ValueError(f"compact hierarchy label class {int(e.args[0])} has no parent mapping") from e
+            expanded[:, parent_head] = parent_cls
+            child_head, child_cls = parent_head, parent_cls
+
+    return np.concatenate((expanded, lb[:, compact_cols : compact_cols + 4]), axis=1)
+
+
 
 
 def get_hash(paths):
@@ -102,12 +285,20 @@ def verify_image(args, min_imgsz=25):
 
 def verify_image_label(args, min_imgsz=9):
     """Verify one image-label pair."""
-    im_file, lb_file, prefix, keypoint, nkpt, ndim, single_cls, nc = args
+    if len(args) == 10:
+        im_file, lb_file, prefix, keypoint, use_tags, n_tag_attrs, nkpt, ndim, single_cls, nc = args
+        task_schema = None
+    else:
+        im_file, lb_file, prefix, keypoint, use_tags, n_tag_attrs, nkpt, ndim, single_cls, nc, task_schema = args
     # nc is a list with number of classes for each attribute (multi-head support)
     if not isinstance(nc, (list, tuple)):
         raise ValueError("'nc' must be a list specifying number of classes per attribute (multi-head labels)")
     # Number (missing, found, empty, corrupt), message, segments, keypoints
-    nm, nf, ne, ncpt, msg, segments, keypoints, nattrs = 0, 0, 0, 0, "", [], None, len(nc)
+    compact_schema = (
+        task_schema if isinstance(task_schema, dict) and task_schema.get("format") == "compact_multitask_hierarchy" else None
+    )
+    label_nc = compact_schema["label_nc"] if compact_schema else nc
+    nm, nf, ne, ncpt, msg, segments, keypoints, tags, nattrs = 0, 0, 0, 0, "", [], None, None, len(label_nc)
     try:
         # Verify images
         im = Image.open(im_file)
@@ -144,18 +335,43 @@ def verify_image_label(args, min_imgsz=9):
                     )
                     points = lb[:, nattrs + 4:].reshape(-1, ndim)[:, :2]
                 else:
-                    expected_cols = nattrs + 4
-                    assert lb.shape[1] == expected_cols, (
-                        f"labels require {expected_cols} columns (got {lb.shape[1]}). "
-                        f"Expected {nattrs} class attrs + 4 bbox coords"
-                    )
-                    points = lb[:, nattrs : nattrs + 4]
+                    # bbox points must NEVER include tags
+                    if use_tags:
+                        exp_a = nattrs + n_tag_attrs + 4          # tags after class attrs
+                        exp_b = nattrs + 4 + n_tag_attrs          # tags after bbox (your val_mot_id case)
+
+                        if lb.shape[1] == exp_b:
+                            # [class_attrs..., x y w h, tag...]
+                            points = lb[:, nattrs : nattrs + 4]
+                            tags = lb[:, nattrs + 4 : nattrs + 4 + n_tag_attrs].astype(np.int64)
+                            lb = lb[:, : nattrs + 4]  # keep only class attrs + bbox in lb
+                        elif lb.shape[1] == exp_a:
+                            # [class_attrs..., tag..., x y w h]
+                            tags = lb[:, nattrs : nattrs + n_tag_attrs].astype(np.int64)
+                            points = lb[:, nattrs + n_tag_attrs : nattrs + n_tag_attrs + 4]
+                            # rebuild lb to class attrs + bbox
+                            lb = np.concatenate([lb[:, :nattrs], points], axis=1).astype(np.float32)
+                        else:
+                            expected_cols = nattrs + 4
+                            assert lb.shape[1] == expected_cols, (
+                                f"labels require {expected_cols} columns (got {lb.shape[1]}). "
+                                f"Expected {nattrs} class attrs + 4 bbox coords"
+                            )
+                            points = lb[:, nattrs : nattrs + 4]
+                            tags = None
+                    else:
+                        expected_cols = nattrs + 4
+                        assert lb.shape[1] == expected_cols, (
+                            f"labels require {expected_cols} columns (got {lb.shape[1]}). "
+                            f"Expected {nattrs} class attrs + 4 bbox coords"
+                        )
+                        points = lb[:, nattrs : nattrs + 4]
                 # Coordinate points check with 1% tolerance
                 assert points.max() <= 1.01, f"non-normalized or out of bounds coordinates {points[points > 1.01]}"
                 assert lb.min() >= -0.01, f"negative class labels {lb[lb < -0.01]}"
 
                 # All labels
-                for i, nc_i in enumerate(nc):
+                for i, nc_i in enumerate(label_nc):
                     # TODO make single cls work with multi-head labels
                     if single_cls and i == 0:
                         lb[:, i] = 0
@@ -183,11 +399,13 @@ def verify_image_label(args, min_imgsz=9):
                 kpt_mask = np.where((keypoints[..., 0] < 0) | (keypoints[..., 1] < 0), 0.0, 1.0).astype(np.float32)
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
         lb = lb[:, : nattrs + 4]
-        return im_file, lb, shape, segments, keypoints, nm, nf, ne, ncpt, msg
+        if compact_schema:
+            lb = _expand_compact_label_rows(lb, compact_schema)
+        return im_file, lb, shape, segments, keypoints, tags, nm, nf, ne, ncpt, msg
     except Exception as e:
         ncpt = 1
         msg = f"{prefix}WARNING ⚠️ {im_file}: ignoring corrupt image/label: {e}"
-        return [None, None, None, None, None, nm, nf, ne, ncpt, msg]
+        return [None, None, None, None, None, None, nm, nf, ne, ncpt, msg]
 
 
 def polygon2mask(imgsz, polygons, color=1, downsample_ratio=1):
@@ -299,7 +517,7 @@ def check_det_dataset(dataset, autodownload=True):
         extract_dir, autodownload = file.parent, False
 
     # Read YAML
-    data = yaml_load(file, append_filename=True)  # dictionary
+    data = YAML.load(file, append_filename=True)  # dictionary
 
     # Checks
     for k in "train", "val":
@@ -312,17 +530,21 @@ def check_det_dataset(dataset, autodownload=True):
             data["val"] = data.pop("validation")  # replace 'validation' key with 'val' key
     if "names" not in data and "nc" not in data:
         raise SyntaxError(emojis(f"{dataset} key missing ❌.\n either 'names' or 'nc' are required in all data YAMLs."))
+    if _is_compact_multitask_hierarchy(data):
+        _normalize_compact_multitask_hierarchy(data, dataset)
     if "names" in data and "nc" in data and \
         (len(data["names"]) != len(data["nc"]) or \
-        not all(len(names) == len(nci) for names, nci in zip(data["names"], data["nc"]))):
+        not all(len(names) == nci for names, nci in zip(data["names"], data["nc"]))):
         raise SyntaxError(emojis(f"{dataset} 'names' length {data['names']} and 'nc: {data['nc']}' must match."))
     if "names" in data:
         raw_names = data.get("names")
-        if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple)):
-            data["names"] = [check_class_names(n) for n in raw_names]
+        if isinstance(raw_names, list) and raw_names and isinstance(raw_names[0], (list, tuple, dict)):
+            # Multi-task format: list of lists, list of tuples, or list of dicts
+            # check_class_names returns [normalized_dict], so unwrap with [0]
+            data["names"] = [check_class_names(n)[0] for n in raw_names]
         elif isinstance(raw_names, (dict, list)):
-            names_list = check_class_names(raw_names)
-            data["names"] = [names_list]
+            # Single-task format: dict or flat list of names - check_class_names returns a list
+            data["names"] = check_class_names(raw_names)
         else:
             raise SyntaxError(emojis(f"{dataset} 'names' must be a list of lists, a list, or a dictionary."))
         data["nc"] = [len(names) for names in data["names"]]
@@ -412,7 +634,7 @@ def check_cls_dataset(dataset, split=""):
     # Check if dataset is a YAML file
     if dataset.suffix == ".yaml":
         # Load YAML
-        data = yaml_load(dataset, append_filename=True)
+        data = YAML.load(dataset, append_filename=True)
 
         # Check required keys
         for k in ["train", "val"]:
@@ -589,9 +811,9 @@ class HUBDatasetStats:
             _, data_dir, yaml_path = self._unzip(Path(path))
             try:
                 # Load YAML with checks
-                data = yaml_load(yaml_path)
+                data = YAML.load(yaml_path)
                 data["path"] = ""  # strip path since YAML should be in dataset root for all HUB datasets
-                yaml_save(yaml_path, data)
+                YAML.save(yaml_path, data)
                 data = check_det_dataset(yaml_path, autodownload)  # dict
                 data["path"] = data_dir  # YAML path should be set to '' (relative) or parent (absolute)
             except Exception as e:

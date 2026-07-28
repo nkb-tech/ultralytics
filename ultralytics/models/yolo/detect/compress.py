@@ -24,7 +24,7 @@ from ultralytics.data.utils import check_cls_dataset, check_det_dataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel, yaml_model_load
-from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK, TQDM, clean_url, colorstr, emojis, yaml_save, callbacks, __version__
+from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK, TQDM, clean_url, colorstr, emojis, YAML, callbacks, __version__
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import unwrap_model, torch_distributed_zero_first
 from ultralytics.utils.checks import check_imgsz, print_args, check_amp
@@ -334,7 +334,7 @@ class DetectionCompressor(BaseTrainer):
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
             (self.save_dir / 'visual').mkdir(parents=True, exist_ok=True)  # make dir
             self.args.save_dir = str(self.save_dir)
-            yaml_save(self.save_dir / 'args.yaml', vars(self.args))  # save run args
+            YAML.save(self.save_dir / 'args.yaml', vars(self.args))  # save run args
         self.last, self.best = self.wdir / 'last.pt', self.wdir / 'starnet_pruned.pt'  # checkpoint paths
         self.save_period = self.args.save_period
 
@@ -374,7 +374,7 @@ class DetectionCompressor(BaseTrainer):
         self.tloss = None
         self.loss_names = ['Loss']
         self.csv = self.save_dir / 'results.csv'
-        self.plot_idx = [0, 1, 2]
+        self.plot_idx = list(range(self.args.max_plot_batches))
 
         # Callbacks
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
@@ -407,7 +407,15 @@ class DetectionCompressor(BaseTrainer):
 
     def preprocess_batch(self, batch):
         """Preprocesses a batch of images by scaling and converting to float."""
-        batch['img'] = batch['img'].to(self.device, non_blocking=True).float() / 255
+        batch['img'] = batch['img'].to(self.device, non_blocking=True).float()
+        # Normalize based on bit depth from config
+        bit_depth = getattr(self.args, 'image_bit_depth', 8)
+        if bit_depth == 8:
+            batch['img'] /= 255.0
+        elif bit_depth == 16:
+            batch['img'] /= 65_535.0
+        else:
+            LOGGER.error(f"BitDepth {bit_depth} unsupported.")
         return batch
 
     def set_model_attributes(self):
@@ -465,7 +473,16 @@ class DetectionCompressor(BaseTrainer):
 
     def get_validator(self):
         """Returns a DetectionValidator for YOLO model validation."""
-        self.loss_names = 'box_loss', 'cls_loss', 'dfl_loss'
+        # Match the loss tensor layout produced by v8DetectionLoss:
+        # box, cls, dfl, [dep], [reid | dist]
+        names = ['box_loss', 'cls_loss', 'dfl_loss']
+        if getattr(self.args, 'dependency_loss', False):
+            names.append('dep_loss')
+        if getattr(self, 'reid_dim', 0):
+            names.append('reid_loss')
+        elif getattr(self.args, 'teacher', None) is not None:
+            names.append('dist_loss')
+        self.loss_names = tuple(names)
         return yolo.detect.DetectionValidator(self.test_loader, save_dir=self.save_dir, args=copy(self.args))
 
     def label_loss_items(self, loss_items=None, prefix='train'):

@@ -23,6 +23,8 @@ from ultralytics.utils import (
     ASSETS,
     AUTOINSTALL,
     IS_COLAB,
+    ARM64,
+    RKNN_CHIPS,
     IS_GIT_DIR,
     IS_JUPYTER,
     IS_KAGGLE,
@@ -770,6 +772,75 @@ def cuda_is_available() -> bool:
     return cuda_device_count() > 0
 
 
+def is_rockchip():
+    """Check if the current environment is running on a Rockchip SoC.
+
+    Returns:
+        (bool): True if running on a Rockchip SoC, False otherwise.
+    """
+    if LINUX and ARM64:
+        try:
+            with open("/proc/device-tree/compatible") as f:
+                dev_str = f.read()
+                *_, soc = dev_str.split(",")
+                if soc.replace("\x00", "") in RKNN_CHIPS:
+                    return True
+        except OSError:
+            return False
+    else:
+        return False
+
+
+def is_intel():
+    """Check if the system has Intel hardware (CPU or GPU).
+
+    Returns:
+        (bool): True if Intel hardware is detected, False otherwise.
+    """
+    from ultralytics.utils.torch_utils import get_cpu_info
+
+    # Check CPU
+    if "intel" in get_cpu_info().lower():
+        return True
+
+    # Check GPU via xpu-smi
+    try:
+        result = subprocess.run(["xpu-smi", "discovery"], capture_output=True, text=True, timeout=5)
+        return "intel" in result.stdout.lower()
+    except Exception:  # broad clause to capture all Intel GPU exception types
+        return False
+
+
+def is_sudo_available() -> bool:
+    """Check if the sudo command is available in the environment.
+
+    Returns:
+        (bool): True if the sudo command is available, False otherwise.
+    """
+    if WINDOWS:
+        return False
+    cmd = "sudo --version"
+    return subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+
+
+def reid_embed_dim(cfg) -> int:
+    """Return Re-ID embedding dimension; 0 means disabled (not ``False``).
+
+    Accepts namespace-like objects with ``reid_dim`` or dicts with key ``"reid_dim"``.
+    ``None``, invalid, or non-positive values are treated as 0.
+    """
+    if cfg is None:
+        return 0
+    v = cfg.get("reid_dim", 0) if isinstance(cfg, dict) else getattr(cfg, "reid_dim", 0)
+    if v is None:
+        return 0
+    try:
+        d = int(v)
+    except (TypeError, ValueError):
+        return 0
+    return d if d > 0 else 0
+
+
 def truncate_middle(text: str, max_length: int = 50) -> str:
     """
     Truncate a string to a maximum length, keeping the middle part.
@@ -788,7 +859,10 @@ def truncate_middle(text: str, max_length: int = 50) -> str:
     tail = keep - head
     return f"{text[:head]}...{text[-tail:]}"
 
-
 # Define constants
-IS_PYTHON_MINIMUM_3_10 = check_python("3.10", hard=False)
+IS_PYTHON_3_8 = PYTHON_VERSION.startswith("3.8")
 IS_PYTHON_3_12 = PYTHON_VERSION.startswith("3.12")
+IS_PYTHON_3_13 = PYTHON_VERSION.startswith("3.13")
+
+IS_PYTHON_MINIMUM_3_10 = check_python("3.10", hard=False)
+IS_PYTHON_MINIMUM_3_12 = check_python("3.12", hard=False)

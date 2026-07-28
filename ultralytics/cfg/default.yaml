@@ -12,8 +12,12 @@ time: # (float, optional) number of hours to train for, overrides epochs if supp
 patience: 100 # (int) epochs to wait for no observable improvement for early stopping of training
 batch: 16 # (int) number of images per batch (-1 for AutoBatch)
 imgsz: 640 # (int | list) input images size as int for train and val modes, or list[h,w] for predict and export modes
+image_bit_depth: 8 # (int) image bit depth for normalization: 8 (0-255) or 16 (0-65535, e.g. X-ray)
 min_bbox: 20 # (int) min size of original bbox for detect task
 min_imgsz: 25 # (int) min size of original image
+assign_metric: iou # (str) assignment overlap mode: iou or nwd_mix
+assign_nwd_lambda: 0.0 # (float) NWD blend weight for assign_metric=nwd_mix
+assign_nwd_small_thr: 0.0 # (float) apply NWD mix only to GT boxes with sqrt area <= this pixel threshold; 0 disables size gating
 save: True # (bool) save train checkpoints and predict results
 save_period: -1 # (int) Save checkpoint every x epochs (disabled if < 1)
 cache: False # (bool) True/ram, low-ram, disk or False. Use cache for data loading. Use low-ram if you have unsufficient ram memory, but want better speed than False variant
@@ -47,7 +51,7 @@ mask_ratio: 4 # (int) mask downsample ratio (segment train only)
 
 # Classification
 dropout: 0.0 # (float) use dropout regularization (classify train only)
-weighted_loss: False # Whether to use weighted loss with weight=1/sqrt(n_samples) - for classification train only
+weighted_loss: False # Whether to use weighted loss with weight=1/sqrt(n_samples)
 clf_loss_fn: "bce" # (str) classification loss function, choices=[bce, vfl, qfl]
 clf_loss_weights:  # (list[list[float]] | None) Class weights for weighted classification loss. If None or invalid, weights are auto-calculated from class distribution. Example: [0.1, 0.3, 0.5, ...]
 iou_loss_fn: "piouv2" # (str) IoU loss function, choices=[wiou, eiou, giou, diou, ciou, siou, shapeiou, piouv1, piouv2]
@@ -55,18 +59,20 @@ nwd_loss: False # (bool) Whether to use Wasserstein Distance loss for BBox Regre
 use_wiseiou: False # (bool) Whether to use Wise IoU loss for BBox Regression
 iou_ratio: 0.5 # (float) The ratio of the IoU loss to the Wasserstein Distance loss for BBox Regression
 
-
 # Val/Test settings ----------------------------------------------------------------------------------------------------
 val: True # (bool) validate/test during training
 split: val # (str) dataset split to use for validation, i.e. 'val', 'test' or 'train'
 save_json: False # (bool) save results to JSON file
-save_hybrid: False # (bool) save hybrid version of labels (labels + additional predictions)
 conf: # (float, optional) object confidence threshold for detection (default 0.25 predict, 0.001 val)
 iou: 0.7 # (float) intersection over union (IoU) threshold for NMS
 max_det: 300 # (int) maximum number of detections per image
 half: False # (bool) use half precision (FP16)
 dnn: False # (bool) use OpenCV DNN for ONNX inference
 plots: True # (bool) save plots and images during train/val
+end2end: # (bool, optional) override end2end head mode for predict/val/export; None = use model default
+max_plot_batches: 5 # (int) maximum number of batches to plot during validation (-1 for all)
+
+task_loss_weights:  # (list[float] | None) per-task cls loss weights for multitask training.
 
 # Predict settings -----------------------------------------------------------------------------------------------------
 source: # (str, optional) source directory for images or videos
@@ -75,6 +81,7 @@ stream_buffer: False # (bool) buffer all streaming frames (True) or return the m
 visualize: False # (bool) visualize model features
 augment: False # (bool) apply image augmentation to prediction sources
 agnostic_nms: True # (bool) class-agnostic NMS
+nms_strategy: usual # (str) NMS strategy: 'usual' (standard NMS), 'nmm' (non-max merging), 'nmm_greedy' (greedy NMM, faster); NMM useful for SAHI
 classes: # (int | list[int], optional) filter results by class, i.e. classes=0, or classes=[0,2,3]
 retina_masks: False # (bool) use high-resolution segmentation masks
 embed: # (list[int], optional) return feature vectors/embeddings from given layers
@@ -100,6 +107,7 @@ simplify: True # (bool) ONNX: simplify model using `onnxslim`
 opset: # (int, optional) ONNX: opset version
 workspace: 4 # (int) TensorRT: workspace size (GB)
 nms: False # (bool) CoreML: add NMS
+hybrid: False # (bool) RKNN: use hybrid quantization for INT8 (two-step), False uses standard rknn.build
 
 # Hyperparameters ------------------------------------------------------------------------------------------------------
 lr0: 0.01 # (float) initial learning rate (i.e. SGD=1E-2, Adam=1E-3)
@@ -112,6 +120,8 @@ warmup_bias_lr: 0.1 # (float) warmup initial bias lr
 box: 7.5 # (float) box loss gain
 cls: 0.5 # (float) cls loss gain (scale with pixels)
 dfl: 1.5 # (float) dfl loss gain
+reid: 2.0 # (float) Re-ID embedding loss gain
+dep: 10.0 # (float) dependency loss gain
 pose: 12.0 # (float) pose loss gain
 kobj: 1.0 # (float) keypoint obj loss gain
 label_smoothing: 0.0 # (float) label smoothing (fraction)
@@ -141,7 +151,7 @@ ar_thr: 100 # aspect ratio threshold for bboxes after RandomPerspective augmenta
 wh_thr: 5 # after RandomPerspective width and height threshold in pixels. Boxes smaller than this in either dimension are rejected.
 area_thr: 0.1 # Boxes with an area ratio = (new_area/old_area) less than this value are rejected after RandomPerspectiveAug
 
-# Albumentations  settings TODO: separate config ------------------------------------------------------------------------------------------------------
+# Albumentations settings TODO: separate config -----------------------------------------------------------------------
 albu_dropout_prob: 0.1
 albu_quality_lower: 75
 albu_max_factor: 1.1
@@ -176,23 +186,27 @@ imgaug_snowflakes_speed: [0.001, 0.03]
 imgaug_rain_drop_size: [0.10, 0.20]
 p_BrightnessContrast: 0.0
 
-# Custom config.yaml ---------------------------------------------------------------------------------------------------
+# Custom config.yaml ----------------------------------------------------------------------------------------------------
 cfg: # (str, optional) for overriding defaults.yaml
 
 # Tracker settings ------------------------------------------------------------------------------------------------------
 tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yaml]
 
+# ReID settings --------------------------------------------------------------------------------------------------------
+reid_dim: 0 # (int) Re-ID embedding dimension for self-supervised Re-ID head (e.g. 128); 0 = disabled
+
+# Hierarchical detection (hYOLO / multitask nc list + Detect fusion) ---------------------------------------------------
+hierarchical: False # (bool) training flag: inject hierarchical:true into model yaml when building from weights
+dependency_loss: True # (bool) parent-child penalty (requires child_parent_map JSON)
 
 # Distillation settings -------------------------------------------------------------------------------------------------
 teacher: None #  None | (str) path to teacher model
 temperature: 3.0 # (float) temperature for softening logits
 alpha: 0.5 # (float) weight for distillation loss
 
-
 # Pruning settings -------------------------------------------------------------------------------------------------
 do_prune: True       # Set to True to enable the pruning stage.
 do_finetune: True    # Set to True to enable the fine-tuning stage. Recommended: False for the first stage (pruning), True for the second.
-
 prune_method: group_slim # Pruning method to be used. Available: `random`, `l1`, `lamp`, `slim`, `group_slim`, `group_sl`, `group_taylor`, `group_norm`, `growing_reg`.
 speed_up: 2.0        # Target GFLOPs reduction factor (e.g., 2.0 for a 2x reduction).
 global_pruning: False # Set to True for global pruning across the entire model, False for layer-wise pruning.
@@ -224,3 +238,6 @@ scale_range: (1, 1)  # TODO: fix it not working.  (str) range in which the heigh
 erosion_factor: 0.0 # (float) 0 means crop must fully contain the reference box.
 full_image_prob: 0.0  # probability, that full image will be resize to crop size
 keep_sahi_images: False
+min_object_coverage: 0.3      # (float) minimum fraction of object area that must be in crop to keep it
+object_crop_prob: 0.7         # (float) probability to center crop on an object (for random_crop strategy)
+buffer_size: 50               # (int) max full-resolution images per worker in the SAHI image cache

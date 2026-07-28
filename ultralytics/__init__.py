@@ -6,6 +6,8 @@ import os
 
 # Set ENV Variables (place before imports)
 os.environ["OMP_NUM_THREADS"] = "1"  # reduce CPU utilization during training
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 from ultralytics.data.explorer.explorer import Explorer
 from ultralytics.models import NAS, RTDETR, SAM, YOLO, FastSAM, YOLOWorld

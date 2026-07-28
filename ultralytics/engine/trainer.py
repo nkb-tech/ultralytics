@@ -18,8 +18,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from functools import partial
 from torch import distributed as dist
 from torch import nn, optim
+
+from ultralytics.optim.muon import MuSGD
 
 from ultralytics.cfg import get_cfg, get_save_dir
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
@@ -35,7 +38,7 @@ from ultralytics.utils import (
     clean_url,
     colorstr,
     emojis,
-    yaml_save,
+    YAML,
 )
 from ultralytics.utils.autobatch import check_train_batch_size
 from ultralytics.utils.checks import check_amp, check_file, check_imgsz, check_model_file_from_stem, print_args
@@ -53,6 +56,7 @@ from ultralytics.utils.torch_utils import (
     strip_optimizer,
     torch_distributed_zero_first,
     attempt_compile,
+    unwrap_model,
 )
 from ultralytics.utils.loss import DistillationLoss
 
@@ -119,7 +123,7 @@ class BaseTrainer:
         if RANK in {-1, 0}:
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
             self.args.save_dir = str(self.save_dir)
-            yaml_save(self.save_dir / "args.yaml", vars(self.args))  # save run args
+            YAML.save(self.save_dir / "args.yaml", vars(self.args))  # save run args
         self.last, self.best = self.wdir / "last.pt", self.wdir / "best.pt"  # checkpoint paths
         self.save_period = self.args.save_period
 
@@ -150,7 +154,7 @@ class BaseTrainer:
         self.tloss = None
         self.loss_names = ["Loss"]
         self.csv = self.save_dir / "results.csv"
-        self.plot_idx = [0, 1, 2]
+        self.plot_idx = list(range(self.args.max_plot_batches))
 
         # HUB
         self.hub_session = None
@@ -275,7 +279,7 @@ class BaseTrainer:
                 v.requires_grad = True
 
         # Check AMP
-        self.amp = torch.tensor(self.args.amp).to(self.device)  # True or False
+        self.amp = torch.tensor(self.args.amp, device=self.device)  # True or False
         if self.amp and RANK in {-1, 0}:  # Single-GPU and DDP
             callbacks_backup = callbacks.default_callbacks.copy()  # backup callbacks as check_amp() resets them
             self.amp = torch.tensor(check_amp(self.model), device=self.device)
@@ -312,16 +316,24 @@ class BaseTrainer:
         batch_size = self.batch_size // max(world_size, 1)
         self.train_loader = self.get_dataloader(self.trainset, batch_size=batch_size, rank=LOCAL_RANK, mode="train")
         if RANK in {-1, 0}:
-            # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
-            self.test_loader = self.get_dataloader(
-                dataset_path=self.testset,
-                batch_size=batch_size if self.args.task == "obb" else batch_size * 2,
-                rank=-1,
-                mode="val",
-            )
-            self.validator = self.get_validator()
-            metric_keys = self.validator.metrics[0].keys + self.label_loss_items(prefix="val")
-            self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
+            self.metrics = {}
+            if self.args.val:
+                # Note: When training DOTA dataset, double batch size could get OOM on images with >2000 objects.
+                self.test_loader = self.get_dataloader(
+                    dataset_path=self.testset,
+                    batch_size=batch_size if self.args.task == "obb" else batch_size * 2,
+                    rank=-1,
+                    mode="val",
+                )
+                self.validator = self.get_validator()
+                self.validator.data = self.data
+                self.validator.init_metrics(unwrap_model(self.model))
+                metrics = self.validator.metrics
+                if isinstance(metrics, list):
+                    metric_keys = metrics[0].keys + self.label_loss_items(prefix="val")
+                else:
+                    metric_keys = metrics.keys + self.label_loss_items(prefix="val")
+                self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
             self.ema = ModelEMA(self.model)
             if self.args.plots:
                 self.plot_training_labels()
@@ -350,69 +362,90 @@ class BaseTrainer:
         if world_size > 1:
             self._setup_ddp(world_size)
         self._setup_train(world_size)
-        # Weighted loss (for classify task)
-        loss_weights = None
-        if self.args.weighted_loss:
-            loss_weights = self.train_loader.dataset.calculate_weights(0.5)
-            loss_weights = torch.tensor([loss_weights[k] for k in sorted(loss_weights)], device=self.device, dtype=torch.float)
-            LOGGER.info(f'Loss weights for {self.args.task} task = {loss_weights}')
-
-        # Calculate class weights 
+        # Weighted loss
         clf_loss_weights = None
-        if self.args.task in {"detect", "segment", "pose", "obb"}:
-            # Get number of classes for validation
-            nc_list = self.model.model[-1].nc
-            # Get clf_loss_weights from args if provided
-            if hasattr(self.args, 'clf_loss_weights') and self.args.clf_loss_weights is not None:
-                clf_loss_weights = self.args.clf_loss_weights
-                # Validate and convert to list of lists if needed
-                if isinstance(clf_loss_weights, list):
-                    # Validate number of weights matches number of classes
-                    if len(clf_loss_weights) != len(nc_list):
-                        LOGGER.warning(
-                            f"WARNING Number of weight lists ({len(clf_loss_weights)}) doesn't match "
-                            f"number of tasks ({len(nc_list)}), using automatic calculation"
-                        )
-                        clf_loss_weights = None
-                    else:
-                        # Validate all weights are positive and count matches classes
-                        valid = True
-                        for task_idx, task_weights in enumerate(clf_loss_weights):
-                            if not isinstance(task_weights, list):
-                                valid = False
-                                break
-                            if len(task_weights) != nc_list[task_idx]:
-                                LOGGER.warning(
-                                    f"WARNING Number of weights ({len(task_weights)}) for task {task_idx} "
-                                    f"doesn't match number of classes ({nc_list[task_idx]}), using automatic calculation"
-                                )
-                                valid = False
-                                break
-                            if not all(isinstance(w, (float)) and w > 0 for w in task_weights):
-                                LOGGER.warning(
-                                    f"WARNING Some class weights are not positive for task {task_idx}, "
-                                    "using automatic calculation"
-                                )
-                                valid = False
-                                break
-                        if not valid:
+        if self.args.weighted_loss:
+            if self.args.task == "classify":
+                clf_loss_weights = self.train_loader.dataset.calculate_weights(0.5)
+                clf_loss_weights = torch.tensor(clf_loss_weights, device=self.device, dtype=torch.float)
+            else:
+                # Get number of classes for validation
+                nc_list = self.model.model[-1].nc
+                # Get clf_loss_weights from args if provided
+                if hasattr(self.args, 'clf_loss_weights') and self.args.clf_loss_weights is not None:
+                    clf_loss_weights = self.args.clf_loss_weights
+                    task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+                    if (
+                        isinstance(clf_loss_weights, list)
+                        and task_schema
+                        and len(clf_loss_weights) == len(task_schema.get("label_nc", []))
+                        and len(clf_loss_weights) != len(nc_list)
+                    ):
+                        expanded_weights = [[1.0] * nc for nc in nc_list]
+                        for label_col, flat_head in enumerate(task_schema.get("source_label_heads", [])):
+                            expanded_weights[int(flat_head)] = clf_loss_weights[label_col]
+                        clf_loss_weights = expanded_weights
+                    # Validate and convert to list of lists if needed
+                    if isinstance(clf_loss_weights, list):
+                        # Validate number of weights matches number of classes
+                        if len(clf_loss_weights) != len(nc_list):
+                            LOGGER.warning(
+                                f"WARNING Number of weight lists ({len(clf_loss_weights)}) doesn't match "
+                                f"number of tasks ({len(nc_list)}), using automatic calculation"
+                            )
                             clf_loss_weights = None
-                else:
-                    LOGGER.warning("WARNING clf_loss_weights must be a list, using automatic calculation")
-                    clf_loss_weights = None
-            # Auto-calculate weights if not provided or invalid
-            if clf_loss_weights is None:
-                calculated_weights = self._calculate_class_weights(nc_list=nc_list)
-                if calculated_weights is not None: #FIXME
+                        else:
+                            # Validate all weights are positive and count matches classes
+                            valid = True
+                            for task_idx, task_weights in enumerate(clf_loss_weights):
+                                if not isinstance(task_weights, list):
+                                    valid = False
+                                    break
+                                if len(task_weights) != nc_list[task_idx]:
+                                    LOGGER.warning(
+                                        f"WARNING Number of weights ({len(task_weights)}) for task {task_idx} "
+                                        f"doesn't match number of classes ({nc_list[task_idx]}), using automatic calculation"
+                                    )
+                                    valid = False
+                                    break
+                                if not all(isinstance(w, (float, int)) and w > 0 for w in task_weights):
+                                    LOGGER.warning(
+                                        f"WARNING Some class weights are not positive for task {task_idx}, "
+                                        "using automatic calculation"
+                                    )
+                                    valid = False
+                                    break
+                            if not valid:
+                                clf_loss_weights = None
+                    else:
+                        LOGGER.warning("WARNING clf_loss_weights must be a list, using automatic calculation")
+                        clf_loss_weights = None
+                # Auto-calculate weights if not provided or invalid
+                if clf_loss_weights is None:
+                    calculated_weights = self._calculate_class_weights(nc_list=nc_list)
                     clf_loss_weights = calculated_weights
-                    LOGGER.info(f'{colorstr("Auto-calculated class weights")}: {clf_loss_weights}')
+            
+            LOGGER.info(f'{colorstr("Auto-calculated class weights")}: {clf_loss_weights}')
 
         # Initialize criterion
+        child_parent_map = self.data.get("child_parent_map") if isinstance(self.data, dict) else None
+        task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+        ignore_class = self.data.get("ignore_class") if isinstance(self.data, dict) else None
         if world_size > 1:
-            criterion = self.model.module.init_criterion(weights=loss_weights, clf_loss_weights=clf_loss_weights)
+            criterion = self.model.module.init_criterion(
+                clf_loss_weights=clf_loss_weights,
+                child_parent_map=child_parent_map,
+                task_schema=task_schema,
+                ignore_class=ignore_class,
+            )
             self.model.module.criterion = criterion
         else:
-            criterion = self.model.init_criterion(weights=loss_weights, clf_loss_weights=clf_loss_weights)
+            criterion = self.model.init_criterion(
+                clf_loss_weights=clf_loss_weights,
+                child_parent_map=child_parent_map,
+                task_schema=task_schema,
+                ignore_class=ignore_class,
+            )
             self.model.criterion = criterion
 
         # Compile model
@@ -539,14 +572,35 @@ class BaseTrainer:
 
                 self.run_callbacks("on_train_batch_end")
 
+            if hasattr(unwrap_model(self.model).criterion, "update"):
+                unwrap_model(self.model).criterion.update()
+
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")
+            # SAHI: Regenerate random crops for next epoch.
+            # IMPORTANT: ``on_epoch_end`` mutates only the main-process dataset.
+            # With ``persistent_workers=True`` (default when workers > 0) each worker
+            # has its own forked copy of ``dataset.slice_indices`` from the original
+            # ``__init__`` and never sees the regeneration. Calling
+            # ``train_loader.reset()`` after the regeneration tears down the worker
+            # pool and re-forks workers, which propagates the new slice_indices.
+            if hasattr(self.train_loader, 'dataset'):
+                dataset = self.train_loader.dataset
+                if hasattr(dataset, 'on_epoch_end'):
+                    dataset.on_epoch_end()
+                    if hasattr(self.train_loader, 'reset'):
+                        self.train_loader.reset()
+                    
+            # SAHI: Update distributed sampler epoch
+            if hasattr(self.train_loader, 'batch_sampler') and hasattr(self.train_loader.batch_sampler, 'set_epoch'):
+                self.train_loader.batch_sampler.set_epoch(epoch + 1)
+                
             if RANK in {-1, 0}:
                 final_epoch = epoch + 1 >= self.epochs
                 self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
 
                 # Validation
-                if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
+                if self.validator and (self.args.val or final_epoch or self.stopper.possible_stop or self.stop):
                     self.metrics, self.fitness = self.validate()
                 self.save_metrics(metrics={**self.label_loss_items(self.tloss), **self.metrics, **self.lr})
                 self.stop |= self.stopper(epoch + 1, self.fitness) or final_epoch
@@ -585,13 +639,14 @@ class BaseTrainer:
             epochs = epoch - self.start_epoch + 1  # total training epochs
             seconds = time.time() - self.train_time_start  # total training seconds
             LOGGER.info(f"\n{epochs} epochs completed in {seconds / 3600:.3f} hours.")
-            self.final_eval()
-            metrics = self.validator.metrics
-            if isinstance(metrics, list):
-                for m in metrics:
-                    m.training = {"epochs": epochs, "seconds": seconds}
-            else:
-                metrics.training = {"epochs": epochs, "seconds": seconds}
+            if self.validator:
+                self.final_eval()
+                metrics = self.validator.metrics
+                if isinstance(metrics, list):
+                    for m in metrics:
+                        m.training = {"epochs": epochs, "seconds": seconds}
+                else:
+                    metrics.training = {"epochs": epochs, "seconds": seconds}
             if self.args.plots:
                 self.plot_metrics()
             self.run_callbacks("on_train_end")
@@ -612,6 +667,7 @@ class BaseTrainer:
         all_weights = []
         # Collect all class counts for all tasks at once
         all_counts = [np.zeros(nc, dtype=np.float32) for nc in nc_list]
+        ignore_class = self.data.get("ignore_class", {}) if isinstance(self.data, dict) else {}
         for label in self.train_loader.dataset.labels:
             if 'cls' in label:
                 cls_data = label['cls']  # Shape: (n_objects, n_tasks) or (n_objects,)
@@ -623,6 +679,8 @@ class BaseTrainer:
                     cls_for_task = cls_data[:, task_idx].astype(int)
                     # Count valid class instances for this task
                     valid_mask = (cls_for_task >= 0) & (cls_for_task < nc)
+                    for ignored_cls in ignore_class.get(task_idx, []):
+                        valid_mask &= cls_for_task != int(ignored_cls)
                     valid_classes = cls_for_task[valid_mask]
                     # Count occurrences 
                     if len(valid_classes) > 0:
@@ -843,7 +901,7 @@ class BaseTrainer:
             if f.exists():
                 if f is self.last:
                     ckpt = strip_optimizer(f)
-                elif f is self.best:
+                elif f is self.best and self.validator is not None:
                     k = "train_results"  # update best.pt train_metrics from last.pt
                     strip_optimizer(f, updates={k: ckpt[k]} if k in ckpt else None)
                     LOGGER.info(f"\nValidating {f}...")
@@ -938,7 +996,7 @@ class BaseTrainer:
         Returns:
             (torch.optim.Optimizer): The constructed optimizer.
         """
-        g = [], [], []  # optimizer parameter groups
+        g = [{}, {}, {}, {}]  # optimizer parameter groups (for MuSGD we need dicts)
         bn = tuple(v for k, v in nn.__dict__.items() if "Norm" in k)  # normalization layers, i.e. BatchNorm2d()
         if name == "auto":
             LOGGER.info(
@@ -949,26 +1007,65 @@ class BaseTrainer:
             nc_attr = getattr(model, "nc")
             nc = nc_attr if isinstance(nc_attr, int) else sum(nc_attr)  # number of classes
             lr_fit = round(0.002 * 5 / (4 + nc), 6)  # lr0 fit equation to 6 decimal places
-            name, lr, momentum = ("SGD", 0.01, 0.9) if iterations > 10000 else ("AdamW", lr_fit, 0.9)
-            self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
+            # Use MuSGD for large-scale training (YOLO26 style)
+            if iterations > 10000:
+                name, lr, momentum = "MuSGD", 0.01, 0.9
+            else:
+                name, lr, momentum = "AdamW", lr_fit, 0.9
+                self.args.warmup_bias_lr = 0.0  # no higher than 0.01 for Adam
 
+        use_muon = name == "MuSGD"
         for module_name, module in model.named_modules():
             for param_name, param in module.named_parameters(recurse=False):
                 fullname = f"{module_name}.{param_name}" if module_name else param_name
-                if "bias" in fullname:  # bias (no decay)
-                    g[2].append(param)
-                elif isinstance(module, bn):  # weight (no decay)
-                    g[1].append(param)
+                if param.ndim >= 2 and use_muon:
+                    g[3][fullname] = param  # muon params (2D+ tensors)
+                elif "bias" in fullname:  # bias (no decay)
+                    g[2][fullname] = param
+                elif isinstance(module, bn) or "logit_scale" in fullname:  # weight (no decay)
+                    g[1][fullname] = param
                 else:  # weight (with decay)
-                    g[0].append(param)
+                    g[0][fullname] = param
 
+        if not use_muon:
+            g = [[v for v in x.values()] for x in g[:3]]  # convert to list of params
+
+        optimizers = {"Adam", "Adamax", "AdamW", "NAdam", "RAdam", "RMSProp", "SGD", "MuSGD", "auto"}
+        name = {x.lower(): x for x in optimizers}.get(name.lower(), name)
+        
         if name in {"Adam", "Adamax", "AdamW", "NAdam", "RAdam"}:
-            optimizer = getattr(optim, name, optim.Adam)(g[2], lr=lr, betas=(momentum, 0.999), weight_decay=0.0)
+            optim_args = dict(lr=lr, betas=(momentum, 0.999), weight_decay=0.0)
+            optimizer = getattr(optim, name, optim.Adam)(g[2], **optim_args)
         elif name == "RMSProp":
             optimizer = optim.RMSprop(g[2], lr=lr, momentum=momentum)
         elif name == "SGD":
             optimizer = optim.SGD(g[2], lr=lr, momentum=momentum, nesterov=True)
-
+        elif name == "MuSGD":
+            optim_args = dict(lr=lr, momentum=momentum, nesterov=True)
+            num_params = [len(g[0]), len(g[1]), len(g[2])]
+            g[2] = {"params": g[2], **optim_args, "param_group": "bias"}
+            g[0] = {"params": g[0], **optim_args, "weight_decay": decay, "param_group": "weight"}
+            g[1] = {"params": g[1], **optim_args, "weight_decay": 0.0, "param_group": "bn"}
+            muon, sgd = (0.2, 1.0)
+            num_params[0] = len(g[3])  # update number of muon params
+            g[3] = {"params": g[3], **optim_args, "weight_decay": decay, "use_muon": True, "param_group": "muon"}
+            
+            import re
+            # Higher lr for certain parameters in MuSGD when finetuning
+            pattern = re.compile(r"(?=.*23)(?=.*cv3)|proto\.semseg")
+            g_ = []  # new param groups
+            for x in g:
+                p = x.pop("params")
+                p1 = [v for k, v in p.items() if pattern.search(k)]
+                p2 = [v for k, v in p.items() if not pattern.search(k)]
+                g_.extend([{"params": p1, **x, "lr": lr * 3}, {"params": p2, **x}])
+            g = g_
+            optimizer = partial(MuSGD, muon=muon, sgd=sgd)(params=g)
+            LOGGER.info(
+                f"{colorstr('optimizer:')} {type(optimizer).__name__}(lr={lr}, momentum={momentum}) with parameter groups "
+                f"{num_params[1]} weight(decay=0.0), {num_params[0]} weight(decay={decay}), {num_params[2]} bias(decay=0.0)"
+            )
+            return optimizer
         # timm optimizers https://timm.fast.ai/Optimizers & https://github.com/huggingface/pytorch-image-models/blob/4d4bdd64a996bf7b5919ec62f20af4a1c07d5848/timm/optim/optim_factory.py#L183
         elif name in {
             'nadam', 'radam', 'adamp', 'Lookahead_Adam', 'lion', 'rmsproptf', 'rmsprop', 'novograd', 'nvnovograd', 'madgradw', 'madgrad', 'adahessian',
@@ -984,7 +1081,7 @@ class BaseTrainer:
         else:
             raise NotImplementedError(
                 f"Optimizer '{name}' not found in list of available optimizers "
-                f"[Adam, AdamW, NAdam, RAdam, RMSProp, SGD, auto]."
+                f"[Adam, AdamW, NAdam, RAdam, RMSProp, SGD, MuSGD, auto]."
                 "To request support for addition optimizers please visit https://github.com/ultralytics/ultralytics."
             )
         optimizer.add_param_group({"params": g[0], "weight_decay": decay})  # add g0 with weight_decay

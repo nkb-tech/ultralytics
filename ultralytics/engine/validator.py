@@ -133,6 +133,11 @@ class BaseValidator:
             if str(self.args.model).endswith(".yaml"):
                 LOGGER.warning("WARNING ⚠️ validating an untrained model YAML will result in 0 mAP.")
             callbacks.add_integration_callbacks(self)
+            if hasattr(model, "end2end"):
+                if self.args.end2end is not None:
+                    model.end2end = self.args.end2end
+                if model.end2end:
+                    model.set_head_attr(max_det=self.args.max_det, agnostic_nms=self.args.agnostic_nms)
             model = AutoBackend(
                 weights=model or self.args.model,
                 device=select_device(self.args.device, self.args.batch),
@@ -140,10 +145,22 @@ class BaseValidator:
                 data=self.args.data,
                 fp16=self.args.half,
             )
-            # self.model = model
+            self.model = model  # Store model for access to flags
             self.device = model.device  # update device
             self.args.half = model.fp16  # update half
+            self.rknn = getattr(model, 'rknn', False)  # RKNN format flag
+            self.hef = getattr(model, 'hef', False)  # Hailo format flag
+            self.int8 = getattr(model, 'int8', False)  # INT8 quantization flag
+            self.nhwc = getattr(model, 'nhwc', False)  # NHWC format flag (for RKNN, TFLite, Hailo, etc.)
+            self.end2end = getattr(model, 'end2end', False)  # End2end model flag
+            self.nms = getattr(model, 'nms', False)  # NMS in graph flag
             stride, pt, jit, engine = model.stride, model.pt, model.jit, model.engine
+            # For Hailo/RKNN models, use imgsz from model metadata if not explicitly set by user
+            if (self.hef or self.rknn) and hasattr(model, 'imgsz'):
+                model_imgsz = model.imgsz
+                if isinstance(model_imgsz, (list, tuple)):
+                    model_imgsz = max(model_imgsz)
+                self.args.imgsz = model_imgsz
             imgsz = check_imgsz(self.args.imgsz, stride=stride)
             if engine:
                 self.args.batch = model.batch_size
@@ -197,14 +214,16 @@ class BaseValidator:
                 if self.training:
                     _, loss_items = model.loss(batch, preds)  
                     #self.loss += model.loss(batch, preds)[1]
-                    self.loss[:3] += loss_items
+                    n_losses = min(len(self.loss), len(loss_items))
+                    self.loss[:n_losses] += loss_items[:n_losses]
 
             # Postprocess
             with dt[3]:
                 preds = self.postprocess(preds)
 
             self.update_metrics(preds, batch)
-            if self.args.plots and batch_i < 3:
+            max_plot = getattr(self.args, 'max_plot_batches', 3)
+            if self.args.plots and (max_plot < 0 or batch_i < max_plot):
                 self.plot_val_samples(batch, batch_i)
                 self.plot_predictions(batch, preds, batch_i)
 

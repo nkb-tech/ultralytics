@@ -112,25 +112,37 @@ class BasePredictor:
         self._lock = threading.Lock()  # for automatic thread-safe inference
         callbacks.add_integration_callbacks(self)
 
-    def preprocess(self, im):
+    def preprocess(self, ims):
         """
         Prepares input image before inference.
 
         Args:
-            im (torch.Tensor | List(np.ndarray)): BCHW for tensor, [(HWC) x B] for list.
+            ims (torch.Tensor | List(np.ndarray)): batch of images: BCHW for tensor, [(HWC) x B] for list.
         """
-        not_tensor = not isinstance(im, torch.Tensor)
+        not_tensor = not isinstance(ims, torch.Tensor)
         if not_tensor:
-            im = np.stack(self.pre_transform(im))
-            im = im[..., ::-1].transpose((0, 3, 1, 2))  # BGR to RGB, BHWC to BCHW, (n, 3, h, w)
-            im = np.ascontiguousarray(im)  # contiguous
-            im = torch.from_numpy(im)
+            ims = np.stack(self.pre_transform(ims))
+            ims = ims[..., ::-1] # BGR to RGB
+            if not self.model.nhwc:
+                ims = ims.transpose((0, 3, 1, 2))  # BHWC to BCHW, (n, 3, h, w)
+            ims = np.ascontiguousarray(ims)
+            ims = torch.from_numpy(ims)
 
-        im = im.to(self.device)
-        im = im.half() if self.model.fp16 else im.float()  # uint8 to fp16/32
-        if not_tensor:
-            im /= 255  # 0 - 255 to 0.0 - 1.0
-        return im
+        ims = ims.to(self.device)
+        ims = ims.to(torch.uint8 if self.model.int8 else torch.float16 if self.model.fp16 else torch.float32)
+        
+        # RKNN has his own normalization
+        if not self.model.rknn and not_tensor and not self.model.int8:
+            # Normalize based on bit depth from config
+            bit_depth = getattr(self.args, 'image_bit_depth', 8)
+            if bit_depth == 8:
+                ims /= 255.0
+            elif bit_depth == 16:
+                ims /= 65_535.0
+            else:
+                LOGGER.error(f"BitDepth {bit_depth} unsupported.")
+
+        return ims
 
     def inference(self, im, *args, **kwargs):
         """Runs inference on a given image using the specified model and arguments."""
@@ -231,7 +243,9 @@ class BasePredictor:
 
             # Warmup model
             if not self.done_warmup:
-                self.model.warmup(imgsz=(1 if self.model.pt or self.model.triton else self.dataset.bs, 3, *self.imgsz))
+                bs = 1 if self.model.pt or self.model.triton else self.dataset.bs
+                spatial = (*self.imgsz, 3) if self.model.nhwc else (3, *self.imgsz)
+                self.model.warmup(imgsz=(bs, *spatial))
                 self.done_warmup = True
 
             self.seen, self.windows, self.batch = 0, [], None
@@ -290,7 +304,7 @@ class BasePredictor:
             t = tuple(x.t / self.seen * 1e3 for x in profilers)  # speeds per image
             LOGGER.info(
                 f"Speed: %.1fms preprocess, %.1fms inference, %.1fms postprocess per image at shape "
-                f"{(min(self.args.batch, self.seen), 3, *im.shape[2:])}" % t
+                f"{(min(self.args.batch, self.seen), *im.shape[1:])}" % t
             )
         if self.args.save or self.args.save_txt or self.args.save_crop:
             nl = len(list(self.save_dir.glob("labels/*.txt")))  # number of labels
@@ -300,6 +314,11 @@ class BasePredictor:
 
     def setup_model(self, model, verbose=True):
         """Initialize YOLO model with given parameters and set it to evaluation mode."""
+        if hasattr(model, "end2end"):
+            if self.args.end2end is not None:
+                model.end2end = self.args.end2end
+            if model.end2end:
+                model.set_head_attr(max_det=self.args.max_det, agnostic_nms=self.args.agnostic_nms)
         self.model = AutoBackend(
             weights=model or self.args.model,
             device=select_device(self.args.device, verbose=verbose),
@@ -309,16 +328,18 @@ class BasePredictor:
             batch=self.args.batch,
             fuse=True,
             verbose=verbose,
+            end2end=getattr(self.args, "end2end", None),
         )
 
-        # Backward compatibility
-        self.output_names = sorted(self.model.output_names) if hasattr(self.model, "output_names") else None
-        self.nms = self.model.nms if hasattr(self.model, "nms") else False
-        self.engine = self.model.engine if hasattr(self.model, "engine") else False
-        self.onnx = self.model.onnx if hasattr(self.model, "onnx") else False
+        names = getattr(self.model, "names", None)
+        self.is_multitask = len(names) > 1 if names else False
+        self.nc = [len(nc) for nc in names] if names else [1]
+        self.main_head = int(getattr(self.model, "main_head", getattr(getattr(self.model, "model", None), "main_head", 0)))
 
         self.device = self.model.device  # update device
         self.args.half = self.model.fp16  # update half
+        # AutoBackend -> task model (e.g. DetectionModel) -> head.embed_dim, via BaseModel.embed_dim property.
+        self.embed_dim = getattr(getattr(self.model, "model", None), "embed_dim", 0)
         self.model.eval()
         self.model = attempt_compile(self.model, device=self.device, mode=self.args.compile)
 
@@ -335,7 +356,7 @@ class BasePredictor:
             frame = int(match[1]) if match else None  # 0 if frame undetermined
 
         self.txt_path = self.save_dir / "labels" / (p.stem + ("" if self.dataset.mode == "image" else f"_{frame}"))
-        string += "{:g}x{:g} ".format(*im.shape[2:])
+        string += "{:g}x{:g} ".format(*im.shape[1:3] if self.model.nhwc else im.shape[2:])
         result = self.results[i]
         result.save_dir = self.save_dir.__str__()  # used in other locations
         string += f"{result.verbose()}{result.speed['inference']:.1f}ms"

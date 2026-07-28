@@ -4,7 +4,7 @@ import torch
 
 from ultralytics.engine.predictor import BasePredictor
 from ultralytics.engine.results import Results
-from ultralytics.utils import ops
+from ultralytics.utils import nms, ops
 
 
 class NASPredictor(BasePredictor):
@@ -38,7 +38,7 @@ class NASPredictor(BasePredictor):
         boxes = ops.xyxy2xywh(preds_in[0][0])
         preds = torch.cat((boxes, preds_in[0][1]), -1).permute(0, 2, 1)
 
-        preds = ops.non_max_suppression(
+        preds = nms.non_max_suppression(
             preds,
             self.args.conf,
             self.args.iou,

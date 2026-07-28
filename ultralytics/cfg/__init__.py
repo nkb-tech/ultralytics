@@ -27,8 +27,7 @@ from ultralytics.utils import (
     colorstr,
     deprecation_warn,
     vscode_msg,
-    yaml_load,
-    yaml_print,
+    YAML,
 )
 
 # Define valid tasks and modes
@@ -111,6 +110,8 @@ CFG_FLOAT_KEYS = {  # integer or float arguments, i.e. x=2 and x=2.0
     "box",
     "cls",
     "dfl",
+    "reid",
+    "dep",
     "degrees",
     "shear",
     "time",
@@ -131,7 +132,6 @@ CFG_FRACTION_KEYS = {  # fractional float arguments with 0.0<=values<=1.0
     "hsv_s",
     "hsv_v",
     "translate",
-    "scale",
     "perspective",
     "flipud",
     "fliplr",
@@ -164,6 +164,8 @@ CFG_INT_KEYS = {  # integer-only arguments
     "albu_clip_limit",
     "min_bbox",
     "min_imgsz",
+    "max_plot_batches",
+    "reid_dim",
 }
 CFG_BOOL_KEYS = {  # boolean-only arguments
     "save",
@@ -176,7 +178,6 @@ CFG_BOOL_KEYS = {  # boolean-only arguments
     "overlap_mask",
     "val",
     "save_json",
-    "save_hybrid",
     "half",
     "dnn",
     "plots",
@@ -199,11 +200,13 @@ CFG_BOOL_KEYS = {  # boolean-only arguments
     "dynamic",
     "simplify",
     "nms",
+    "hybrid",
     "profile",
     "multi_scale",
     "nms",
     "weighted",
     "weighted_loss",
+    "end2end",
 }
 
 
@@ -236,7 +239,7 @@ def cfg2dict(cfg):
         - If cfg is already a dictionary, it's returned unchanged.
     """
     if isinstance(cfg, (str, Path)):
-        cfg = yaml_load(cfg)  # load dict
+        cfg = YAML.load(cfg)  # load dict
     elif isinstance(cfg, SimpleNamespace):
         cfg = vars(cfg)  # convert to dict
     return cfg
@@ -318,6 +321,22 @@ def check_cfg(cfg, hard=True):
         - None values are ignored as they may be from optional arguments.
         - Fraction keys are checked to be within the range [0.0, 1.0].
     """
+    if "scale" in cfg and cfg["scale"] is not None:
+        v = cfg["scale"]
+        if isinstance(v, (list, tuple)):
+            if len(v) != 2 or not all(isinstance(x, (int, float)) for x in v):
+                raise TypeError(
+                    f"'scale={v}' must be a list/tuple of 2 numbers (i.e. 'scale=[0.6, 1.0]')"
+                )
+            cfg["scale"] = list(v)
+        elif not isinstance(v, (int, float)):
+            if hard:
+                raise TypeError(
+                    f"'scale={v}' is of invalid type {type(v).__name__}. "
+                    f"Valid 'scale' types are int, float, or list (i.e. 'scale=0.5' or 'scale=[0.6, 1.0]')"
+                )
+            cfg["scale"] = float(v)
+
     for k, v in cfg.items():
         if v is not None:  # None values may be from optional args
             if k in CFG_FLOAT_KEYS and not isinstance(v, (int, float)):
@@ -757,7 +776,7 @@ def entrypoint(debug=""):
                 k, v = parse_key_value_pair(a)
                 if k == "cfg" and v is not None:  # custom.yaml passed
                     LOGGER.info(f"Overriding {DEFAULT_CFG_PATH} with {v}")
-                    overrides = {k: val for k, val in yaml_load(checks.check_yaml(v)).items() if k != "cfg"}
+                    overrides = {k: val for k, val in YAML.load(checks.check_yaml(v)).items() if k != "cfg"}
                 else:
                     overrides[k] = v
             except (NameError, SyntaxError, ValueError, AssertionError) as e:

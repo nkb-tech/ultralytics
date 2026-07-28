@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
-from ultralytics.utils import ARM64, IS_JETSON, IS_RASPBERRYPI, LINUX, LOGGER, ROOT, yaml_load
+from ultralytics.utils import ARM64, IS_JETSON, IS_RASPBERRYPI, LINUX, LOGGER, ROOT, YAML
 from ultralytics.utils.checks import check_requirements, check_suffix, check_version, check_yaml
 from ultralytics.utils.downloads import attempt_download_asset, is_url
 
@@ -23,30 +23,69 @@ def check_class_names(names):
     """
     Check class names.
 
-    Map imagenet class codes to human-readable names if required. Convert lists to dicts.
+    Map imagenet class codes to human-readable names if required.
+    Supports multi-task structures (list/tuple of lists or dicts) by normalizing
+    each task independently instead of flattening.
+    
+    Always returns a multi-task structure: list of dicts.
+    If input is old single-task format (list/tuple of str, dict), wraps it in a list.
     """
-    if isinstance(names, list):  # names is a list
-        names = dict(enumerate(names))  # convert to dict
+
+    # Multi-task: list/tuple where each element is its own set of class names
+    if isinstance(names, (list, tuple)):
+        if names and isinstance(names[0], (list, tuple, dict)):
+            # Already multi-task structure - process each task recursively
+            result = []
+            for n in names:
+                processed = check_class_names(n)
+                # processed is already a list (from recursive call), so extend result
+                if isinstance(processed, list):
+                    result.extend(processed)
+                else:
+                    result.append(processed)
+            return result
+        # Old single-task format: list/tuple of strings - convert to dict then wrap in list
+        names = dict(enumerate(names))  # flat single-task list -> dict
+
     if isinstance(names, dict):
+        # If values themselves are nested class definitions, normalize them recursively
+        sample = next(iter(names.values())) if names else None
+        if isinstance(sample, (list, tuple, dict)):
+            # Dict with nested structures - this is a multi-task dict (e.g., {0: {...}, 1: {...}})
+            # Process each task recursively and convert to list of dicts
+            result = []
+            for k, v in sorted(names.items(), key=lambda x: int(x[0])):
+                processed = check_class_names(v)
+                # processed is already a list (from recursive call), so extend result
+                if isinstance(processed, list):
+                    result.extend(processed)
+                else:
+                    result.append(processed)
+            return result
+
         # Convert 1) string keys to int, i.e. '0' to 0, and non-string values to strings, i.e. True to 'True'
         names = {int(k): str(v) for k, v in names.items()}
         n = len(names)
-        if max(names.keys()) >= n:
+        if n and max(names.keys()) >= n:
             raise KeyError(
                 f"{n}-class dataset requires class indices 0-{n - 1}, but you have invalid class indices "
                 f"{min(names.keys())}-{max(names.keys())} defined in your dataset YAML."
             )
-        if isinstance(names[0], str) and names[0].startswith("n0"):  # imagenet class codes, i.e. 'n01440764'
-            names_map = yaml_load(ROOT / "cfg/datasets/ImageNet.yaml")["map"]  # human-readable names
+        if n and isinstance(names[0], str) and names[0].startswith("n0"):  # imagenet class codes, i.e. 'n01440764'
+            names_map = YAML.load(ROOT / "cfg/datasets/ImageNet.yaml")["map"]  # human-readable names
             names = {k: names_map[v] for k, v in names.items()}
-    return names
+        # Wrap single-task dict in list to make it multi-task compatible
+        return [names]
+    
+    # If we get here, it's an unexpected type - wrap in list for multi-task compatibility
+    return [names]
 
 
 def default_class_names(data=None):
     """Applies default class names to an input YAML file or returns numerical class names."""
     if data:
         with contextlib.suppress(Exception):
-            return yaml_load(check_yaml(data))["names"]
+            return YAML.load(check_yaml(data))["names"]
     return {i: f"class{i}" for i in range(999)}  # return default if above errors
 
 
@@ -73,6 +112,8 @@ class AutoBackend(nn.Module):
             | TensorFlow Edge TPU   | *_edgetpu.tflite |
             | PaddlePaddle          | *_paddle_model   |
             | NCNN                  | *_ncnn_model     |
+            | RKNN                  | *_rknn_model     |
+            | Hailo                 | *.hef            |
 
     This class offers dynamic backend switching capabilities based on the input model format, making it easier to deploy
     models across various platforms.
@@ -85,10 +126,13 @@ class AutoBackend(nn.Module):
         device=torch.device("cpu"),
         dnn=False,
         data=None,
+        fp32=False,
         fp16=False,
+        int8=False,
         batch=1,
         fuse=True,
         verbose=True,
+        end2end=None,
     ):
         """
         Initialize the AutoBackend for inference.
@@ -99,6 +143,7 @@ class AutoBackend(nn.Module):
             dnn (bool): Use OpenCV DNN module for ONNX inference. Defaults to False.
             data (str | Path | optional): Path to the additional data.yaml file containing class names. Optional.
             fp16 (bool): Enable half-precision inference. Supported only on specific backends. Defaults to False.
+            int8 (bool): Enable int8 inference. Supported only on specific backends. Defaults to False.
             batch (int): Batch-size to assume for inference.
             fuse (bool): Fuse Conv2D + BatchNorm layers for optimization. Defaults to True.
             verbose (bool): Enable verbose logging. Defaults to True.
@@ -125,13 +170,22 @@ class AutoBackend(nn.Module):
             ncnn,         # 13
             imx,          # 14
             rknn,         # 15
-            executorch,   # 16
-            triton,       # 17
-        ) = model_types if len(model_types) == 18 else model_types + [False] * (18 - len(model_types))
+            hef,          # 16  (Hailo — matches export_formats)
+            executorch,   # 17
+            triton,       # 18
+        ) = model_types if len(model_types) == 19 else model_types + [False] * (19 - len(model_types))
 
+        fp32 &= hef
         fp16 &= pt or jit or onnx or xml or engine or nn_module or triton  # FP16
-        nhwc = coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs torch BCWH)
-        stride = 32  # default stride
+        int8 &= hef or rknn or jit or onnx or engine # INT8
+        nhwc = hef or rknn or coreml or saved_model or pb or tflite or edgetpu  # BHWC formats (vs torch BCWH)
+        if int8 and fp16:
+            LOGGER.warning("WARNING ⚠️ int8=True and fp16=True are mutually exclusive, setting fp16=False.")
+            fp16 = False
+        if int8 and fp32:
+            LOGGER.warning("WARNING ⚠️ int8=True and fp32=True are mutually exclusive, setting fp32=False.")
+            fp32 = False
+        strides = (8, 16, 32)  # default per-level strides
         model, metadata = None, None
 
         # Set device
@@ -139,6 +193,7 @@ class AutoBackend(nn.Module):
         if cuda and not any([nn_module, pt, jit, engine, onnx]):  # GPU dataloader formats
             device = torch.device("cpu")
             cuda = False
+            LOGGER.warning("WARNING ⚠️ CUDA supported by this format, setting device to CPU.")
 
         # Download if not local
         if not (pt or triton or nn_module):
@@ -147,14 +202,10 @@ class AutoBackend(nn.Module):
         # In-memory PyTorch model
         if nn_module:
             model = weights.to(device)
+            if end2end is not None:
+                model.end2end = end2end
             if fuse:
                 model = model.fuse(verbose=verbose)
-            if hasattr(model, "kpt_shape"):
-                kpt_shape = model.kpt_shape  # pose-only
-            stride = max(int(model.stride.max()), 32)  # model stride
-            names = model.module.names if hasattr(model, "module") else model.names
-            model.half() if fp16 else model.float()
-            self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
             pt = True
 
         # PyTorch
@@ -162,14 +213,22 @@ class AutoBackend(nn.Module):
             from ultralytics.nn.tasks import attempt_load_weights
 
             model = attempt_load_weights(
-                weights if isinstance(weights, list) else w, device=device, inplace=True, fuse=fuse
+                weights if isinstance(weights, list) else w,
+                device=device,
+                inplace=True,
+                fuse=fuse,
+                end2end=end2end,
             )
+
+        # Shared PyTorch model setup
+        if pt:
             if hasattr(model, "kpt_shape"):
-                kpt_shape = model.kpt_shape  # pose-only
-            stride = max(int(model.stride.max()), 32)  # model stride
+                kpt_shape = model.kpt_shape
+            strides = tuple(sorted(int(s) for s in model.stride))
             names = model.module.names if hasattr(model, "module") else model.names
             model.half() if fp16 else model.float()
-            self.model = model  # explicitly assign for to(), cpu(), cuda(), half()
+            self.model = model
+            end2end = getattr(model, "end2end", False)
 
         # TorchScript
         elif jit:
@@ -400,6 +459,119 @@ class AutoBackend(nn.Module):
 
             model = TritonRemoteModel(w)
 
+        # Rockchip
+        elif rknn:
+            LOGGER.info(f"Loading {w} for RKNN inference...")
+            check_requirements("rknn-toolkit-lite2")
+            from rknnlite.api import RKNNLite
+            from ultralytics.utils import _restore_standard_logging_names
+
+            _restore_standard_logging_names()
+
+            rknn = RKNNLite(
+                verbose=False,
+                verbose_file=None,
+            )
+            w = Path(w)
+            if not w.is_file():  # if not *.rknn
+                w = next(w.rglob("*.rknn"))  # get *.rknn file from *_rknn_model dir
+
+            ret = rknn.load_rknn(str(w))
+            if ret != 0:
+                LOGGER.error(f"Failed to load RKNN model from {str(w)}")
+            
+            ret = rknn.init_runtime(
+                core_mask=RKNNLite.NPU_CORE_AUTO,
+                async_mode=True,
+            )
+            if ret != 0:
+                LOGGER.error(f"Failed to initialize RKNN runtime.")
+
+            metadata = w.parent / "metadata.yaml"
+            model = rknn
+
+        # Hailo
+        elif hef:
+            LOGGER.info(f"Loading {w} for Hailo inference...")
+            from hailo_platform import (
+                HEF,
+                VDevice,
+                InferVStreams,
+                InputVStreamParams,
+                OutputVStreamParams,
+                ConfigureParams,
+                FormatType,
+                HailoStreamInterface,
+            )
+
+            w = Path(w)
+            if not w.is_file():
+                w = next(w.rglob("*.hef"))
+
+            hef_model = HEF(str(w))
+            hailo_vdevice = VDevice()
+
+            configure_params = ConfigureParams.create_from_hef(
+                hef_model, interface=HailoStreamInterface.PCIe,
+            )
+
+            network_group = hailo_vdevice.configure(hef_model, configure_params)[0]
+            network_group_params = network_group.create_params()
+
+            input_vstream_infos = hef_model.get_input_vstream_infos()
+            output_vstream_infos = hef_model.get_output_vstream_infos()
+            output_names = hef_model.get_sorted_output_names()
+
+            input_vstream_info = input_vstream_infos[0]
+            input_shape = input_vstream_info.shape
+
+            hailo_input_format_type = FormatType.FLOAT32 if fp32 else FormatType.UINT8
+            if not fp32 and not int8:
+                int8 = True  # default to uint8 for Hailo
+
+            input_vstreams_params = InputVStreamParams.make_from_network_group(
+                network_group, format_type=hailo_input_format_type,
+            )
+            output_vstreams_params = OutputVStreamParams.make_from_network_group(
+                network_group, format_type=FormatType.FLOAT32,
+            )
+
+            # Activate network group (required before inference)
+            hailo_activated_ng = network_group.activate(network_group_params)
+            hailo_activated_ng.__enter__()
+
+            # Create and enter InferVStreams pipeline (kept alive for repeated inference)
+            hailo_pipeline = InferVStreams(
+                network_group, input_vstreams_params, output_vstreams_params,
+            )
+            hailo_pipeline.__enter__()
+
+            # Store input layer name for inference
+            hailo_input_name = input_vstream_infos[0].name
+
+            metadata = Path(w).parent / "metadata.yaml"
+
+            # Sort outputs: group by spatial size (H*W desc), bbox before cls.
+            # Use nc from metadata to reliably distinguish cls (c==nc) from bbox
+            # regardless of reg_max or architecture.
+            _meta = YAML.load(metadata) if metadata.exists() else {}
+            _nc = len(_meta.get("names", {}))
+            info_map = {info.name: info.shape for info in output_vstream_infos}
+
+            def _sort_key(name):
+                shape = info_map[name]
+                h, w, c = shape[0], shape[1], shape[2]  # (H, W, C)
+                is_cls = 1 if c == _nc else 0
+                return (-(h * w), is_cls)
+
+            output_names = sorted(output_names, key=_sort_key)
+            model = hailo_pipeline
+
+            LOGGER.info(
+                f"Hailo model loaded: input='{hailo_input_name}' {input_vstream_info.shape}, "
+                f"outputs={len(output_names)}, format={hailo_input_format_type}"
+            )
+
         # Any other format (unsupported)
         else:
             from ultralytics.engine.exporter import export_formats
@@ -411,39 +583,62 @@ class AutoBackend(nn.Module):
 
         # Load external metadata YAML
         if isinstance(metadata, (str, Path)) and Path(metadata).exists():
-            metadata = yaml_load(metadata)
+            metadata = YAML.load(metadata)
         if metadata and isinstance(metadata, dict):
             for k, v in metadata.items():
-                if k in {"stride", "batch"}:
+                if k in {"batch"}:
                     metadata[k] = int(v)
-                elif k in {"imgsz", "names", "kpt_shape"} and isinstance(v, str):
+                elif k in {"imgsz", "names", "kpt_shape", "strides"} and isinstance(v, str):
                     metadata[k] = eval(v)
-            stride = metadata["stride"]
+            strides = tuple(metadata.get("strides", metadata.get("stride", (8, 16, 32))))
+            if isinstance(strides, int):
+                strides = (strides,)
             task = metadata["task"]
             batch = metadata["batch"]
             imgsz = metadata["imgsz"]
             names = metadata["names"]
-            nms = metadata["nms"]
+            nms = self.str2bool(metadata["nms"])
+            end2end = self.str2bool(metadata["end2end"])
             conf = metadata["conf"]
             max_det = metadata["max_det"]
-            kpt_shape = metadata.get("kpt_shape")
+            kpt_shape = metadata.get("kpt_shape", None)
+            int8 = metadata["dtype"] == "uint8"
+            fp16 = metadata["dtype"] == "float16"
+            float32 = metadata["dtype"] == "float32"
+            if not int8 and not fp16 and not float32:
+                LOGGER.warning(f"WARNING ⚠️ Unsupported data type: {metadata['dtype']}. Setting to float32.")
+                int8 = False
+                fp16 = False
+                float32 = True
         elif not (pt or triton or nn_module):
             LOGGER.warning(f"WARNING ⚠️ Metadata not found for 'model={weights}'")
 
         # Check names
         if "names" not in locals():  # names missing
             names = default_class_names(data)
-        
-        # TODO: Remove this once we have a better way to handle names
-        if not(isinstance(names, list) and all(isinstance(n, dict) for n in names)):
-            names = check_class_names(names)
+
+        names = check_class_names(names)
+        if "main_head" not in locals():
+            main_head = int(getattr(model, "main_head", 0)) if "model" in locals() else 0
 
         # Disable gradients
         if pt:
             for p in model.parameters():
                 p.requires_grad = False
 
+        stride = max(strides)
         self.__dict__.update(locals())  # assign all variables to self
+
+    @staticmethod
+    def str2bool(data: str) -> bool:
+        if data is None:
+            return False
+        elif isinstance(data, str):
+            return data.strip().lower() in {"1", "true", "yes", "y", "on"}
+        elif isinstance(data, bool):
+            return data
+        else:
+            raise NotImplementedError(type(data))
 
     def forward(self, im, augment=False, visualize=False, embed=None):
         """
@@ -459,10 +654,6 @@ class AutoBackend(nn.Module):
             (tuple): Tuple containing the raw output tensor, and processed output for visualization (if visualize=True)
         """
         b, ch, h, w = im.shape  # batch, channel, height, width
-        if self.fp16 and im.dtype != torch.float16:
-            im = im.half()  # to FP16
-        if self.nhwc:
-            im = im.permute(0, 2, 3, 1)  # torch BCHW to numpy BHWC shape(1,320,192,3)
 
         # PyTorch
         if self.pt or self.nn_module:
@@ -570,6 +761,33 @@ class AutoBackend(nn.Module):
             im = im.cpu().numpy()  # torch to numpy
             y = self.model(im)
 
+        elif self.rknn: # nhwc only supported
+            # Transpose from NCHW to NHWC if needed
+            if im.ndim == 4 and im.shape[1] in (1, 3):  # NCHW format detected
+                im = im.permute(0, 2, 3, 1).contiguous()
+            im = im.cpu().numpy()
+            y = self.model.inference(
+                inputs=[im],
+                data_format="nhwc",
+                data_type="uint8" if self.int8 else "float16" if self.fp16 else "float32",
+                get_frame_id=False,
+            )
+
+        # Hailo
+        elif self.hef:
+            # Transpose from NCHW to NHWC if needed (safety check)
+            if im.ndim == 4 and im.shape[1] in (1, 3):  # NCHW format detected
+                im = im.permute(0, 2, 3, 1).contiguous()
+            im = im.cpu().numpy()
+            if self.int8:
+                im = im.astype(np.uint8)
+            else:
+                im = im.astype(np.float32)
+            # Run inference via InferVStreams pipeline
+            results = self.model.infer({self.hailo_input_name: im})
+            # Collect outputs in sorted order
+            y = [results[name] for name in self.output_names]
+
         # TensorFlow (SavedModel, GraphDef, Lite, Edge TPU)
         else:
             im = im.cpu().numpy()
@@ -613,13 +831,11 @@ class AutoBackend(nn.Module):
                     y[1] = np.transpose(y[1], (0, 3, 1, 2))  # should be y = (1, 116, 8400), (1, 32, 160, 160)
             y = [x if isinstance(x, np.ndarray) else x.numpy() for x in y]
 
-        # for x in y:
-        #     print(type(x), len(x)) if isinstance(x, (list, tuple)) else print(type(x), x.shape)  # debug shapes
         if isinstance(y, (list, tuple)):
-            if len(self.names) == 999 and (self.task == "segment" or len(y) == 2):  # segments and names not defined
+            if len(self.names[0]) == 999 and (self.task == "segment" or len(y) == 2):  # segments and names not defined
                 ip, ib = (0, 1) if len(y[0].shape) == 4 else (1, 0)  # index of protos, boxes
                 nc = y[ib].shape[1] - y[ip].shape[3] - 4  # y = (1, 160, 160, 32), (1, 116, 8400)
-                self.names = {i: f"class{i}" for i in range(nc)}
+                self.names = [{i: f"class{i}" for i in range(nc)}]
             return self.from_numpy(y[0]) if len(y) == 1 else [self.from_numpy(x) for x in y]
         else:
             return self.from_numpy(y)
@@ -634,7 +850,7 @@ class AutoBackend(nn.Module):
         Returns:
             (torch.Tensor): The converted tensor
         """
-        return torch.tensor(x).to(self.device) if isinstance(x, np.ndarray) else x
+        return torch.tensor(x, device=self.device) if isinstance(x, np.ndarray) else x
 
     def warmup(self, imgsz=(1, 3, 640, 640)):
         """
@@ -647,7 +863,11 @@ class AutoBackend(nn.Module):
 
         warmup_types = self.pt, self.jit, self.onnx, self.engine, self.saved_model, self.pb, self.triton, self.nn_module
         if any(warmup_types) and (self.device.type != "cpu" or self.triton):
-            im = torch.empty(*imgsz, dtype=torch.half if self.fp16 else torch.float, device=self.device)  # input
+            im = torch.empty(
+                *imgsz,
+                dtype=torch.uint8 if self.int8 else torch.half if self.fp16 else torch.float,
+                device=self.device,
+            )  # input
             for _ in range(2 if self.jit else 1):
                 self.forward(im)  # warmup
 

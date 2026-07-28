@@ -51,6 +51,8 @@ __all__ = (
     "BottleneckEMA",
     "BottleneckCSP",
     "Proto",
+    "Proto26",
+    "RealNVP",
     "RepC3",
     "ResNetLayer",
     "RepNCSPELAN4",
@@ -96,6 +98,8 @@ __all__ = (
     "TorchVision",
     "DownsampleConv",
     "MobileOneBlock",
+    "LDown",
+    "IRDCB",
 )
 
 
@@ -139,6 +143,101 @@ class Proto(nn.Module):
     def forward(self, x):
         """Performs a forward pass through layers using an upsampled input image."""
         return self.cv3(self.cv2(self.upsample(self.cv1(x))))
+
+
+class Proto26(Proto):
+    """Ultralytics YOLO26 mask Proto module for segmentation models."""
+
+    def __init__(self, ch: tuple = (), c_: int = 256, c2: int = 32, nc: int = 80):
+        """Initialize the YOLO26 Proto module with feature refinement and semantic segmentation.
+
+        Args:
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+            c_ (int): Intermediate channels.
+            c2 (int): Output channels (number of protos).
+            nc (int): Number of classes for semantic segmentation.
+        """
+        super().__init__(c_, c_, c2)
+        self.feat_refine = nn.ModuleList(Conv(x, ch[0], k=1) for x in ch[1:])
+        self.feat_fuse = Conv(ch[0], c_, k=3)
+        self.semseg = nn.Sequential(Conv(ch[0], c_, k=3), Conv(c_, c_, k=3), nn.Conv2d(c_, nc, 1))
+
+    def forward(self, x: torch.Tensor, return_semseg: bool = True) -> torch.Tensor:
+        """Perform a forward pass through layers using an upsampled input image."""
+        feat = x[0]
+        for i, f in enumerate(self.feat_refine):
+            up_feat = f(x[i + 1])
+            up_feat = F.interpolate(up_feat, size=feat.shape[2:], mode="nearest")
+            feat = feat + up_feat
+        p = super().forward(self.feat_fuse(feat))
+        if self.training and return_semseg:
+            semseg = self.semseg(feat)
+            return (p, semseg)
+        return p
+
+    def fuse(self):
+        """Fuse the model for inference by removing the semantic segmentation head."""
+        self.semseg = None
+
+
+class RealNVP(nn.Module):
+    """RealNVP: a flow-based generative model for pose keypoint uncertainty.
+
+    References:
+        https://arxiv.org/abs/1605.08803
+        https://github.com/open-mmlab/mmpose/blob/main/mmpose/models/utils/realnvp.py
+    """
+
+    @staticmethod
+    def nets():
+        """Get the scale model in a single invertable mapping."""
+        return nn.Sequential(nn.Linear(2, 64), nn.SiLU(), nn.Linear(64, 64), nn.SiLU(), nn.Linear(64, 2), nn.Tanh())
+
+    @staticmethod
+    def nett():
+        """Get the translation model in a single invertable mapping."""
+        return nn.Sequential(nn.Linear(2, 64), nn.SiLU(), nn.Linear(64, 64), nn.SiLU(), nn.Linear(64, 2))
+
+    @property
+    def prior(self):
+        """The prior distribution."""
+        return torch.distributions.MultivariateNormal(self.loc, self.cov)
+
+    def __init__(self):
+        """Initialize RealNVP flow model with alternating masks."""
+        super().__init__()
+
+        self.register_buffer("loc", torch.zeros(2))
+        self.register_buffer("cov", torch.eye(2))
+        self.register_buffer("mask", torch.tensor([[0, 1], [1, 0]] * 3, dtype=torch.float32))
+
+        self.s = torch.nn.ModuleList([self.nets() for _ in range(len(self.mask))])
+        self.t = torch.nn.ModuleList([self.nett() for _ in range(len(self.mask))])
+        self.init_weights()
+
+    def init_weights(self):
+        """Initialize model weights."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.01)
+
+    def backward_p(self, x):
+        """Apply mapping from data space to latent space and calculate log determinant of Jacobian."""
+        log_det_jacob, z = x.new_zeros(x.shape[0]), x
+        for i in reversed(range(len(self.t))):
+            z_ = self.mask[i] * z
+            s = self.s[i](z_) * (1 - self.mask[i])
+            t = self.t[i](z_) * (1 - self.mask[i])
+            z = (1 - self.mask[i]) * (z - t) * torch.exp(-s) + z_
+            log_det_jacob -= s.sum(dim=1)
+        return z, log_det_jacob
+
+    def log_prob(self, x):
+        """Calculate the log probability of given sample in data space."""
+        if x.dtype == torch.float32 and self.s[0][0].weight.dtype != torch.float32:
+            self.float()
+        z, log_det = self.backward_p(x)
+        return self.prior.log_prob(z) + log_det
 
 
 class HGStem(nn.Module):
@@ -216,17 +315,26 @@ class SPP(nn.Module):
 class SPPF(nn.Module):
     """Spatial Pyramid Pooling - Fast (SPPF) layer for YOLOv5 by Glenn Jocher."""
 
-    def __init__(self, c1, c2, k=5):
-        """
-        Initializes the SPPF layer with given input/output channels and kernel size.
+    def __init__(self, c1, c2, k=5, n=3, shortcut=False):
+        """Initialize the SPPF layer with given input/output channels and kernel size.
 
-        This module is equivalent to SPP(k=(5, 9, 13)).
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels.
+            k (int): Kernel size.
+            n (int): Number of pooling iterations.
+            shortcut (bool): Whether to use shortcut connection.
+
+        Notes:
+            This module is equivalent to SPP(k=(5, 9, 13)).
         """
         super().__init__()
         c_ = c1 // 2  # hidden channels
-        self.cv1 = Conv(c1, c_, 1, 1)
-        self.cv2 = Conv(c_ * 4, c2, 1, 1)
+        self.cv1 = Conv(c1, c_, 1, 1, act=False)
+        self.cv2 = Conv(c_ * (n + 1), c2, 1, 1)
         self.m = nn.MaxPool2d(kernel_size=k, stride=1, padding=k // 2)
+        self.n = n
+        self.add = shortcut and c1 == c2
 
     def forward(self, x):
         """Forward pass through SPPF layer.
@@ -828,11 +936,40 @@ class C3f(nn.Module):
 class C3k2(C2f):
     """Faster Implementation of CSP Bottleneck with 2 convolutions."""
 
-    def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):
-        """Initializes the C3k2 module, a faster CSP Bottleneck with 2 convolutions and optional C3k blocks."""
+    def __init__(
+        self,
+        c1: int,
+        c2: int,
+        n: int = 1,
+        c3k: bool = False,
+        e: float = 0.5,
+        attn: bool = False,
+        g: int = 1,
+        shortcut: bool = True,
+    ):
+        """Initialize C3k2 module.
+
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels.
+            n (int): Number of blocks.
+            c3k (bool): Whether to use C3k blocks.
+            e (float): Expansion ratio.
+            attn (bool): Whether to use attention blocks (PSABlock).
+            g (int): Groups for convolutions.
+            shortcut (bool): Whether to use shortcut connections.
+        """
         super().__init__(c1, c2, n, shortcut, g, e)
         self.m = nn.ModuleList(
-            C3k(self.c, self.c, 2, shortcut, g) if c3k else Bottleneck(self.c, self.c, shortcut, g) for _ in range(n)
+            nn.Sequential(
+                Bottleneck(self.c, self.c, shortcut, g),
+                PSABlock(self.c, attn_ratio=0.5, num_heads=max(self.c // 64, 1)),
+            )
+            if attn
+            else C3k(self.c, self.c, 2, shortcut, g)
+            if c3k
+            else Bottleneck(self.c, self.c, shortcut, g)
+            for _ in range(n)
         )
 
 
@@ -2520,3 +2657,106 @@ class MobileOneBlock(nn.Module):
         if hasattr(self, "id_tensor"):
             self.__delattr__("id_tensor")
         self.deploy = True
+
+
+class IRDCB(nn.Module):
+    """
+    Inverted Residual Depthwise Convolution Block
+    HierLight-YOLO: A Hierarchical and Lightweight Object Detection Network for UAV Photography
+    
+    Pattern per paper:
+    - Conv 1x1 (compress)
+    - N x DCB blocks (expand/filter/compress with conditional residual)
+    - Concat all intermediate features (skip aggregation)
+    - Conv 1x1 (expand to c2)
+    - Optional residual to input if c1 == c2
+    
+    Args:
+        c1 (int): Input channels
+        c2 (int): Output channels
+        n (int): Number of DCB blocks to stack
+        t (int): Expansion factor inside DCB
+        shortcut (bool): Use residual connection when c1==c2
+    """
+    def __init__(self, c1, c2, n=2, t=2, shortcut=True, *args, **kwargs):
+        super().__init__()
+        
+        # Hidden channels after initial compression
+        self.c = int(c2 // 2)
+        self.n = int(n)
+        
+        # Initial 1x1 conv to compress channels
+        self.cv1 = Conv(c1, self.c, 1, 1)
+        
+        # N depthwise convolution blocks (ModuleList for skip aggregation)
+        self.blocks = nn.ModuleList([DCB(self.c, t) for _ in range(self.n)])
+        
+        # Final 1x1 conv to expand back after concatenation of (n+1) branches
+        self.cv2 = Conv(self.c * (self.n + 1), c2, 1, 1)
+        
+        # Residual connection when dimensions match
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        residual = x
+        x = self.cv1(x)
+        feats = [x]
+        for blk in self.blocks:
+            x = blk(x)
+            feats.append(x)
+        x = torch.cat(feats, dim=1)
+        x = self.cv2(x)
+        return x + residual if self.add else x
+
+
+class DCB(nn.Module):
+    """
+    Depthwise Convolution Block (used inside IRDCB)
+    HierLight-YOLO: A Hierarchical and Lightweight Object Detection Network for UAV Photography
+    
+    Implements the expand-filter-compress pattern:
+    1. Expand: 1x1 conv increases channels by factor t
+    2. Filter: Two 3x3 depthwise convs for spatial filtering
+    3. Compress: 1x1 conv reduces back to original channels
+    
+    Args:
+        c (int): Number of channels.
+        t (int): Expansion factor.
+    """
+
+    def __init__(self, c, t=2, add=True):
+        super().__init__()
+        c_exp = int(c * t)
+        self.cv1 = Conv(c, c_exp, 1, 1)
+        self.dw1 = DWConv(c_exp, c_exp, k=3, s=1)
+        self.dw2 = DWConv(c_exp, c_exp, k=3, s=1)
+        self.cv2 = Conv(c_exp, c, 1, 1)
+        self.add = add
+
+    def forward(self, x):
+        out = self.cv2(self.dw2(self.dw1(self.cv1(x))))
+        return x + out if self.add else out
+
+
+class LDown(nn.Module):
+    """
+    Lightweight Downsample Module
+    
+    Efficiently reduces spatial dimensions and channel capacity through:
+    1. Depthwise convolution for spatial downsampling
+    2. 1x1 convolution for channel compression
+    
+    Args:
+        c1 (int): Input channels (auto-provided by YOLO parser)
+        c2 (int): Output channels
+        k (int): Kernel size (default: 3)
+        s (int): Stride for downsampling (default: 2)
+    """
+
+    def __init__(self, c1, c2, k=3, s=2):
+        super().__init__()
+        self.dw = DWConv(c1, c1, k=k, s=s)
+        self.pw = Conv(c1, c2, k=1, s=1)
+
+    def forward(self, x):
+        return self.pw(self.dw(x))

@@ -11,10 +11,12 @@ import numpy as np
 import torch.nn as nn
 
 from ultralytics.data import build_dataloader, build_yolo_dataset
+from ultralytics.data.sahi_dataset import SAHIDataset
 from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
 from ultralytics.nn.tasks import DetectionModel, yaml_model_load
 from ultralytics.utils import DEFAULT_CFG, LOGGER, RANK
+from ultralytics.utils.checks import reid_embed_dim
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
 from ultralytics.utils.torch_utils import unwrap_model, torch_distributed_zero_first
 
@@ -41,7 +43,10 @@ class DetectionTrainer(BaseTrainer):
             _callbacks (list, optional): List of callback functions to be executed during training.
         """
         super().__init__(cfg=cfg, overrides=overrides, _callbacks=_callbacks)
+        self.reid_dim = reid_embed_dim(self.args)
         self.dynamic_tensors = ["batch_idx", "cls", "bboxes"]
+        if self.reid_dim:
+            self.dynamic_tensors.append("tags")
 
     def build_dataset(self, img_path, mode="train", batch=None):
         """
@@ -64,10 +69,17 @@ class DetectionTrainer(BaseTrainer):
         if getattr(dataset, "rect", False) and shuffle:
             LOGGER.warning("WARNING ⚠️ 'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
             shuffle = False
+        workers = (
+            self.args.workers
+            if mode == "train"
+            else min(self.args.workers, 4)
+            if isinstance(dataset, SAHIDataset)
+            else self.args.workers * 2
+        )
         return build_dataloader(
             dataset,
             batch=batch_size,
-            workers=self.args.workers if mode == "train" else self.args.workers * 2,
+            workers=workers,
             shuffle=shuffle,
             rank=rank,
             drop_last=self.args.compile and mode == "train",
@@ -75,7 +87,9 @@ class DetectionTrainer(BaseTrainer):
 
     def preprocess_batch(self, batch):
         """Preprocesses a batch of images by scaling and converting to float."""
-        batch["img"] = batch["img"].to(self.device, non_blocking=True).float() / 255
+        bit_depth = getattr(self.args, 'image_bit_depth', 8)
+        scale = 1.0 / 65_535.0 if bit_depth == 16 else 1.0 / 255.0
+        batch["img"] = batch["img"].to(self.device, non_blocking=True, dtype=torch.float32).mul_(scale)
         if self.args.multi_scale:
             imgs = batch["img"]
             sz = (
@@ -97,35 +111,56 @@ class DetectionTrainer(BaseTrainer):
         return batch
 
     def set_model_attributes(self):
-        """Nl = unwrap_model(self.model).model[-1].nl  # number of detection layers (to scale hyps)."""
-        # self.args.box *= 3 / nl  # scale to layers
-        # self.args.cls *= self.data["nc"] / 80 * 3 / nl  # scale to classes and layers
-        # self.args.cls *= (self.args.imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers
-        self.model.nc = [1] if self.args.single_cls else self.data["nc"]  # attach number of classes to model
-        self.model.names = [{0: 0}] if self.args.single_cls else self.data["names"]  # attach class names to model
-        self.model.args = self.args  # attach hyperparameters to model
-
-        # TODO: self.model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device) * nc
+        """Attach nc, names, args, and the parsed dataset dict (with hierarchy metadata) to the model."""
+        self.model.nc = [1] if self.args.single_cls else self.data["nc"]
+        self.model.names = [{0: 0}] if self.args.single_cls else self.data["names"]
+        self.model.task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+        self.model.main_head = 0 if self.args.single_cls else self.data.get("task_schema", {}).get("main_head", 0)
+        self.model.args = self.args
+        if getattr(self.model, "end2end"):
+            self.model.set_head_attr(max_det=self.args.max_det)
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLO detection model."""
         if isinstance(cfg, (str, Path)):
             cfg = yaml_model_load(cfg)
+        if isinstance(cfg, dict):
+            cfg = dict(cfg)
+            if getattr(self.args, "hierarchical", False):
+                cfg["hierarchical"] = True
+            task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+            if task_schema:
+                cfg["hierarchy_parent_heads"] = task_schema.get("hierarchy_parent_heads")
 
         model = DetectionModel(
             cfg,
             nc=[1] if self.args.single_cls else self.data["nc"],
             verbose=verbose and RANK == -1,
         )
+        model.task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+        model.main_head = 0 if self.args.single_cls else self.data.get("task_schema", {}).get("main_head", 0)
+
+        # Materialize the Re-ID head BEFORE loading weights.
+        if self.reid_dim and not getattr(model.model[-1], "embed_dim", 0):
+            model.model[-1].upgrade_to_reid(embed_dim=self.reid_dim)
+
         if weights:
             model.load(weights)
+
         return model
 
     def get_validator(self):
         """Returns a DetectionValidator for YOLO model validation."""
-        self.loss_names = "box_loss", "cls_loss", "dfl_loss"
-        if self.args.teacher is not None:
-            self.loss_names = "box_loss", "cls_loss", "dfl_loss", "dist_loss"
+        # Match the loss tensor layout produced by v8DetectionLoss:
+        # box, cls, dfl, [dep], [reid | dist]
+        names = ["box_loss", "cls_loss", "dfl_loss"]
+        if getattr(self.args, "dependency_loss", False):
+            names.append("dep_loss")
+        if self.reid_dim:
+            names.append("reid_loss")
+        elif self.args.teacher is not None:
+            names.append("dist_loss")
+        self.loss_names = tuple(names)
         return yolo.detect.DetectionValidator(
             self.test_loader,
             save_dir=self.save_dir,

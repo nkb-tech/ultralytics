@@ -45,7 +45,7 @@ from .utils import (
 )
 
 # Ultralytics dataset *.cache version, >= 1.0.0 for YOLOv8
-DATASET_CACHE_VERSION = "1.0.3"
+DATASET_CACHE_VERSION = "1.0.4"
 
 
 class YOLODataset(BaseDataset):
@@ -60,11 +60,12 @@ class YOLODataset(BaseDataset):
         (torch.utils.data.Dataset): A PyTorch dataset object that can be used for training an object detection model.
     """
 
-    def __init__(self, *args, data=None, task="detect", **kwargs):
+    def __init__(self, *args, data=None, task="detect", use_tags=False, **kwargs):
         """Initializes the YOLODataset with optional configurations for segments and keypoints."""
         self.use_segments = task == "segment"
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
+        self.use_tags = use_tags
         self.data = data
         self.min_bbox = data.get("min_bbox", 10)
         self.min_imgsz = data.get("min_imgsz", 25)
@@ -90,13 +91,18 @@ class YOLODataset(BaseDataset):
         desc = f"{desc_prefix}..."
         total = len(self.im_files)
         nkpt, ndim = self.data.get("kpt_shape", (0, 0))
+        task_schema = self.data.get("task_schema") if isinstance(self.data, dict) else None
+        num_cls_cols = (
+            1 if self.single_cls
+            else len(task_schema.get("label_nc", [])) if task_schema
+            else (len(self.nc) if isinstance(self.nc, (list, tuple)) else 1)
+        )
         if self.use_keypoints and (nkpt <= 0 or ndim not in {2, 3}):
             raise ValueError(
                 "'kpt_shape' in data.yaml missing or incorrect. Should be a list with [number of "
                 "keypoints, number of dims (2 for x,y or 3 for x,y,visible)], i.e. 'kpt_shape: [17, 3]'"
             )
         with ThreadPool(NUM_THREADS) as pool:
-            # forward per-head class counts so each worker validates correctly
             results = pool.imap(
                 func=lambda args: verify_image_label(args, min_imgsz=self.min_imgsz),
                 iterable=zip(
@@ -104,14 +110,17 @@ class YOLODataset(BaseDataset):
                     self.label_files,
                     repeat(self.prefix),
                     repeat(self.use_keypoints),
+                    repeat(self.use_tags),
+                    repeat(1),              # n_tag_attrs for now
                     repeat(nkpt),
                     repeat(ndim),
                     repeat(self.single_cls),
                     repeat(self.nc),
+                    repeat(task_schema),
                 ),
             )
             pbar = TQDM(results, desc=desc, total=total)
-            for im_file, lb, shape, segments, keypoint, nm_f, nf_f, ne_f, ncpt_f, msg in pbar:
+            for im_file, lb, shape, segments, keypoint, tags, nm_f, nf_f, ne_f, ncpt_f, msg in pbar:
                 nm += nm_f
                 nf += nf_f
                 ne += ne_f
@@ -121,30 +130,36 @@ class YOLODataset(BaseDataset):
                     if scan_dir != current_scan_dir:
                         current_scan_dir = scan_dir
                 desc_prefix = f"{self.prefix}Scanning {current_scan_dir}"
-                if im_file and len(lb):
-                    # Filter out small boxes
-                    ab += len(lb)  # count total boxes before filtering
+                if im_file:
+                    ab += len(lb)
                     boxes_pix = lb[:, -4:].copy()
                     boxes_pix[:, [2, 3]] *= shape[1], shape[0]
                     
                     # Keep boxes with width and height >= min_bbox pixels
                     valid_mask = (boxes_pix[:, 2] >= self.min_bbox) & (boxes_pix[:, 3] >= self.min_bbox)
                     lb = lb[valid_mask]
-                    fb += len(lb)  # count boxes after filtering
+                    fb += len(lb)
+                    
+                    if tags is not None:
+                        tags = tags[valid_mask]
+
+                    # Filter segments by the same mask
+                    if segments:
+                        segments = [seg for seg, valid in zip(segments, valid_mask) if valid]
 
                     cls_cols = lb[:, :1] if self.single_cls else lb[:, 0:-4]
-                    x["labels"].append(
-                        {
-                            "im_file": im_file,
-                            "shape": shape,
-                            "cls": cls_cols,
-                            "bboxes": lb[:, -4:],  # n, 4
-                            "segments": segments,
-                            "keypoints": keypoint,
-                            "normalized": True,
-                            "bbox_format": "xywh",
-                        }
-                    )
+                    label_entry = {
+                        "im_file": im_file,
+                        "shape": shape,
+                        "cls": cls_cols,
+                        "bboxes": lb[:, -4:],
+                        "segments": segments,
+                        "keypoints": keypoint,
+                        "normalized": True,
+                        "bbox_format": "xywh",
+                        "tags": None if not self.use_tags else tags,
+                    }
+                    x["labels"].append(label_entry)
                 if msg:
                     msgs.append(msg)
                 stats = f"{nf} images, {nm + ne} backgrounds, {ncpt} corrupt, {fb}/{ab} boxes"
@@ -156,6 +171,9 @@ class YOLODataset(BaseDataset):
         if nf == 0:
             LOGGER.warning(f"{self.prefix}WARNING ⚠️ No labels found in {path}. {HELP_URL}")
         x["hash"] = get_hash(self.label_files + self.im_files)
+        x["task_schema"] = self.data.get("task_schema") if isinstance(self.data, dict) else None
+        x["min_bbox"] = self.min_bbox
+        x["min_imgsz"] = self.min_imgsz
         x["results"] = nf, nm, ne, ncpt, len(self.im_files)
         x["msgs"] = msgs  # warnings
         save_dataset_cache_file(self.prefix, path, x, DATASET_CACHE_VERSION)
@@ -165,10 +183,16 @@ class YOLODataset(BaseDataset):
         """Returns dictionary of labels for YOLO training."""
         self.label_files = img2label_paths(self.im_files)
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
+        min_bbox_tag = str(self.min_bbox).replace(".", "p")
+        min_imgsz_tag = str(self.min_imgsz).replace(".", "p")
+        cache_path = cache_path.with_name(f"{cache_path.stem}.minbbox{min_bbox_tag}.minimgsz{min_imgsz_tag}.cache")
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
             assert cache["version"] == DATASET_CACHE_VERSION  # matches current version
             assert cache["hash"] == get_hash(self.label_files + self.im_files)  # identical hash
+            assert cache.get("task_schema") == (self.data.get("task_schema") if isinstance(self.data, dict) else None)
+            assert cache.get("min_bbox") == self.min_bbox
+            assert cache.get("min_imgsz") == self.min_imgsz
         except (FileNotFoundError, AssertionError, AttributeError):
             cache, exists = self.cache_labels(cache_path), False  # run cache ops
 
@@ -182,7 +206,7 @@ class YOLODataset(BaseDataset):
                 LOGGER.info("\n".join(cache["msgs"]))  # display warnings
 
         # Read cache
-        [cache.pop(k) for k in ("hash", "version", "msgs")]  # remove items
+        [cache.pop(k, None) for k in ("hash", "version", "msgs", "task_schema", "min_bbox", "min_imgsz")]  # remove items
         labels = cache["labels"]
         if not labels:
             LOGGER.warning(f"WARNING ⚠️ No images found in {cache_path}, training may not work correctly. {HELP_URL}")
@@ -201,6 +225,38 @@ class YOLODataset(BaseDataset):
                 lb["segments"] = []
         if len_cls == 0:
             LOGGER.warning(f"WARNING ⚠️ No labels found in {cache_path}, training may not work correctly. {HELP_URL}")
+        
+        # Add tags for Re-ID training
+        if getattr(self, "use_tags", False):
+            import numpy as np
+
+            # 1) find max existing tag (if some labels have real track ids)
+            highest_tag = 0
+            for lb in labels:
+                t = lb.get("tags", None)
+                if t is not None and len(t):
+                    t = np.asarray(t).reshape(-1, 1)
+                    lb["tags"] = t
+                    highest_tag = max(highest_tag, int(np.max(t)))
+
+            # 2) assign unique tags where missing
+            new_start_tag = highest_tag + 1
+            for lb in labels:
+                if lb.get("tags", None) is None:
+                    N = lb["cls"].shape[0]
+                    lb["tags"] = np.arange(new_start_tag, new_start_tag + N, dtype=np.int64).reshape(N, 1)
+                    new_start_tag += N
+
+            # 3) enforce tags shape (N, K) and dtype int64 for all labels
+            for lb in labels:
+                lb["tags"] = (
+                    np.asarray(lb["tags"])
+                    .reshape(-1, lb["tags"].shape[-1] if np.asarray(lb["tags"]).ndim > 1 else 1)
+                    .astype(np.int64)
+                )
+        else:
+            for lb in labels:
+                lb.pop("tags", None)
         return labels
 
     def build_transforms(self, hyp=None):
@@ -261,21 +317,32 @@ class YOLODataset(BaseDataset):
 
     @staticmethod
     def collate_fn(batch):
-        """Collates data samples into batches."""
+        """Collates data samples into batches (key-safe)."""
         new_batch = {}
         keys = batch[0].keys()
-        values = list(zip(*[list(b.values()) for b in batch]))
-        for i, k in enumerate(keys):
-            value = values[i]
+
+        for k in keys:
+            vals = [b.get(k) for b in batch]
+
             if k == "img":
-                value = torch.stack(value, 0)
-            if k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb"}:
-                value = torch.cat(value, 0)
-            new_batch[k] = value
+                new_batch[k] = torch.stack(vals, 0)
+            elif k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb", "tags"}:
+                # some entries may be missing tags -> treat as empty
+                vals = [v for v in vals if v is not None]
+                if len(vals):
+                    new_batch[k] = torch.cat(vals, 0)
+                else:
+                    new_batch[k] = None
+            else:
+                # keep as list (strings, tuples, metadata)
+                new_batch[k] = vals
+
+        # batch_idx special handling
         new_batch["batch_idx"] = list(new_batch["batch_idx"])
         for i in range(len(new_batch["batch_idx"])):
-            new_batch["batch_idx"][i] += i  # add target image index for build_targets()
+            new_batch["batch_idx"][i] += i
         new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
+
         return new_batch
 
 
@@ -871,7 +938,7 @@ class ClassificationDataset:
         self.cache_disk = str(args.cache).lower() == "disk"  # cache images on hard drive as uncompressed *.npy files
         self.samples = self.verify_images()  # filter out bad images
         self.samples = [list(x) + [Path(x[0]).with_suffix(".npy"), None] for x in self.samples]  # file, index, npy, im
-        scale = (1.0 - args.scale, 1.0)  # (0.08, 1.0)
+        scale = tuple(args.scale) if isinstance(args.scale, (list, tuple)) else (1.0 - args.scale, 1.0)
         self.torch_transforms = (
             classify_augmentations(
                 size=args.imgsz,

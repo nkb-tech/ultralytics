@@ -11,6 +11,9 @@ import torch
 
 from ultralytics.utils import LOGGER, SimpleClass, TryExcept, plt_settings
 from ultralytics.utils.tf import xyxy2xywh
+from ultralytics.utils.numpy_utils import NUMPY_2_0
+
+np_trapz = np.trapezoid if NUMPY_2_0 else np.trapz
 
 # ENet inverse-log class weights for Cityscapes 19-class semantic segmentation (Paszke et al., 2016)
 CITYSCAPES_WEIGHT = np.array(
@@ -24,6 +27,10 @@ OKS_SIGMA = (
     np.array([0.26, 0.25, 0.25, 0.35, 0.35, 0.79, 0.79, 0.72, 0.72, 0.62, 0.62, 1.07, 1.07, 0.87, 0.87, 0.89, 0.89])
     / 10.0
 )
+
+# RLE (Residual Log-likelihood Estimation) weights for keypoint importance in YOLO26 pose estimation
+RLE_WEIGHT = np.array([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.2, 1.2, 1.5, 1.5, 1.0, 1.0, 1.2, 1.2, 1.5, 1.5])
+
 
 class WiseIoULoss(torch.nn.Module):
     momentum = 1e-2
@@ -203,7 +210,7 @@ class WiseIoULoss(torch.nn.Module):
         x = q * Lambda
         return 3 * x * torch.exp(-x ** 2) * piou_v1
 
-    def _iterpiou(self, interp_coe=0.98):
+    def _interpiou(self, interp_coe=0.98):
         b1_x1, b1_y1, b1_x2, b1_y2 = self['pred'].chunk(4, -1)
         b2_x1, b2_y1, b2_x2, b2_y2 = self['target'].chunk(4, -1)
         bi_x1, bi_y1, bi_x2, bi_y2 = ((1 - interp_coe) * b1_x1 + interp_coe * b2_x1,
@@ -223,7 +230,7 @@ class WiseIoULoss(torch.nn.Module):
 
     def _d_iterpiou(self, interp_coe=0.98, lv=0.6, hv=0.9):
         interp_coe = (1 - self['iou'].detach()).clamp(min=lv, max=hv)
-        return self._iterpiou(interp_coe)
+        return self._interpiou(interp_coe)
 
     def __repr__(self):
         return f'{self.__name__}(iou_mean={self.iou_mean.item():.3f})'
@@ -263,6 +270,22 @@ def bbox_ioa(box1, box2, iou=False, eps=1e-7):
     return inter_area / (area + eps)
 
 
+def box_intersection(box1, box2):
+    """
+    Compute intersection area of axis-aligned boxes (xyxy format).
+    Both sets of boxes are expected to be in (x1, y1, x2, y2) format.
+
+    Args:
+        box1 (torch.Tensor): A tensor of shape (N, 4) representing N bounding boxes.
+        box2 (torch.Tensor): A tensor of shape (M, 4) representing M bounding boxes.
+
+    Returns:
+        (torch.Tensor): An NxM tensor containing the pairwise intersection areas.
+    """
+    (a1, a2), (b1, b2) = box1.float().unsqueeze(1).chunk(2, 2), box2.float().unsqueeze(0).chunk(2, 2)
+    return (torch.min(a2, b2) - torch.max(a1, b1)).clamp_(0).prod(2)
+
+
 def box_iou(box1, box2, eps=1e-7):
     """
     Calculate intersection-over-union (IoU) of boxes. Both sets of boxes are expected to be in (x1, y1, x2, y2) format.
@@ -276,10 +299,8 @@ def box_iou(box1, box2, eps=1e-7):
     Returns:
         (torch.Tensor): An NxM tensor containing the pairwise IoU values for every element in box1 and box2.
     """
-    # NOTE: Need .float() to get accurate iou values
-    # inter(N,M) = (rb(N,M,2) - lt(N,M,2)).clamp(0).prod(2)
     (a1, a2), (b1, b2) = box1.float().unsqueeze(1).chunk(2, 2), box2.float().unsqueeze(0).chunk(2, 2)
-    inter = (torch.min(a2, b2) - torch.max(a1, b1)).clamp_(0).prod(2)
+    inter = box_intersection(box1, box2)
 
     # IoU = inter / (area1 + area2 - inter)
     return inter / ((a2 - a1).prod(2) + (b2 - b1).prod(2) - inter + eps)
@@ -384,10 +405,10 @@ def bbox_iou(
 
     # IoU
     iou = inter / union
-    if ciou or diou or giou or eiou or siou or shapeiou or piouv1 or piouv2:
+    if ciou or diou or giou or eiou or siou or shapeiou or piouv1 or piouv2 or interpiou:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
-        if ciou or diou or eiou or siou or piouv1 or piouv2 or shapeiou:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+        if ciou or diou or eiou or siou or piouv1 or piouv2 or shapeiou or interpiou:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
             c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
             rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center dist ** 2
             if ciou:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
@@ -821,6 +842,10 @@ def smooth(y, f=0.05):
 def plot_pr_curve(px, py, ap, save_dir=Path("pr_curve.png"), names={}, on_plot=None):
     """Plots a precision-recall curve."""
     fig, ax = plt.subplots(1, 1, figsize=(9, 6), tight_layout=True)
+    if len(py) == 0:
+        LOGGER.warning(f"WARNING ⚠️ skipping PR curve plot due to empty precision arrays: {save_dir}")
+        plt.close(fig)
+        return
     py = np.stack(py, axis=1)
 
     if 0 < len(names) < 21:  # display per-class legend if < 21 classes
@@ -846,6 +871,10 @@ def plot_pr_curve(px, py, ap, save_dir=Path("pr_curve.png"), names={}, on_plot=N
 def plot_mc_curve(px, py, save_dir=Path("mc_curve.png"), names={}, xlabel="Confidence", ylabel="Metric", on_plot=None):
     """Plots a metric-confidence curve."""
     fig, ax = plt.subplots(1, 1, figsize=(9, 6), tight_layout=True)
+    if len(py) == 0:
+        LOGGER.warning(f"WARNING ⚠️ skipping {ylabel}-confidence curve due to empty metric arrays: {save_dir}")
+        plt.close(fig)
+        return
 
     if 0 < len(names) < 21:  # display per-class legend if < 21 classes
         for i, y in enumerate(py):
@@ -891,7 +920,7 @@ def compute_ap(recall, precision):
     method = "interp"  # methods: 'continuous', 'interp'
     if method == "interp":
         x = np.linspace(0, 1, 101)  # 101-point interp (COCO)
-        ap = np.trapz(np.interp(x, mrec, mpre), x)  # integrate
+        ap = np_trapz(np.interp(x, mrec, mpre), x)  # integrate
     else:  # 'continuous'
         i = np.where(mrec[1:] != mrec[:-1])[0]  # points where x-axis (recall) changes
         ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])  # area under curve
@@ -900,7 +929,16 @@ def compute_ap(recall, precision):
 
 
 def ap_per_class(
-    tp, conf, pred_cls, target_cls, plot=False, on_plot=None, save_dir=Path(), names={}, eps=1e-16, prefix=""
+    tp,
+    conf,
+    pred_cls,
+    target_cls,
+    plot=False,
+    on_plot=None,
+    save_dir=Path(),
+    names={},
+    eps=1e-16,
+    prefix="",
 ):
     """
     Computes the average precision per class for object detection evaluation.
@@ -1162,39 +1200,20 @@ class Metric(SimpleClass):
 
 
 class DetMetrics(SimpleClass):
-    """
-    Utility class for computing detection metrics such as precision, recall, and mean average precision (mAP) of an
-    object detection model.
-
-    Args:
-        save_dir (Path): A path to the directory where the output plots will be saved. Defaults to current directory.
-        plot (bool): A flag that indicates whether to plot precision-recall curves for each class. Defaults to False.
-        on_plot (func): An optional callback to pass plots path and data when they are rendered. Defaults to None.
-        names (dict of str): A dict of strings that represents the names of the classes. Defaults to an empty tuple.
+    """Utility class for computing detection metrics such as precision, recall, and mean average precision (mAP).
 
     Attributes:
-        save_dir (Path): A path to the directory where the output plots will be saved.
-        plot (bool): A flag that indicates whether to plot the precision-recall curves for each class.
-        on_plot (func): An optional callback to pass plots path and data when they are rendered.
-        names (dict of str): A dict of strings that represents the names of the classes.
-        box (Metric): An instance of the Metric class for storing the results of the detection metrics.
-        speed (dict): A dictionary for storing the execution time of different parts of the detection process.
-
-    Methods:
-        process(tp, conf, pred_cls, target_cls): Updates the metric results with the latest batch of predictions.
-        keys: Returns a list of keys for accessing the computed detection metrics.
-        mean_results: Returns a list of mean values for the computed detection metrics.
-        class_result(i): Returns a list of values for the computed detection metrics for a specific class.
-        maps: Returns a dictionary of mean average precision (mAP) values for different IoU thresholds.
-        fitness: Computes the fitness score based on the computed detection metrics.
-        ap_class_index: Returns a list of class indices sorted by their average precision (AP) values.
-        results_dict: Returns a dictionary that maps detection metric keys to their computed values.
-        curves: TODO
-        curves_results: TODO
+        names (dict[int, str]): A dictionary of class names.
+        box (Metric): An instance of the Metric class for storing detection results.
+        speed (dict[str, float]): A dictionary for storing execution times.
+        task (str): The task type, set to 'detect'.
+        stats (dict[str, list]): Statistics containers for tp, conf, pred_cls, target_cls, target_img.
+        nt_per_class: Number of targets per class.
+        nt_per_image: Number of targets per image.
     """
 
     def __init__(self, save_dir=Path("."), plot=False, on_plot=None, names={}) -> None:
-        """Initialize a DetMetrics instance with a save directory, plot flag, callback function, and class names."""
+        """Initialize a DetMetrics instance."""
         self.save_dir = save_dir
         self.plot = plot
         self.on_plot = on_plot
@@ -1202,31 +1221,61 @@ class DetMetrics(SimpleClass):
         self.box = Metric()
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
         self.task = "detect"
+        self.stats = dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
+        self.nt_per_class = None
+        self.nt_per_image = None
 
-    def process(self, tp, conf, pred_cls, target_cls, prefix=""):
-        """Process predicted results for object detection and update metrics.
+    def update_stats(self, stat):
+        """Update statistics by appending new values.
 
         Args:
-            tp (np.ndarray): True-positive matrix.
-            conf (np.ndarray): Confidence scores.
-            pred_cls (np.ndarray): Predicted classes.
-            target_cls (np.ndarray): Ground truth classes.
-            prefix (str): Filename prefix for saved plots.
+            stat (dict): Dictionary with keys matching self.stats (tp, conf, pred_cls, target_cls, target_img).
         """
+        for k in self.stats:
+            v = stat[k]
+            self.stats[k].append(v.cpu().numpy() if hasattr(v, "cpu") else v)
+
+    def process(self, save_dir=None, plot=None, on_plot=None, prefix=""):
+        """Process accumulated stats and compute metrics.
+
+        Args:
+            save_dir (Path, optional): Directory to save plots. Uses self.save_dir if None.
+            plot (bool, optional): Whether to plot. Uses self.plot if None.
+            on_plot (callable, optional): Plot callback. Uses self.on_plot if None.
+            prefix (str): Filename prefix for saved plots.
+
+        Returns:
+            dict[str, np.ndarray]: Concatenated statistics arrays.
+        """
+        save_dir = save_dir if save_dir is not None else self.save_dir
+        plot = plot if plot is not None else self.plot
+        on_plot = on_plot if on_plot is not None else self.on_plot
+
+        stats = {k: np.concatenate(v, 0) for k, v in self.stats.items() if v}
+        if not stats:
+            return stats
 
         results = ap_per_class(
-            tp,
-            conf,
-            pred_cls,
-            target_cls,
-            plot=self.plot,
-            save_dir=self.save_dir,
+            stats["tp"],
+            stats["conf"],
+            stats["pred_cls"],
+            stats["target_cls"],
+            plot=plot,
+            save_dir=save_dir,
             names=self.names,
-            on_plot=self.on_plot,
+            on_plot=on_plot,
             prefix=prefix,
         )[2:]
         self.box.nc = len(self.names)
         self.box.update(results)
+        self.nt_per_class = np.bincount(stats["target_cls"].astype(int), minlength=len(self.names))
+        self.nt_per_image = np.bincount(stats["target_img"].astype(int), minlength=len(self.names))
+        return stats
+
+    def clear_stats(self):
+        """Clear the stored statistics."""
+        for v in self.stats.values():
+            v.clear()
 
     @property
     def keys(self):
@@ -1900,3 +1949,253 @@ class SemanticMetrics(SimpleClass):  # upstream also mixes in DataExportMixin (a
             }
             for c in self.ap_class_index
         ]
+class ReIDMetrics(SimpleClass):
+    """
+    Class for computing evaluation metrics for person re-identification models.
+    """
+
+    def __init__(self, conf=0.1):
+        """Initializes a ReIDMetrics instance for computing evaluation metrics for person re-identification models."""
+        self.conf = conf
+        self.embeds = []
+        self.tags = []
+
+        self.hota = 0.0
+        self.mota = 0.0
+        self.idf1 = 0.0
+
+    @staticmethod
+    def _get_sklearn_metrics():
+        """Lazily import sklearn metrics to avoid hard import-time dependency."""
+        try:
+            from sklearn import metrics as skm
+        except ImportError as e:
+            raise ModuleNotFoundError(
+                "ReIDMetrics requires scikit-learn. Install it with: pip install scikit-learn"
+            ) from e
+        return skm
+
+    def process_batch(self, preds, matched_tags):
+        """
+        Process a batch of predictions and matched tags to compute ReID metrics.
+        Args:
+            preds (List[torch.Tensor]): A list of tensors containing the predictions for each image in the batch.
+            matched_tags (List[torch.Tensor]): A list of tensors containing the matched tags for each image in the batch.
+        """
+        if not preds or not matched_tags:
+            return
+
+        # Flatten and extract batch predictions and targets
+        flatten_preds = torch.cat(preds)
+        confidences = flatten_preds[:, 4]
+        embeds = flatten_preds[:, 6:]
+        tags = torch.cat(matched_tags).long()
+
+        # Filter predictions and targets based on confidence and foreground mask
+        fg_mask = tags > 0  # Only consider positive matches
+        conf_mask = confidences > self.conf # Only consider confident predictions
+        tags = tags[fg_mask & conf_mask]  # First tag filter
+        embeds = embeds[fg_mask & conf_mask]  # First embedding filter
+        if tags.numel() == 0:
+            return
+
+        # Filter predictions and targets based on multiplicity
+        multiplicity_mask = torch.bincount(tags)[tags] > 1
+        tags = tags[multiplicity_mask]  # Filter tags
+        embeds = embeds[multiplicity_mask]  # Filter embeddings
+        if tags.numel() == 0:
+            return
+
+        # Normalize embeddings for computing metrics
+        embeds = torch.nn.functional.normalize(embeds, p=2, dim=1)
+
+        # Store embeddings and tags for computing metrics
+        self.embeds.append(embeds)
+        self.tags.append(tags)
+
+    def get_metrics(self):
+        """
+        Get the ReID metrics for the current epoch.
+        Returns:
+            Dict[str, float]: A dictionary containing the ReID metrics for the current epoch.
+        """
+        if not self.embeds or not self.tags:
+            return {
+                "val/pos_cos": 0.0,
+                "val/neg_cos": 0.0,
+                "val/pos_euc": 0.0,
+                "val/neg_euc": 0.0,
+                "val/cos_sep_ratio": 0.0,
+                "val/euc_sep_ratio": 0.0,
+                "val/cos_silhouette": 0.0,
+                "val/euc_silhouette": 0.0,
+                "val/davies_bouldin": 0.0,
+                "val/calinski_harabasz": 0.0,
+                "val/r1_acc": 0.0,
+                "val/r5_acc": 0.0,
+                "val/mean_ap": 0.0,
+                "val/hota": self.hota,
+                "val/mota": self.mota,
+                "val/idf1": self.idf1,
+            }
+
+        skm = self._get_sklearn_metrics()
+
+        # Concatenate and convert to numpy arrays
+        embeds = torch.cat(self.embeds).cpu().detach().numpy()
+        tags = torch.cat(self.tags).cpu().detach().numpy()
+
+        # Compute distance matrix and positive and negative distances
+        pos_cos, neg_cos, cos_distmat = self.compute_distmat(embeds, tags, distance="cosine")
+        pos_euc, neg_euc, euc_distmat= self.compute_distmat(embeds, tags, distance="euclidean")
+        # TODO: way too slow, we do not need the matrix, maybe we can compute it on the fly
+        #pos_snr, neg_snr, snr_distmat = self.compute_distmat(embeds, tags, distance="snr")
+
+        # Compute Rank-1 and Rank-5 accuracy as well as mAP
+        r1_acc, r5_acc, mean_ap = self.calculate_r1_r5_mAP(cos_distmat, tags)
+
+        # Compute separation ratios
+        cos_separation_ratio = neg_cos / pos_cos
+        euc_separation_ratio = neg_euc / pos_euc
+        #snr_separation_ratio = neg_snr / pos_snr
+
+        # Compute Silhouette, Davies Bouldin and Calinski Harabasz scores
+        cos_silhouette_score = skm.silhouette_score(cos_distmat, tags, metric='precomputed')
+        euc_silhouette_score = skm.silhouette_score(euc_distmat, tags, metric='precomputed')
+        davies_bouldin_score = skm.davies_bouldin_score(embeds, tags)
+        calinski_harabasz_score = skm.calinski_harabasz_score(embeds, tags)
+
+        metrics = {
+            "val/pos_cos": pos_cos,
+            "val/neg_cos": neg_cos,
+            "val/pos_euc": pos_euc,
+            "val/neg_euc": neg_euc,
+            #"val/pos_snr": pos_snr,
+            #"val/neg_snr": neg_snr,
+            "val/cos_sep_ratio": cos_separation_ratio,
+            "val/euc_sep_ratio": euc_separation_ratio,
+            #"val/snr_sep_ratio": snr_separation_ratio,
+            "val/cos_silhouette": cos_silhouette_score,
+            "val/euc_silhouette": euc_silhouette_score,
+            "val/davies_bouldin": davies_bouldin_score,
+            "val/calinski_harabasz": calinski_harabasz_score,
+            "val/r1_acc": r1_acc,
+            "val/r5_acc": r5_acc,
+            "val/mean_ap": mean_ap,
+            "val/hota": self.hota,
+            "val/mota": self.mota,
+            "val/idf1": self.idf1,
+        }
+
+        # Reset embeddings and tags for the next epoch
+        self.embeds = []
+        self.tags = []
+        return metrics
+
+    def set_trackeval_metrics(self, hota, mota, idf1):
+        """
+        Set the TrackEval metrics for the current epoch.
+        Args:
+            hota (float): The High Order Tracking Accuracy (HOTA) score.
+            mota (float): The Multiple Object Tracking Accuracy (MOTA) score.
+            idf1 (float): The Identity F1 (IDF1) score.
+        """
+        self.hota = hota
+        self.mota = mota
+        self.idf1 = idf1
+
+    @staticmethod
+    def compute_distmat(embeddings, labels, distance="cosine"):
+        """
+        Compute the distance matrix for an epoch of embeddings.
+        Args:
+            embeddings (numpy.ndarray): Embeddings of shape (num_samples, embedding_dim).
+            labels (numpy.ndarray): Labels of shape (num_samples,).
+            distance (str): The distance metric to use, either "cosine", "euclidean" or "snr".
+        Returns:
+            pos_dist (float): The average distance between positive pairs.
+            neg_dist (float): The average distance between negative pairs.
+            distmat (numpy.ndarray): The distance matrix of shape (num_samples, num_samples).
+        """
+        skm = ReIDMetrics._get_sklearn_metrics()
+
+        # Step 1: Compute pairwise distance matrix
+        if distance == "cosine":
+            distmat = skm.pairwise_distances(embeddings, metric="cosine")
+        elif distance == "euclidean":
+            distmat = skm.pairwise_distances(embeddings, metric="euclidean")
+        elif distance == "snr":
+            raise NotImplementedError("distance='snr' is not implemented.")
+        else:
+            raise ValueError(f"Invalid distance metric: {distance}")
+
+        # Step 2: Create a mask for positive pairs (same label) and exclude self-similarity
+        labels_equal = labels[:, None] == labels[None, :]
+        not_self = ~np.eye(len(labels), dtype=bool)
+        pos_mask = labels_equal & not_self
+
+        # Step 3: Create a mask for negative pairs (different label)
+        neg_mask = ~labels_equal
+
+        # Step 4: Compute average similarity/distance for positive and negative pairs
+        pos_dist = distmat[pos_mask].mean()
+        neg_dist = distmat[neg_mask].mean()
+
+        return pos_dist, neg_dist, distmat
+
+    @staticmethod
+    def calculate_r1_r5_mAP(cosine_distance, labels):
+        #TODO: slightly different from r1_and_r5_acc in forth decimal
+        """
+        Calculate Rank-1, Rank-5 accuracy and mean Average Precision (mAP) using a precomputed cosine similarity matrix.
+
+        Parameters:
+        - cosine_distance: 2D numpy array with cosine distances between embeddings.
+        - labels: 1D array with true identity labels for each sample.
+
+        Returns:
+        - rank_1_accuracy: Rank-1 accuracy as a float.
+        - rank_5_accuracy: Rank-5 accuracy as a float.
+        - mean_ap: Mean Average Precision (mAP) as a float.
+        """
+        # Convert cosine distance to similarity
+        similarity_matrix = 1 - cosine_distance  # Cosine similarity = 1 - cosine distance
+
+        # Exclude self-similarity (diagonal) by setting it to a very low value
+        np.fill_diagonal(similarity_matrix, -np.inf)
+
+        # Get indices of sorted similarities for each query (all samples, sorted by similarity)
+        sorted_indices = np.argsort(-similarity_matrix, axis=1)  # Descending order
+
+        # Extract the labels of the sorted indices for each sample
+        sorted_labels = labels[sorted_indices]
+
+        # Initialize metrics
+        num_samples = labels.shape[0]
+        rank_1_matches = 0
+        rank_5_matches = 0
+        ap_list = []
+
+        for i in range(num_samples):
+            # Extract the sorted labels excluding self (by skipping the first match if needed)
+            relevant = (sorted_labels[i] == labels[i])  # Boolean array of relevant matches (same identity)
+            relevant[i] = False  # Exclude self-match
+
+            # Calculate Rank-1 and Rank-5
+            if relevant[0]:  # Check if the first match is correct (Rank-1)
+                rank_1_matches += 1
+            if np.any(relevant[:5]):  # Check within the top-5 matches
+                rank_5_matches += 1
+
+            # Calculate AP for the i-th sample
+            ranks = np.arange(1, num_samples + 1)
+            precision_at_k = np.cumsum(relevant) / ranks
+            ap = np.sum(precision_at_k * relevant) / np.sum(relevant) if np.sum(relevant) > 0 else 0
+            ap_list.append(ap)
+
+        # Final metrics
+        rank_1_accuracy = rank_1_matches / num_samples
+        rank_5_accuracy = rank_5_matches / num_samples
+        mean_ap = np.mean(ap_list)
+
+        return rank_1_accuracy, rank_5_accuracy, mean_ap

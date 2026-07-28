@@ -12,12 +12,12 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 
-from ultralytics.utils import LOGGER
 from ultralytics.utils.metrics import batch_probiou
 from ultralytics.utils.tf import (
-    xyxy2xywh,
     xywh2xyxy,
+    xyxy2xywh,
     clip_boxes,
+    clip_coords,
 )
 
 
@@ -166,9 +166,8 @@ def nms_rotated(boxes, scores, threshold=0.45):
     pick = torch.nonzero(ious.max(dim=0)[0] < threshold).squeeze_(-1)
     return sorted_idx[pick]
 
-
 def non_max_suppression(
-    prediction,
+    prediction: Tensor,
     conf_thres=0.25,
     iou_thres=0.45,
     classes=None,
@@ -182,6 +181,8 @@ def non_max_suppression(
     max_wh=7680,
     in_place=True,
     rotated=False,
+    end2end=False,
+    main_head=0,
 ):
     """
     Perform non-maximum suppression (NMS) on a set of boxes, with support for masks and multiple labels per box.
@@ -224,11 +225,16 @@ def non_max_suppression(
         prediction = prediction[0]  # select only inference output
     if classes is not None:
         classes = torch.tensor(classes, device=prediction.device)
+    main_head = int(main_head)
+    if not 0 <= main_head < len(nc):
+        raise ValueError(f"main_head={main_head} is outside task head range 0-{len(nc) - 1}")
 
-    if prediction.shape[-1] == 6 or prediction.shape[-2] == max_det:  # end-to-end model (BNC, i.e. 1,300,6)
-        output = [pred[pred[:, 4] > conf_thres] for pred in prediction]
+    if prediction.shape[-1] == 6 or prediction.shape[-2] == max_det or end2end:  # end-to-end model (BNC, i.e. 1,300,6)
+        main_conf_col = 4 + 2 * main_head if prediction.shape[-1] >= 4 + 2 * len(nc) else 4
+        main_cls_col = main_conf_col + 1
+        output = [pred[pred[:, main_conf_col] > conf_thres] for pred in prediction]
         if classes is not None:
-            output = [pred[(pred[:, 5:6] == classes).any(1)] for pred in output]
+            output = [pred[(pred[:, main_cls_col : main_cls_col + 1] == classes).any(1)] for pred in output]
         # nms for yolov10
         # output = [
         #     pred[torchvision.ops.nms(pred[:, :4], pred[:, 4], iou_thres)]
@@ -239,9 +245,10 @@ def non_max_suppression(
     bs = prediction.shape[0]  # batch size (BCN, i.e. 1,84,6300)
     nm = prediction.shape[1] - 4 - sum(nc)
 
-    # candidate boxes determined by first head confidence only
-    first_nc = nc[0]
-    xc = prediction[:, 4 : 4 + first_nc].amax(1) > conf_thres
+    # Candidate boxes are determined by the configured main head confidence.
+    main_nc = nc[main_head] or nm
+    main_offset = 4 + sum(nc[:main_head])
+    xc = prediction[:, main_offset : main_offset + main_nc].amax(1) > conf_thres
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
@@ -265,7 +272,7 @@ def non_max_suppression(
         # Cat apriori labels if autolabelling
         if labels and len(labels[xi]) and not rotated:
             lb = labels[xi]
-            v = torch.zeros((len(lb), nc + nm + 4), device=x.device)
+            v = torch.zeros((len(lb), sum(nc) + nm + 4), device=x.device)
             v[:, :4] = xywh2xyxy(lb[:, 1:5])  # box
             v[range(len(lb)), lb[:, 0].long() + 4] = 1.0  # cls
             x = torch.cat((x, v), 0)
@@ -286,7 +293,7 @@ def non_max_suppression(
             start += nc_i
         mask = x[:, start:]
 
-        conf_mask = confs[0].view(-1) > conf_thres
+        conf_mask = confs[main_head].view(-1) > conf_thres
         box = box[conf_mask]
         mask = mask[conf_mask]
         confs = [c[conf_mask] for c in confs]
@@ -294,35 +301,37 @@ def non_max_suppression(
 
         # final layout becomes [box, conf0,cls0, conf1,cls1, ..., mask]
         x = torch.cat([box] + sum([[c, j] for c, j in zip(confs, clss)], []) + [mask], 1)
-        conf, j = confs[0].view(-1), clss[0].view(-1)
+        main_conf_col = 4 + 2 * main_head
+        main_cls_col = 5 + 2 * main_head
+        conf, j = x[:, main_conf_col], x[:, main_cls_col]
 
         # Filter by class
         if classes is not None:
             x = x[(j.view(-1, 1) == classes).any(1)]
-            conf = x[:, 4]
-            j = x[:, 5]
+            conf = x[:, main_conf_col]
+            j = x[:, main_cls_col]
 
         # Check shape
         n = x.shape[0]  # number of boxes
         if not n:  # no boxes
             continue
         if n > max_nms:  # excess boxes
-            x = x[x[:, 4].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
-            conf = x[:, 4]
-            j = x[:, 5]
+            x = x[x[:, main_conf_col].argsort(descending=True)[:max_nms]]  # sort by confidence and remove excess boxes
+            conf = x[:, main_conf_col]
+            j = x[:, main_cls_col]
 
         if agnostic:
             c = torch.zeros_like(j.view(-1, 1))  # No offset for agnostic NMS
         else:
-            if len(nc) > 1:  # Мультитаск
-                unique_id = j.view(-1, 1)
+            if len(nc) > 1:  # multi-task
+                unique_id = x[:, 5].view(-1, 1)
                 multiplier = nc[0]
                 for head_idx in range(1, len(nc)):
-                    attr_class = clss[head_idx].view(-1, 1)
+                    attr_class = x[:, 5 + 2 * head_idx].view(-1, 1)
                     unique_id = unique_id + attr_class * multiplier
                     multiplier *= nc[head_idx]
                 c = unique_id * max_wh
-            else:  # Одна голова - оригинальная реализация
+            else:  # one head - original implementation
                 c = j.view(-1, 1) * max_wh
         scores = conf
 
@@ -331,7 +340,8 @@ def non_max_suppression(
             i = nms_rotated(boxes, scores, iou_thres)
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
-            i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+            # torchvision NMS requires float32 on CPU
+            i = torchvision.ops.nms(boxes.float(), scores.float(), iou_thres)  # NMS
         i = i[:max_det]  # limit detections
 
         # # Experimental
@@ -352,8 +362,6 @@ def non_max_suppression(
             break  # time limit exceeded
 
     return output
-
-
 
 def scale_image(masks, im0_shape, ratio_pad=None):
     """
@@ -557,6 +565,20 @@ def scale_coords(img1_shape, coords, img0_shape, ratio_pad=None, normalize=False
         coords[..., 1] /= img0_shape[0]  # height
     return coords
 
+def xywh2ltwh(x):
+    """
+    Convert the bounding box format from [x, y, w, h] to [x1, y1, w, h], where x1, y1 are the top-left coordinates.
+
+    Args:
+        x (np.ndarray | torch.Tensor): The input tensor with the bounding box coordinates in the xywh format
+
+    Returns:
+        y (np.ndarray | torch.Tensor): The bounding box coordinates in the xyltwh format
+    """
+    y = x.clone() if isinstance(x, torch.Tensor) else np.copy(x)
+    y[..., 0] = x[..., 0] - x[..., 2] / 2  # top left x
+    y[..., 1] = x[..., 1] - x[..., 3] / 2  # top left y
+    return y
 
 def regularize_rboxes(rboxes):
     """
@@ -687,3 +709,309 @@ def process_nms_onnx_results(preds: Tensor) -> List[Tensor]:
         outputs.append(yolo_dets[batch_index == i])
 
     return outputs
+
+def process_nms_hef_results(preds, img_hw: tuple[int, int] = (640, 640)) -> List[Tensor]:
+    """
+    Process Hailo on-chip NMS post-processed detection results into YOLO format.
+
+    Hailo NMS outputs per-class detections with normalised coordinates.
+    The structure returned by ``InferVStreams.infer`` (after ``autobackend``
+    collects outputs) is::
+
+        preds = [           # batch
+            [               # classes  (len == num_classes)
+                ndarray(N0, 5),   # class-0 detections
+                ndarray(N1, 5),   # class-1 detections
+                ...
+            ],
+            ...
+        ]
+
+    Each row inside a per-class array is ``[y_min, x_min, y_max, x_max, score]``
+    with coordinates normalised to **[0, 1]**.
+
+    Args:
+        preds: Nested list ``[batch][class]`` of numpy arrays ``(N, 5)``.
+        img_hw: ``(height, width)`` of the model input image used for
+            de-normalisation (pixels).
+
+    Returns:
+        List[torch.Tensor]: YOLO-style list of length *batch_size* where each
+            element is a tensor ``(num_boxes, 6)`` with columns
+            ``(x1, y1, x2, y2, confidence, class)``.
+    """
+    h, w = img_hw
+    outputs = []
+
+    for batch_dets in preds:  # iterate over batch
+        all_dets = []
+        for class_id, class_dets in enumerate(batch_dets):
+            if not isinstance(class_dets, np.ndarray):
+                class_dets = np.asarray(class_dets, dtype=np.float32)
+            if class_dets.ndim != 2 or class_dets.shape[0] == 0:
+                continue
+            # class_dets columns: [y_min, x_min, y_max, x_max, score]
+            n = class_dets.shape[0]
+            det = np.empty((n, 6), dtype=np.float32)
+            det[:, 0] = class_dets[:, 1] * w   # x1 = x_min * width
+            det[:, 1] = class_dets[:, 0] * h   # y1 = y_min * height
+            det[:, 2] = class_dets[:, 3] * w   # x2 = x_max * width
+            det[:, 3] = class_dets[:, 2] * h   # y2 = y_max * height
+            det[:, 4] = class_dets[:, 4]        # confidence
+            det[:, 5] = class_id                # class
+            all_dets.append(det)
+
+        if all_dets:
+            outputs.append(torch.from_numpy(np.concatenate(all_dets, axis=0)))
+        else:
+            outputs.append(torch.zeros((0, 6), dtype=torch.float32))
+
+    return outputs
+
+def dfl(position: Tensor) -> Tensor:
+    # Distribution Focal Loss (DFL)
+    n, c, h, w = position.shape
+    p_num = 4
+    mc = c // p_num
+    y = position.view(n, p_num, mc, h, w).softmax(dim=2)
+    bins = torch.arange(mc, device=position.device, dtype=position.dtype).view(1, 1, mc, 1, 1)
+    return (y * bins).sum(2)
+
+
+def box_process(position: Tensor, imgsz: tuple[int, int]) -> Tensor:
+    """
+    Process DFL results into YOLO-style predictions.
+
+    Args:
+        position (Tensor): Tensor containing the DFL results.
+        imgsz (tuple[int, int]): Image size.
+
+    Returns:
+        Tensor: xywh layout shaped (batch, 4, H, W).
+    """
+    device, dtype = position.device, position.dtype
+    grid_h, grid_w = position.shape[2:4]
+    y = torch.arange(grid_h, device=device, dtype=dtype)
+    x = torch.arange(grid_w, device=device, dtype=dtype)
+    grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
+    grid = torch.stack((grid_x, grid_y), dim=0).unsqueeze(0)  # (1,2,H,W) with channel0=x, channel1=y
+    # stride aligns x with width (grid_w) and y with height (grid_h)
+    stride = torch.tensor([imgsz[1] / grid_w, imgsz[0] / grid_h], device=device, dtype=dtype).view(1, 2, 1, 1)
+
+    position = dfl(position)
+    xywh = torch.empty_like(position[:, :4])
+    neg = position[:, 0:2]
+    pos = position[:, 2:4]
+
+    # center = (grid + 0.5) + (pos - neg) / 2
+    xywh[:, 0:2] = (grid + 0.5 + (pos - neg) * 0.5) * stride
+    xywh[:, 2:4] = (neg + pos) * stride
+
+    return xywh
+
+def process_rknn_dfl_results(
+    input_data: List[Tensor],
+    default_branch: int = 3,
+    imgsz: tuple[int, int] = (640, 640),
+    conf_thres: float = 0.01,
+) -> Tensor:
+    """
+    Process RKNN DFL results into YOLO-style predictions.
+
+    Args:
+        input_data (List[Tensor]): List of tensors containing the DFL results.
+        default_branch (int): Number of default branches.
+        imgsz (tuple[int, int]): Image size.
+
+    Returns:
+        Tensor: Tensor shaped (batch, 4 + sum(num_classes), num_boxes) ready for NMS.
+    """
+    boxes, classes_conf, scores_conf = [], [], []
+    pair_per_branch = len(input_data)//default_branch
+    for i in range(default_branch):
+        boxes.append(box_process(input_data[pair_per_branch*i], imgsz=imgsz))
+        classes_conf.append(input_data[pair_per_branch*i+1])
+        scores_conf.append(input_data[pair_per_branch*i+2])
+
+    def sp_flatten(_in: Tensor) -> Tensor:
+        b, ch, h, w = _in.shape
+        return _in.reshape(b, ch, h * w)
+
+    boxes = torch.cat([sp_flatten(_v) for _v in boxes], dim=2)
+    classes_conf = torch.cat([sp_flatten(_v) for _v in classes_conf], dim=2)
+    obj_conf = torch.cat([sp_flatten(_v) for _v in scores_conf], dim=2)
+    # drop cells below objectness threshold while keeping shape
+    keep = (obj_conf >= conf_thres).to(boxes.dtype)
+    boxes = boxes * keep
+    classes_conf = classes_conf * keep
+
+    return torch.cat((boxes, classes_conf), dim=1)
+
+def _decode_end2end_outputs(
+    input_data: List[Tensor],
+    nc: list[int],
+    strides: tuple[int, ...],
+    nhwc: bool = False,
+) -> Tensor:
+    """Shared decoder for RKNN / Hailo end2end model outputs.
+
+    Converts raw per-scale reg + cls tensors into the postprocessed format
+    expected by ``non_max_suppression(end2end=True)``:
+    ``(batch, num_anchors, 4 + 2 * num_tasks)``.
+
+    Args:
+        input_data: ``[reg0, cls0_t0, …, reg1, cls1_t0, …]``.
+            NCHW for RKNN, NHWC for Hailo (controlled by *nhwc*).
+        nc: Number of classes per task head.
+        strides: Feature-map strides per detection layer.
+        nhwc: If True, permute each tensor from NHWC → NCHW first.
+
+    Returns:
+        Tensor: ``(batch, num_anchors, 4 + 2 * num_tasks)`` with xyxy boxes
+            and ``(conf, class_id)`` pairs per task.
+    """
+    from ultralytics.utils.tal import dist2bbox, make_anchors
+
+    num_tasks = len(nc)
+    outputs_per_scale = 1 + num_tasks
+    nl = len(input_data) // outputs_per_scale
+    bs = input_data[0].shape[0]
+
+    regs, feats = [], []
+    task_clss = [[] for _ in range(num_tasks)]
+
+    for i in range(nl):
+        base_idx = i * outputs_per_scale
+        reg = input_data[base_idx]
+        if nhwc:
+            reg = reg.permute(0, 3, 1, 2).contiguous()
+        regs.append(reg.view(bs, 4, -1))
+        feats.append(reg)
+
+        for t in range(num_tasks):
+            cls = input_data[base_idx + 1 + t]
+            if nhwc:
+                cls = cls.permute(0, 3, 1, 2).contiguous()
+            task_clss[t].append(cls.view(bs, nc[t], -1))
+
+    boxes = torch.cat(regs, dim=-1)  # (bs, 4, total_anchors)
+
+    stride_tensor = torch.tensor(strides[:nl], device=boxes.device, dtype=boxes.dtype)
+    anchors, strides_out = make_anchors(feats, stride_tensor, 0.5)
+    anchors = anchors.transpose(0, 1)
+    strides_out = strides_out.transpose(0, 1)
+
+    dbox = dist2bbox(boxes, anchors.unsqueeze(0), xywh=False, dim=1) * strides_out
+    dbox = dbox.permute(0, 2, 1)  # (bs, total_anchors, 4)
+
+    task_pairs = []
+    for t in range(num_tasks):
+        scores_t = torch.cat(task_clss[t], dim=-1)  # (bs, nc[t], total_anchors)
+        if _is_logits(scores_t):
+            scores_t = scores_t.sigmoid()
+        conf, cls_id = scores_t.max(dim=1)
+        task_pairs.append(conf.unsqueeze(-1))
+        task_pairs.append(cls_id.float().unsqueeze(-1))
+
+    return torch.cat([dbox] + task_pairs, dim=-1)
+
+
+def process_rknn_end2end_results(
+    input_data: List[Tensor],
+    nc: list[int] = [80],
+    strides: tuple[int, ...] = (8, 16, 32),
+    **_ignored,
+) -> Tensor:
+    """Process RKNN end2end outputs (NCHW) into postprocessed predictions for NMS.
+
+    Args:
+        input_data: ``[reg0, cls0, reg1, cls1, …]`` in NCHW format.
+        nc: Number of classes per task head.
+        strides: Feature-map strides per detection layer.
+
+    Returns:
+        Tensor: ``(batch, num_anchors, 4 + 2 * num_tasks)`` with xyxy boxes
+            and ``(conf, class_id)`` pairs.
+    """
+    return _decode_end2end_outputs(input_data, nc=nc, strides=strides, nhwc=False)
+
+def _is_logits(scores: Tensor) -> bool:
+    """Return True if *scores* look like raw logits rather than post-sigmoid probabilities.
+
+    The heuristic is trivial: sigmoid output is always in [0, 1], so any
+    value outside that range means the activation was not baked into the
+    model graph.
+    """
+    return bool(scores.min() < 0.0 or scores.max() > 1.0)
+
+
+def process_hef_dfl_results(
+    input_data: List[Tensor],
+    default_branch: int = 3,
+    imgsz: tuple[int, int] = (640, 640),
+    conf_thres: float = 0.01,
+) -> Tensor:
+    """Process Hailo DFL results (NHWC) into YOLO-style predictions.
+
+    Hailo outputs raw detection heads in NHWC format.  Each detection scale
+    has a pair of outputs: bbox DFL regression ``(H, W, 64)`` and class
+    scores ``(H, W, nc)``.
+
+    This is the Hailo equivalent of :func:`process_rknn_dfl_results`; the
+    only structural difference is the NHWC→NCHW permutation applied before
+    reusing the shared ``box_process`` / ``dfl`` helpers.
+
+    Args:
+        input_data: List of NHWC tensors ``[bbox0, cls0, bbox1, cls1, ...]``.
+        default_branch: Number of detection scales (default 3).
+        imgsz: Model input size ``(height, width)``.
+        conf_thres: Confidence threshold for early filtering.
+
+    Returns:
+        Tensor: Shape ``(batch, 4 + nc, num_boxes)`` ready for NMS.
+    """
+    boxes, classes_conf = [], []
+    pair_per_branch = len(input_data) // default_branch
+
+    for i in range(default_branch):
+        # Convert NHWC → NCHW for box_process / dfl helpers
+        bbox_nhwc = input_data[pair_per_branch * i]
+        bbox_nchw = bbox_nhwc.permute(0, 3, 1, 2).contiguous()  # (bs, 64, H, W)
+        boxes.append(box_process(bbox_nchw, imgsz=imgsz))
+
+        cls_nhwc = input_data[pair_per_branch * i + 1]
+        cls_nchw = cls_nhwc.permute(0, 3, 1, 2).contiguous()    # (bs, nc, H, W)
+        classes_conf.append(cls_nchw)
+
+    def sp_flatten(_in: Tensor) -> Tensor:
+        b, ch, h, w = _in.shape
+        return _in.reshape(b, ch, h * w)
+
+    boxes = torch.cat([sp_flatten(v) for v in boxes], dim=2)
+    classes_conf = torch.cat([sp_flatten(v) for v in classes_conf], dim=2)
+
+    # Auto-detect raw logits (sigmoid not baked into the HEF graph)
+    if _is_logits(classes_conf):
+        classes_conf = classes_conf.sigmoid()
+
+    return torch.cat((boxes, classes_conf), dim=1)
+
+
+def process_hef_end2end_results(
+    input_data: List[Tensor],
+    nc: list[int] = [80],
+    strides: tuple[int, ...] = (8, 16, 32),
+    **_ignored,
+) -> Tensor:
+    """Process Hailo end2end outputs (NHWC) into postprocessed predictions for NMS.
+
+    Args:
+        input_data: ``[reg0, cls0, reg1, cls1, …]`` in NHWC format.
+        nc: Number of classes per task head.
+        strides: Feature-map strides per detection layer.
+
+    Returns:
+        Tensor: ``(batch, num_anchors, 4 + 2 * num_tasks)`` with xyxy boxes
+            and ``(conf, class_id)`` pairs.
+    """
+    return _decode_end2end_outputs(input_data, nc=nc, strides=strides, nhwc=True)

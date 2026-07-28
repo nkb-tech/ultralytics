@@ -13,13 +13,14 @@ import torch.nn as nn
 
 from ultralytics.nn.modules import *
 from ultralytics.nn.extra_modules import *
-from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
+from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, YAML
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 
 from ultralytics.utils.loss import (
-    E2EDetectLoss,
+    E2ELoss,
     E2EPoseLoss,
     E2ESegmentLoss,
+    PoseLoss26,
     v8ClassificationLoss,
     v8DetectionLoss,
     v8OBBLoss,
@@ -82,6 +83,14 @@ class BaseModel(nn.Module):
         if isinstance(x, dict):  # for cases of training and validating while training.
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
+
+    @property
+    def embed_dim(self):
+        """Re-ID embedding dimension of the model head, or 0 if the head is not an embedding head."""
+        layers = getattr(self, "model", None)
+        if layers is None or not hasattr(layers, "__getitem__") or len(layers) == 0:
+            return 0
+        return getattr(layers[-1], "embed_dim", 0)
 
     def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
         """
@@ -202,6 +211,8 @@ class BaseModel(nn.Module):
                     m.forward = m.forward_fuse
                 if hasattr(m, "switch_to_deploy"):
                     m.switch_to_deploy()
+                if isinstance(m, Detect) and getattr(m, "end2end", False):
+                    m.fuse()  # remove one2many head
             self.info(verbose=verbose)
 
         return self
@@ -242,9 +253,9 @@ class BaseModel(nn.Module):
         """
         self = super()._apply(fn)
         m = self.model[-1]  # Detect()
-        if isinstance(m,(Detect, v11Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
+        if isinstance(m,(Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
                     Detect_Efficient, DetectAux, Detect_SEAM, Detect_MultiSEAM, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_DyHead_Prune,
-                    Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Detect_LADH, Segment_LADH, Detect_LSCSBD, Segment_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
+                    Detect_LSCD, Detect_TADDH, Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Detect_LADH, Segment_LADH, Detect_LSCSBD, Segment_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
             m.stride = fn(m.stride)
             m.anchors = fn(m.anchors)
             m.strides = fn(m.strides)
@@ -302,6 +313,8 @@ class DetectionModel(BaseModel):
 
         # Define model
         ch = self.yaml["ch"] = self.yaml.get("ch", ch)  # input channels
+        if isinstance(self.yaml.get("nc"), int):
+            self.yaml["nc"] = [self.yaml["nc"]]
         if nc and nc != self.yaml["nc"]:
             LOGGER.info(f"Overriding model.yaml nc={self.yaml['nc']} with nc={nc}")
             self.yaml["nc"] = nc  # override YAML value
@@ -311,26 +324,28 @@ class DetectionModel(BaseModel):
             for nc_i in self.yaml["nc"]
         ]  # default names dict
         self.inplace = self.yaml.get("inplace", True)
-        self.end2end = getattr(self.model[-1], "end2end", False)
 
         # Build strides
         m = self.model[-1]  # Detect()
-        if isinstance(m, (Detect, v11Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
+        if isinstance(m, (Detect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom, 
                 Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM, Detect_DyHead_Prune, 
-                Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Pose, Pose_LSCD, Pose_TADDH, OBB, OBB_LSCD, OBB_TADDH,
+                Detect_LSCD, Detect_TADDH, Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Pose, Pose26, Pose_LSCD, Pose_TADDH, OBB, OBB26, OBB_LSCD, OBB_TADDH,
                 Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH, Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD)):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetec
             s = 256  # 2x min stride
             m.inplace = self.inplace
 
             def _forward(x):
                 """Performs a forward pass through the model, handling different Detect subclass types accordingly."""
+                output = self.forward(x)
                 if self.end2end:
-                    y = self.forward(x)["one2many"]
-                    return y[0] if isinstance(m, (v10Pose, v10Segment)) else y
-                return self.forward(x)[0] if isinstance(m, (Segment, Pose, OBB)) else self.forward(x)
+                    output = output["one2many"]
+                return output["feats"]
 
+            self.model.eval()  # Avoid changing batch statistics until training begins
+            m.training = True  # Setting it to True to properly return strides
             m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
+            self.model.train()  # Set model back to training(default) mode
             m.bias_init()  # only run once
         else:
             self.stride = torch.Tensor([32])  # default stride for i.e. RTDETR
@@ -340,6 +355,36 @@ class DetectionModel(BaseModel):
         if verbose:
             self.info()
             LOGGER.info("")
+
+    @property
+    def end2end(self):
+        """Return whether the model uses end-to-end NMS-free detection."""
+        return getattr(self.model[-1], "end2end", False)
+
+    @end2end.setter
+    def end2end(self, value):
+        """Override the end-to-end detection mode. Only applies to YOLOv10/YOLO26-style models with one2one heads."""
+        head = self.model[-1]
+        if not hasattr(head, "one2one_cv2"):
+            LOGGER.warning(
+                f"WARNING ⚠️ end2end={value} ignored: model head '{type(head).__name__}' "
+                f"has no one2one heads (not a YOLOv10/YOLO26-style end2end model)."
+            )
+            return
+        self.set_head_attr(end2end=value)
+
+    def set_head_attr(self, **kwargs):
+        """Set attributes of the model head (last layer).
+
+        Args:
+            **kwargs: Arbitrary keyword arguments representing attributes to set.
+        """
+        head = self.model[-1]
+        for k, v in kwargs.items():
+            if not hasattr(head, k):
+                LOGGER.warning(f"Head has no attribute '{k}'.")
+                continue
+            setattr(head, k, v)
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference and train outputs."""
@@ -380,16 +425,23 @@ class DetectionModel(BaseModel):
         y[-1] = y[-1][..., i:]  # small
         return y
 
-    def init_criterion(self, weights=None, clf_loss_weights=None):
+    def init_criterion(self, clf_loss_weights=None, child_parent_map=None, task_schema=None, ignore_class=None):
         """Initialize the loss criterion for the DetectionModel."""
-        return E2EDetectLoss(self) if getattr(self, "end2end", False) else v8DetectionLoss(
-            self,
+        kwargs = dict(
             clf_loss_weights=clf_loss_weights,
             clf_loss_fn=self.args.clf_loss_fn,
             iou_loss_fn=self.args.iou_loss_fn,
             nwd_loss=self.args.nwd_loss,
             use_wiseiou=self.args.use_wiseiou,
+            iou_ratio=self.args.iou_ratio,
+            task_loss_weights=self.args.task_loss_weights,
+            dependency_loss=getattr(self.args, "dependency_loss", False),
+            child_parent_map=child_parent_map,
+            task_schema=task_schema,
+            ignore_class=ignore_class,
         )
+
+        return E2ELoss(self, v8DetectionLoss, **kwargs) if getattr(self, "end2end", False) else v8DetectionLoss(self, **kwargs)
 
 
 class OBBModel(DetectionModel):
@@ -399,9 +451,17 @@ class OBBModel(DetectionModel):
         """Initialize YOLOv8 OBB model with given config and parameters."""
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self, weights=None):
+    def init_criterion(self, clf_loss_weights=None):
         """Initialize the loss criterion for the model."""
-        return v8OBBLoss(self)
+        kwargs = dict(
+            clf_loss_weights=clf_loss_weights,
+            clf_loss_fn=self.args.clf_loss_fn,
+            iou_loss_fn=self.args.iou_loss_fn,
+            nwd_loss=self.args.nwd_loss,
+            use_wiseiou=self.args.use_wiseiou,
+            iou_ratio=self.args.iou_ratio,
+        )
+        return E2ELoss(self, v8OBBLoss, **kwargs) if getattr(self, "end2end", False) else v8OBBLoss(self, **kwargs)
 
 
 class SegmentationModel(DetectionModel):
@@ -411,9 +471,18 @@ class SegmentationModel(DetectionModel):
         """Initialize YOLOv8 segmentation model with given config and parameters."""
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self, weights=None):
+    def init_criterion(self, clf_loss_weights=None, **kwargs):
         """Initialize the loss criterion for the SegmentationModel."""
-        return E2ESegmentLoss(self) if getattr(self, "end2end", False) else v8SegmentationLoss(self)
+        kwargs = dict(
+            clf_loss_weights=clf_loss_weights,
+            clf_loss_fn=self.args.clf_loss_fn,
+            iou_loss_fn=self.args.iou_loss_fn,
+            nwd_loss=self.args.nwd_loss,
+            use_wiseiou=self.args.use_wiseiou,
+            iou_ratio=self.args.iou_ratio,
+        )
+        return E2ELoss(self, v8SegmentationLoss, **kwargs) if getattr(self, "end2end", False) else v8SegmentationLoss(self, **kwargs)
+
 
 
 class SemanticSegmentationModel(BaseModel):
@@ -501,11 +570,17 @@ class PoseModel(DetectionModel):
             cfg["kpt_shape"] = data_kpt_shape
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    def init_criterion(self, weights=None):
+    def init_criterion(self, clf_loss_weights=None):
         """Initialize the loss criterion for the PoseModel."""
-        return E2EPoseLoss(self) if getattr(self, "end2end", False) else v8PoseLoss(self)
-
-
+        kwargs = dict(
+            clf_loss_weights=clf_loss_weights,
+            clf_loss_fn=self.args.clf_loss_fn,
+            iou_loss_fn=self.args.iou_loss_fn,
+            nwd_loss=self.args.nwd_loss,
+            use_wiseiou=self.args.use_wiseiou,
+            iou_ratio=self.args.iou_ratio,
+        )
+        return E2EPoseLoss(self, v8PoseLoss, **kwargs) if getattr(self, "end2end", False) else v8PoseLoss(self, **kwargs)
 
 class ClassificationModel(BaseModel):
     """YOLOv8 classification model."""
@@ -552,9 +627,9 @@ class ClassificationModel(BaseModel):
                 if m[i].out_channels != nc:
                     m[i] = nn.Conv2d(m[i].in_channels, nc, m[i].kernel_size, m[i].stride, bias=m[i].bias is not None)
 
-    def init_criterion(self, weights=None):
+    def init_criterion(self, clf_loss_weights=None):
         """Initialize the loss criterion for the ClassificationModel."""
-        return v8ClassificationLoss(weights)
+        return v8ClassificationLoss(clf_loss_weights)
 
 
 class RTDETRDetectionModel(DetectionModel):
@@ -945,13 +1020,14 @@ def torch_safe_load(weight, safe_only=False):
     return ckpt, file
 
 
-def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
+def attempt_load_weights(weights, device=None, inplace=True, fuse=False, end2end=None):
     """Loads an ensemble of models weights=[a,b,c] or a single model weights=[a] or weights=a."""
     ensemble = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
         ckpt, w = torch_safe_load(w)  # load ckpt
         args = {**DEFAULT_CFG_DICT, **ckpt["train_args"]} if "train_args" in ckpt else None  # combined args
         model = (ckpt.get("ema") or ckpt["model"]).to(device).float()  # FP32 model
+        patch_model_inplace(model)
 
         # Model compatibility updates
         model.args = args  # attach args to model
@@ -959,6 +1035,10 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
         model.task = guess_model_task(model)
         if not hasattr(model, "stride"):
             model.stride = torch.tensor([32.0])
+
+        # Override end2end on the head before fusing so fuse() knows whether to remove one2many
+        if end2end is not None:
+            model.end2end = end2end
 
         # Append
         ensemble.append(model.fuse().eval() if fuse and hasattr(model, "fuse") else model.eval())  # model in eval mode
@@ -984,22 +1064,28 @@ def attempt_load_weights(weights, device=None, inplace=True, fuse=False):
 
 
 def _ensure_nested_cv3_on_module(mod: nn.Module) -> bool:
-    """
-    If mod has attribute 'cv3' that is ModuleList[...], ensure it becomes
-    ModuleList[ModuleList[...]] (single-task wrap). Also normalize 'nc' int -> [int].
-    Returns True if modified.
+    """Ensure cv3 (and one2one_cv3) are nested ModuleList[ModuleList[...]] for multitask.
+
+    Converts flat layout (one ModuleList of per-scale Sequentials) to nested
+    (outer=tasks, inner=scales). Also normalizes nc int -> [int].
+
+    Args:
+        mod (nn.Module): Module to check (typically a Detect head).
+
+    Returns:
+        (bool): True if the module was modified.
     """
     if not hasattr(mod, "cv3"):
         return False
-    cv3 = getattr(mod, "cv3")
-    if isinstance(cv3, nn.ModuleList):
-        needs_wrap = (len(cv3) == 0) or not isinstance(cv3[0], nn.ModuleList)
-        if needs_wrap:
-            setattr(mod, "cv3", nn.ModuleList([cv3]))     # wrap to task dim
-            if hasattr(mod, "nc") and isinstance(getattr(mod, "nc"), int):
-                setattr(mod, "nc", [getattr(mod, "nc")])  # normalize to list
-            return True
-    return False
+    changed = False
+    for attr in ("cv3", "one2one_cv3"):
+        cv3 = getattr(mod, attr, None)
+        if isinstance(cv3, nn.ModuleList) and len(cv3) > 0 and not isinstance(cv3[0], nn.ModuleList):
+            setattr(mod, attr, nn.ModuleList([cv3]))
+            changed = True
+    if changed and hasattr(mod, "nc") and isinstance(mod.nc, int):
+        mod.nc = [mod.nc]
+    return changed
 
 def patch_model_inplace(root: nn.Module):
     """
@@ -1046,6 +1132,7 @@ def attempt_load_one_weight(weight, device=None, inplace=True, fuse=False):
 def install_cv3_compat_hook(model: nn.Module):
     """
     Attach a load_state_dict pre-hook that:
+      - Converts legacy=True/False to head_mode="legacy"/"efficient"
       - Wraps model.cv3 into ModuleList([cv3]) if it's not already a nested ModuleList
       - Transforms old-style state_dict keys '...cv3.i.j.*' into '...cv3.0.i.j.*'
     Call this once, before model.load_state_dict(...).
@@ -1060,6 +1147,10 @@ def install_cv3_compat_hook(model: nn.Module):
                          unexpected_keys: list,
                          error_msgs: list):
 
+        # ---- 0) Convert legacy attribute to head_mode if present
+        if hasattr(module, "legacy") and not hasattr(module, "head_mode"):
+            module.head_mode = "legacy" if module.legacy else "efficient"
+        
         # ---- 1) Ensure model side is nested: ModuleList[ModuleList[Sequential]]
         cv3 = getattr(module, "cv3", None)
         if isinstance(cv3, nn.ModuleList):
@@ -1067,6 +1158,10 @@ def install_cv3_compat_hook(model: nn.Module):
             if needs_wrap:
                 # Wrap to represent a single classification task
                 module.cv3 = nn.ModuleList([cv3])
+                # Also wrap one2one_cv3 if present
+                if hasattr(module, "one2one_cv3") and isinstance(module.one2one_cv3, nn.ModuleList):
+                    if len(module.one2one_cv3) == 0 or not isinstance(module.one2one_cv3[0], nn.ModuleList):
+                        module.one2one_cv3 = nn.ModuleList([module.one2one_cv3])
                 # If you keep `nc` as a scalar in older code, normalize it to a list of one.
                 if hasattr(module, "nc") and isinstance(module.nc, int):
                     module.nc = [module.nc]
@@ -1092,6 +1187,17 @@ def install_cv3_compat_hook(model: nn.Module):
                     # Move tensor to new key
                     state_dict[new_k] = state_dict[k]
                     del state_dict[k]
+        
+        # ---- 3) Also handle one2one_cv3 keys
+        one2one_keys = [k for k in list(state_dict.keys()) if k.startswith(prefix + "one2one_cv3.")]
+        if one2one_keys and any(_is_old(k.replace("one2one_cv3", "cv3")) for k in one2one_keys):
+            for k in one2one_keys:
+                m = re.match(rf"^{re.escape(prefix)}one2one_cv3\.(\d+)\.(\d+)\.(.+)$", k)
+                if m:
+                    i, j, rest = m.groups()
+                    new_k = f"{prefix}one2one_cv3.0.{i}.{j}.{rest}"
+                    state_dict[new_k] = state_dict[k]
+                    del state_dict[k]
 
     # Register with a signature that includes 'module' when available
     try:
@@ -1110,7 +1216,15 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
 
     # Args
     max_channels = float("inf")
+    legacy = d.get("legacy", False)  # backward compatibility for v3/v5/v8/v9 models
     nc, act, scales = (d.get(x) for x in ("nc", "activation", "scales"))
+    if isinstance(nc, int):
+        nc = [nc]
+        d["nc"] = nc
+    end2end = d.get("end2end", False)  # default to False for models without end2end config
+    hierarchical = d.get("hierarchical", False)
+    hierarchy_parent_heads = d.get("hierarchy_parent_heads", None)
+    reg_max = d.get("reg_max", 16)
     depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
     if scales:
         scale = d.get("scale")
@@ -1172,7 +1286,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C3_DynamicConv, C2f_DynamicConv, C3_GhostDynamicConv, C2f_GhostDynamicConv, C3_RVB, C2f_RVB, C3_RVB_SE, C2f_RVB_SE, C3_RVB_EMA, C2f_RVB_EMA, DGCST,
             C3_RetBlock, C2f_RetBlock, C3_PKIModule, C2f_PKIModule, RepNCSPELAN4_CAA, C3_FADC, C2f_FADC, C3_PPA, C2f_PPA, SRFD, DRFD, RGCSPELAN,
             C3_Faster_CGLU, C2f_Faster_CGLU, C3_Star, C2f_Star, C3_Star_CAA, C2f_Star_CAA, ELAN1,  SPPELAN,C2fAttn, RepC3,  PSA, SCDown, C2fCIB,
-            C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2, Silence, A2C2f, DSC3k2):
+            C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2, Silence, A2C2f, DSC3k2,
+            IRDCB, LDown):
             if args[0] == 'head_channel':
                 args[0] = d[args[0]]
             
@@ -1209,7 +1324,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                      C3_VSS, C2f_VSS, C3_LVMB, C2f_LVMB, C3_DynamicConv, C2f_DynamicConv, C3_GhostDynamicConv, C2f_GhostDynamicConv,
                      C3_RVB, C2f_RVB, C3_RVB_SE, C2f_RVB_SE, C3_RVB_EMA, C2f_RVB_EMA, C3_RetBlock, C2f_RetBlock, C3_PKIModule, C2f_PKIModule,
                      C3_FADC, C2f_FADC, C3_PPA, C2f_PPA, RGCSPELAN, C3_Faster_CGLU, C2f_Faster_CGLU, C3_Star, C2f_Star, C3_Star_CAA, C2f_Star_CAA, 
-                     C2fPSA, C2PSA, C3k2, C2fCIB, C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2, A2C2f, DSC3k2):
+                     C2fPSA, C2PSA, C3k2, C2fCIB, C2fCBAM, C2fCBAMv2, C3CBAM, C3CBAMv2, A2C2f, DSC3k2,
+                     IRDCB):
                 args.insert(2, n)  # number of repeats
                 n = 1
             if m is {C3k2, DSC3k2}:  # for M/L/X sizes
@@ -1235,13 +1351,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in (Detect, v11Detect, WorldDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom,
+        elif m in (Detect, WorldDetect, Detect_DyHead, Detect_AFPN_P2345, Detect_AFPN_P2345_Custom, Detect_AFPN_P345, Detect_AFPN_P345_Custom,
                    Detect_Efficient, DetectAux, Detect_DyHeadWithDCNV3, Detect_DyHeadWithDCNV4, Detect_SEAM, Detect_MultiSEAM,
-                   Detect_DyHead_Prune, Detect_LSCD, Detect_TADDH, Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH,
-                   Pose, Pose_LSCD, Pose_TADDH, OBB, OBB_LSCD, OBB_TADDH, Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH,
-                   Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect,v10Pose, v10Segment):
-            args.append([ch[x] for x in f])
-            if m is(Segment, Segment_Efficient, Segment_LSCD, Segment_TADDH, Segment_LADH, Segment_LSCSBD):
+                   Detect_DyHead_Prune, Detect_LSCD, Detect_TADDH, Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH,
+                   Pose, Pose26, Pose_LSCD, Pose_TADDH, OBB, OBB26, OBB_LSCD, OBB_TADDH, Detect_LADH, Segment_LADH, Pose_LADH, OBB_LADH,
+                   Detect_LSCSBD, Segment_LSCSBD, Pose_LSCSBD, OBB_LSCSBD, ImagePoolingAttn, v10Detect, v10Pose, v10Segment):
+            args.extend([reg_max, end2end, [ch[x] for x in f]])
+            if m is Detect:
+                args.extend([0, hierarchical, hierarchy_parent_heads])
+            m.legacy = legacy
+            if m in (Segment, Segment26, Segment_Efficient, Segment_LSCD, Segment_TADDH, Segment_LADH, Segment_LSCSBD):
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
                 if m in (Segment_LSCD, Segment_TADDH, Segment_LSCSBD):
                     args[3] = make_divisible(min(args[3], max_channels) * width, 8)
@@ -1409,6 +1528,16 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
         else:
             m_ = nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
             t = str(m)[8:-2].replace("__main__.", "")  # module type
+            
+            # Set end2end attribute from config for Detect heads (YOLO26 support)
+            if '_end2end_from_config' in dir() and _end2end_from_config and hasattr(m_, 'end2end'):
+                m_.end2end = _end2end_from_config
+                # Initialize one2one heads for end2end mode
+                if _end2end_from_config and not hasattr(m_, 'one2one_cv2'):
+                    import copy
+                    m_.one2one_cv2 = copy.deepcopy(m_.cv2)
+                    m_.one2one_cv3 = copy.deepcopy(m_.cv3)
+                    
         np = sum(x.numel() for x in m_.parameters())  # number params
         m_.i, m_.f, m_.type, m_.np = i + 4 if is_backbone else i, f, t, np  # attach index, 'from' index, type, number params
         if verbose:
@@ -1438,13 +1567,15 @@ def yaml_model_load(path):
 
     unified_path = re.sub(r"(\d+)([nslmx])(.+)?$", r"\1\3", str(path))  # i.e. yolov8x.yaml -> yolov8.yaml
     yaml_file = check_yaml(unified_path, hard=False) or check_yaml(path)
-    d = yaml_load(yaml_file)  # model dict
+    d = YAML.load(yaml_file)  # model dict
     d["scale"] = guess_model_scale(path)
     d["yaml_file"] = str(path)
 
     nc = d.get("nc", None)
     if isinstance(nc, int):
-        d["nc"] = [nc]
+        d["nc"] = nc
+    elif isinstance(nc, list):
+        d["nc"] = nc  # Already a list (multihead format)
     else:
         raise SyntaxError(emojis(f"{yaml_file} key missing ❌. either 'names' or 'nc' are required in all model YAMLs."))
     return d
@@ -1477,7 +1608,7 @@ def guess_model_task(model):
         model (nn.Module | dict): PyTorch model or model configuration in YAML format.
 
     Returns:
-        (str): Task of the model ('detect', 'segment', 'classify', 'pose').
+        (str): Task of the model ('detect', 'segment', 'classify', 'pose', 'obb').
 
     Raises:
         SyntaxError: If the task of the model could not be determined.
@@ -1492,11 +1623,11 @@ def guess_model_task(model):
             return "detect"
         if m == "semanticsegment":
             return "semantic"
-        if m == "segment":
+        if "segment" in m:  # matches segment, segment26
             return "segment"
-        if m == "pose":
+        if "pose" in m:  # matches pose, pose26
             return "pose"
-        if m == "obb":
+        if "obb" in m:  # matches obb, obb26
             return "obb"
 
     # Guess from model cfg
@@ -1516,15 +1647,15 @@ def guess_model_task(model):
         for m in model.modules():
             if isinstance(m, SemanticSegment):
                 return "semantic"
-            elif isinstance(m, (Segment, v10Segment)):
+            elif isinstance(m, (Segment, Segment26, v10Segment)):
                 return "segment"
             elif isinstance(m, Classify):
                 return "classify"
-            elif isinstance(m, (Pose, v10Pose)):
+            elif isinstance(m, (Pose, Pose26, v10Pose)):
                 return "pose"
-            elif isinstance(m, OBB):
+            elif isinstance(m, (OBB, OBB26)):
                 return "obb"
-            elif isinstance(m, (Detect, WorldDetect, v10Detect, v11Detect)):
+            elif isinstance(m, (Detect, WorldDetect, v10Detect)):
                 return "detect"
 
     # Guess from model filename
@@ -1543,7 +1674,7 @@ def guess_model_task(model):
 
     # Unable to determine task from model
     LOGGER.warning(
-        "WARNING ⚠️ Unable t automatically guess model task, assuming 'task=detect'. "
-        "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify','pose' or 'obb'."
+        "WARNING ⚠️ Unable automatically guess model task, assuming 'task=detect'. "
+        "Explicitly define task for your model, i.e. 'task=detect', 'segment', 'classify', 'pose' or 'obb'."
     )
     return "detect"  # assume detect

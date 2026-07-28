@@ -42,7 +42,7 @@ try:
 except Exception:
     iaa = None
 
-if IMGAUG_AVAILABLE:
+if IMGAUG_AVAILABLE and ALBU_AVAILABLE:
 
     class ImgAugWeatherTransform(A.ImageOnlyTransform):
         """
@@ -932,9 +932,11 @@ class Mosaic(BaseMixTransform):
             return {}
         cls = []
         instances = []
+        tags_list = []
         imgsz = self.imgsz * 2  # mosaic imgsz
         n_attrs = 1
-        
+        has_tags = all("tags" in lb for lb in mosaic_labels)
+
         for labels in mosaic_labels:
             if "cls" in labels:
                 if labels["cls"].ndim == 2:
@@ -959,6 +961,14 @@ class Mosaic(BaseMixTransform):
                 cls.append(np.empty((0, n_attrs), dtype=np.float32))
                 
             instances.append(labels["instances"])
+        
+            # tags must follow the same concat + filtering as instances/cls
+            if has_tags:
+                t = labels.get("tags")
+                t = np.asarray(t)
+                if t.ndim == 1:
+                    t = t.reshape(-1, 1)
+                tags_list.append(t)
             
         # Final labels
         final_labels = {
@@ -969,9 +979,14 @@ class Mosaic(BaseMixTransform):
             "instances": Instances.concatenate(instances, axis=0),
             "mosaic_border": self.border,
         }
+        if has_tags:
+            final_labels["tags"] = np.concatenate(tags_list, 0)
+
         final_labels["instances"].clip(imgsz, imgsz)
         good = final_labels["instances"].remove_zero_area_boxes()
         final_labels["cls"] = final_labels["cls"][good]
+        if has_tags:
+            final_labels["tags"] = final_labels["tags"][good]
         if "texts" in mosaic_labels[0]:
             final_labels["texts"] = mosaic_labels[0]["texts"]
         return final_labels
@@ -1062,6 +1077,8 @@ class MixUp(BaseMixTransform):
         labels["img"] = (labels["img"] * r + labels2["img"] * (1 - r)).astype(np.uint8)
         labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
         labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], 0)
+        if "tags" in labels and "tags" in labels2:
+            labels["tags"] = np.concatenate([labels["tags"], labels2["tags"]], 0)
         return labels
 
     def __repr__(self):
@@ -1191,7 +1208,10 @@ class RandomPerspective:
         R = np.eye(3, dtype=np.float32)
         a = random.uniform(-self.degrees, self.degrees)
         # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
-        s = random.uniform(1 - self.scale, 1 + self.scale)
+        if isinstance(self.scale, (list, tuple)):
+            s = random.uniform(self.scale[0], self.scale[1])
+        else:
+            s = random.uniform(1 - self.scale, 1 + self.scale)
         # s = 2 ** random.uniform(-scale, scale)
         R[:2] = cv2.getRotationMatrix2D(angle=a, center=(0, 0), scale=s)
 
@@ -1361,6 +1381,7 @@ class RandomPerspective:
 
         img = labels["img"]
         cls = labels["cls"]
+        tags = labels.get("tags", None)
         instances = labels.pop("instances")
         # Make sure the coord formats are right
         instances.convert_bbox(format="xyxy")
@@ -1401,6 +1422,8 @@ class RandomPerspective:
         i = self.box_candidates(box1=instances.bboxes.T, box2=new_instances.bboxes.T)
         labels["instances"] = new_instances[i]
         labels["cls"] = cls[i]
+        if tags is not None:
+            labels["tags"] = np.asarray(tags)[i]
         labels["img"] = img
         labels["resized_shape"] = img.shape[:2]
 
@@ -1532,6 +1555,16 @@ class CutMix(BaseMixTransform):
         """
         Applies CutMix augmentation to the input labels.
 
+        This implementation correctly aligns labels with visible pixels:
+        - Base-image instances fully/largely covered by the cut rectangle are dropped
+          (their pixels have been replaced by those of the second image).
+        - Only instances of the second image whose boxes fall inside the cut rectangle are
+          imported into the mixed image, and they are clipped to the rectangle so the box
+          matches the visible pixels.
+
+        This matters for JDE / self-supervised ReID: a "phantom" box (label kept but pixels
+        replaced) would pair a tag with the wrong visual, silently poisoning the triplet loss.
+
         Args:
             labels (dict): A dictionary containing the original image and label information.
 
@@ -1550,17 +1583,89 @@ class CutMix(BaseMixTransform):
         img2 = labels2["img"]
         h, w = labels["img"].shape[:2]
 
-        # Generate random bounding box
+        # Generate random bounding box in pixel coordinates of the base image
         x1, y1, x2, y2 = self._rand_bbox(w, h, lam)
 
-        # Apply CutMix
+        if x2 <= x1 or y2 <= y1:
+            # Degenerate cut region -> skip mixing entirely to avoid label/pixel drift
+            return labels
+
+        # Apply CutMix at the pixel level
         labels["img"][y1:y2, x1:x2] = img2[y1:y2, x1:x2]
 
-        # Adjust lambda to match the actual area ratio
-        lam = 1 - ((x2 - x1) * (y2 - y1) / (w * h))
+        # Remember the base bbox format so we can restore it before returning
+        inst1 = labels.pop("instances")
+        fmt1, norm1 = inst1._bboxes.format, inst1.normalized
 
-        labels["cls"] = np.concatenate([labels["cls"], labels2["cls"]], axis=0)
-        labels["instances"] = Instances.concatenate([labels["instances"], labels2["instances"]], axis=0)
+        # Put both sets of instances into the same (xyxy, pixel) coordinate system
+        inst1.convert_bbox("xyxy")
+        inst1.denormalize(w, h)
+
+        inst2 = labels2["instances"]
+        inst2.convert_bbox("xyxy")
+        h2, w2 = img2.shape[:2]
+        inst2.denormalize(w2, h2)
+
+        cls1 = labels["cls"]
+        cls2 = labels2["cls"]
+        tags1 = labels.get("tags", None)
+        tags2 = labels2.get("tags", None)
+
+        cut_rect = np.array([[x1, y1, x2, y2]], dtype=np.float32)
+
+        # 1) Drop base instances whose pixels have been replaced by the cutout (>=60% inside)
+        if len(inst1):
+            # bbox_ioa(cut_rect, inst.bboxes) -> intersection / inst_area, shape (1, N)
+            ioa1 = bbox_ioa(cut_rect, inst1.bboxes).reshape(-1)
+            keep1 = ioa1 < 0.60
+            inst1 = inst1[keep1]
+            cls1 = cls1[keep1]
+            if tags1 is not None:
+                tags1 = tags1[keep1]
+
+        # 2) Keep only labels2 instances whose pixels were actually copied, then clip to rect
+        if len(inst2):
+            ioa2 = bbox_ioa(cut_rect, inst2.bboxes).reshape(-1)
+            keep2 = ioa2 >= 0.60
+            inst2 = inst2[keep2]
+            cls2 = cls2[keep2]
+            if tags2 is not None:
+                tags2 = tags2[keep2]
+            if len(inst2):
+                inst2.bboxes[:, [0, 2]] = np.clip(inst2.bboxes[:, [0, 2]], x1, x2)
+                inst2.bboxes[:, [1, 3]] = np.clip(inst2.bboxes[:, [1, 3]], y1, y2)
+
+        # Merge
+        merged = Instances.concatenate([inst1, inst2], axis=0)
+        cls = np.concatenate([cls1, cls2], axis=0)
+
+        # Tags: only concat when both sides have them; if only labels1 has tags but nothing
+        # is imported from labels2, keep labels1's tags; otherwise drop to avoid length drift.
+        tags_out = None
+        if tags1 is not None and tags2 is not None:
+            tags_out = np.concatenate([tags1, tags2], axis=0)
+        elif tags1 is not None and len(cls2) == 0:
+            tags_out = tags1
+
+        # Drop zero-area boxes that clipping may have produced, and keep cls/tags in sync
+        good = merged.bbox_areas > 0
+        if not bool(good.all()):
+            merged = merged[good]
+            cls = cls[good]
+            if tags_out is not None:
+                tags_out = tags_out[good]
+
+        # Restore the base bbox format / normalization for downstream transforms
+        merged.convert_bbox(fmt1)
+        if norm1 and not merged.normalized:
+            merged.normalize(w, h)
+
+        labels["instances"] = merged
+        labels["cls"] = cls
+        if tags_out is not None:
+            labels["tags"] = tags_out
+        else:
+            labels.pop("tags", None)
         return labels
 
     def __repr__(self):
@@ -1633,17 +1738,30 @@ class RandomHSV:
         """
         img = labels["img"]
         if self.hgain or self.sgain or self.vgain:
-            r = np.random.uniform(-1, 1, 3) * [self.hgain, self.sgain, self.vgain] + 1  # random gains
-            hue, sat, val = cv2.split(cv2.cvtColor(img, cv2.COLOR_BGR2HSV))
-            dtype = img.dtype  # uint8
+            # Check if image is 16-bit (OpenCV doesn't support HSV conversion for 16-bit images)
+            is_16bit = img.dtype == np.uint16
+            
+            if is_16bit:
+                # For 16-bit images, only apply value (brightness) adjustment
+                # HSV augmentation doesn't make sense for grayscale/16-bit images
+                # Note: cv2.LUT doesn't support 16-bit images, so we use numpy operations
+                if self.vgain:
+                    r_val = np.random.uniform(-1, 1) * self.vgain + 1
+                    # Apply brightness adjustment directly using numpy (cv2.LUT doesn't support 16-bit)
+                    img[:] = np.clip(img.astype(np.float32) * r_val, 0, 65535).astype(np.uint16)
+            else:
+                # Normal HSV augmentation for 8-bit images
+                r = np.random.uniform(-1, 1, 3) * [self.hgain, self.sgain, self.vgain] + 1  # random gains
+                hue, sat, val = cv2.split(cv2.cvtColor(img, cv2.COLOR_BGR2HSV))
+                dtype = img.dtype  # uint8
 
-            x = np.arange(0, 256, dtype=r.dtype)
-            lut_hue = ((x * r[0]) % 180).astype(dtype)
-            lut_sat = np.clip(x * r[1], 0, 255).astype(dtype)
-            lut_val = np.clip(x * r[2], 0, 255).astype(dtype)
+                x = np.arange(0, 256, dtype=r.dtype)
+                lut_hue = ((x * r[0]) % 180).astype(dtype)
+                lut_sat = np.clip(x * r[1], 0, 255).astype(dtype)
+                lut_val = np.clip(x * r[2], 0, 255).astype(dtype)
 
-            im_hsv = cv2.merge((cv2.LUT(hue, lut_hue), cv2.LUT(sat, lut_sat), cv2.LUT(val, lut_val)))
-            cv2.cvtColor(im_hsv, cv2.COLOR_HSV2BGR, dst=img)  # no return needed
+                im_hsv = cv2.merge((cv2.LUT(hue, lut_hue), cv2.LUT(sat, lut_sat), cv2.LUT(val, lut_val)))
+                cv2.cvtColor(im_hsv, cv2.COLOR_HSV2BGR, dst=img)  # no return needed
         return labels
 
     def __repr__(self):
@@ -1852,8 +1970,18 @@ class RGB2TIR:
             image = np.asarray(labels)
             is_pil = True
 
+        # Check if image is 16-bit
+        is_16bit = image.dtype == np.uint16
+        
         # Step 1: Convert RGB image to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        if is_16bit:
+            # For 16-bit images, convert to 8-bit first for processing
+            # Take first channel (all channels are identical for duplicated grayscale)
+            gray = image[:, :, 0] if image.ndim == 3 else image
+            # Scale 16-bit to 8-bit: divide by 256 (equivalent to >> 8)
+            gray = (gray >> 8).astype(np.uint8)
+        else:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
         # Step 2: Apply CLAHE to enhance local contrast
         gray_clahe = self.clahe.apply(gray)
@@ -2231,6 +2359,7 @@ class CopyPaste(BaseMixTransform):
         """Applies Copy-Paste augmentation to combine objects from another image into the current image."""
         im = labels1["img"]
         cls = labels1["cls"]
+        tags = labels1.get("tags", None)
         h, w = im.shape[:2]
         instances = labels1.pop("instances")
         instances.convert_bbox(format="xyxy")
@@ -2239,16 +2368,30 @@ class CopyPaste(BaseMixTransform):
         im_new = np.zeros(im.shape, np.uint8)
         instances2 = labels2.pop("instances", None)
         if instances2 is None:
+            # Flip mode: pasted copy is the same source object flipped. It MUST carry the
+            # base tag so JDE/ReID sees it as a positive pair (anchor-positive with same tag).
             instances2 = deepcopy(instances)
             instances2.fliplr(w)
+            cls2 = cls
+            tags2 = tags
+        else:
+            # Mixup mode: pasted object comes from a different image. Use that image's own
+            # cls/tags; if labels2 has no tags we cannot fabricate them (index space is
+            # different), so drop tags entirely to keep lengths aligned downstream.
+            cls2 = labels2.get("cls", cls)
+            tags2 = labels2.get("tags", None)
+            if tags is not None and tags2 is None:
+                tags = None
         ioa = bbox_ioa(instances2.bboxes, instances.bboxes)  # intersection over area, (N, M)
         indexes = np.nonzero((ioa < 0.30).all(1))[0]  # (N, )
         n = len(indexes)
         sorted_idx = np.argsort(ioa.max(1)[indexes])
         indexes = indexes[sorted_idx]
         for j in indexes[: round(self.p * n)]:
-            cls = np.concatenate((cls, labels2.get("cls", cls)[[j]]), axis=0)
+            cls = np.concatenate((cls, cls2[[j]]), axis=0)
             instances = Instances.concatenate((instances, instances2[[j]]), axis=0)
+            if tags is not None:
+                tags = np.concatenate((tags, tags2[[j]]), axis=0)
             cv2.drawContours(im_new, instances2.segments[[j]].astype(np.int32), -1, (1, 1, 1), cv2.FILLED)
 
         result = labels2.get("img", cv2.flip(im, 1))  # augment segments
@@ -2258,10 +2401,13 @@ class CopyPaste(BaseMixTransform):
         labels1["img"] = im
         labels1["cls"] = cls
         labels1["instances"] = instances
+        if tags is not None:
+            labels1["tags"] = tags
         return labels1
 
     def __repr__(self):
         return f"CopyPaste(p={self.p}, mode={self.mode})"
+
 
 
 class Albumentations:
@@ -2287,7 +2433,11 @@ class Albumentations:
                 from albumentations.core.composition import BaseCompose, TransformsSeqType, TransformType
                 from albumentations.core.transforms_interface import BasicTransform
 
-                check_version(A.__version__, ">2.0.1", hard=True)  # version requirement
+                # AlbumentationsX 2.2.0 (Apr 2026) renamed `*_limit` -> `*_range` for
+                # RandomBrightnessContrast, RGBShift, UnsharpMask (and several others) with no
+                # deprecation period. 2.0.x/2.1.x still expect `*_limit`. See
+                # https://github.com/albumentations-team/AlbumentationsX/releases/tag/2.2.0
+                ALBU_2_2 = check_version(A.__version__, ">=2.2.0")
 
                 # List of possible spatial transforms
                 spatial_transforms = {
@@ -2370,7 +2520,7 @@ class Albumentations:
                 }
                 self.augs_params = default_params
                 if args is not None:
-                    self.aug_params = {
+                    self.augs_params = {
                         args.get(k, None) if args.get(k, None) is not None else default_params[k]
                         for k in default_params.keys()
                     }
@@ -2381,52 +2531,58 @@ class Albumentations:
                         A.PixelDropout(
                             dropout_prob=self.hyp.pixel_dropout_prob,
                             drop_value=self.hyp.pixel_drop_value,
-                            p=self.hyp.p_pixeldrop,
+                            p=0,
                         ),
                         A.OneOf(
                             [
                                 A.RandomRain(p=self.hyp.p_rain),
                                 A.RandomSnow(p=self.hyp.p_snow, brightness_coeff=2, snow_point_range=(0, 0.15)),
                             ],
-                            p=0.1,
+                            p=0,
                         ),
                         A.RandomBrightnessContrast(
-                            brightness_limit=self.hyp.bright_limit,
-                            contrast_limit=self.hyp.contrast_limit,
-                            p=self.hyp.p_bricon,
+                            **{
+                                "brightness_range" if ALBU_2_2 else "brightness_limit": self.hyp.bright_limit,
+                                "contrast_range" if ALBU_2_2 else "contrast_limit": self.hyp.contrast_limit,
+                            },
+                            p=0,
                         ),
-                        A.Sharpen(p=self.hyp.p_sharpen),
-                        A.ToGray(p=self.hyp.p_gray),
+                        A.Sharpen(p=0),
+                        A.ToGray(p=0),
                         A.RGBShift(
-                                r_shift_limit=[-10, 10],
-                                g_shift_limit=[-10, 10],
-                                b_shift_limit=[-10, 10],
-                                p=0.15,
-                            ),
+                            **{
+                                "r_shift_range" if ALBU_2_2 else "r_shift_limit": [-10, 10],
+                                "g_shift_range" if ALBU_2_2 else "g_shift_limit": [-10, 10],
+                                "b_shift_range" if ALBU_2_2 else "b_shift_limit": [-10, 10],
+                            },
+                            p=0,
+                        ),
                         A.Emboss(
-                            alpha=(0.2, 0.5), 
+                            alpha=(0.2, 0.5),
                             strength=(0.2, 0.6),
-                            p=0.2,
-                        ),    
+                            p=0,
+                        ),
                         A.FancyPCA(
-                            alpha=2, 
-                            p=0.1,
-                        ),    
+                            alpha=2,
+                            p=0,
+                        ),
                         A.ShotNoise(
                             scale_range=(0.01, 0.06),
-                            p=0.15 ,
+                            p=0,
                         ),
                         A.UnsharpMask(
-                            blur_limit=(3, 5),
-                            sigma_limit=(0.5, 1.0),
-                            p=0.1,
+                            **{
+                                "blur_range" if ALBU_2_2 else "blur_limit": (3, 5),
+                                "sigma_range" if ALBU_2_2 else "sigma_limit": (0.5, 1.0),
+                            },
+                            p=0,
                         )
                     ]
 
-                    weather_p = getattr(self.hyp, "p_imgaug_weather", 0)
+                    weather_p = 0
                     if IMGAUG_AVAILABLE and weather_p > 0:
                         try:
-                            T.append(ImgAugWeatherTransform(self.hyp,  p=weather_p))
+                            T.append(ImgAugWeatherTransform(self.hyp, p=weather_p))
                         except Exception as e:
                             LOGGER.warning(f"Failed to add ImgAug weather transforms: {e}")
 
@@ -2436,7 +2592,7 @@ class Albumentations:
                     A.Compose(
                         T,
                         bbox_params=A.BboxParams(
-                            format="yolo",
+                            **{"coord_format" if check_version(A.__version__, ">=2.0.17") else "format": "yolo"},
                             label_fields=["class_labels"],
                             min_visibility=0.5,
                             filter_invalid_bboxes=True,
@@ -2484,28 +2640,47 @@ class Albumentations:
         if self.contains_spatial:
             cls = labels["cls"]
             im = labels["img"]
+            tags = labels.get("tags", None)
             labels["instances"].convert_bbox("xywh")
             labels["instances"].normalize(*im.shape[:2][::-1])
             bboxes = labels["instances"].bboxes
 
             # Multi-task format (2D array)
-            unique_id_to_full_cls = {i: row for i, row in enumerate(cls)} 
-            cls_for_albu = list(unique_id_to_full_cls.keys())
+            inst_ids = list(range(len(bboxes)))
 
-            tf_out = self.transform(image=im, bboxes=bboxes, class_labels=cls_for_albu)
+            tf_out = self.transform(image=im, bboxes=bboxes, class_labels=inst_ids)
 
             labels["img"] = tf_out["image"]
-            # Reconstruct multi task labels
-            surviving_unique_ids = tf_out["class_labels"]
-            if surviving_unique_ids:
-                reconstructed_cls = [unique_id_to_full_cls[uid] for uid in surviving_unique_ids]
-                labels["cls"] = np.array(reconstructed_cls, dtype=cls.dtype)
+
+            surv = tf_out.get("class_labels", [])
+            surv = np.asarray(surv, dtype=np.int64).reshape(-1)
+
+            bboxes_new = np.array(tf_out.get("bboxes", []), dtype=np.float32)
+            labels["instances"].update(bboxes=bboxes_new)
+
+            # --- cls: supports 1D single-task or 2D multi-task ---
+            if len(surv):
+                labels["cls"] = cls[surv]
+                if tags is not None:
+                    t = np.asarray(tags)
+                    labels["tags"] = t[surv]
             else:
-                labels["cls"] = np.empty((0, cls.shape[1]), dtype=cls.dtype)
+                # keep shapes
+                if isinstance(cls, np.ndarray) and cls.ndim == 2:
+                    labels["cls"] = np.empty((0, cls.shape[1]), dtype=cls.dtype)
+                else:
+                    labels["cls"] = np.empty((0,), dtype=cls.dtype)
+
+                if tags is not None:
+                    t = np.asarray(tags)
+                    if t.ndim == 2:
+                        labels["tags"] = np.empty((0, t.shape[1]), dtype=t.dtype)
+                    else:
+                        labels["tags"] = np.empty((0,), dtype=t.dtype)
 
             bboxes = np.array(tf_out["bboxes"], dtype=np.float32)
             labels["instances"].update(bboxes=bboxes)
-        else: # Non-spatial transforms
+        else:  # Non-spatial transforms
             labels["img"] = self.transform(image=labels["img"])["image"]
 
         return labels
@@ -2523,7 +2698,6 @@ class Albumentations:
         lines.append(")")
 
         return "\n".join(lines)
-
 
 class Format:
     """
@@ -2605,12 +2779,12 @@ class Format:
         """
         self.bbox_format = bbox_format
         self.normalize = normalize
-        self.return_mask = return_mask  # set False when training detection only
+        self.return_mask = return_mask
         self.return_keypoint = return_keypoint
         self.return_obb = return_obb
         self.mask_ratio = mask_ratio
         self.mask_overlap = mask_overlap
-        self.batch_idx = batch_idx  # keep the batch indexes
+        self.batch_idx = batch_idx
         self.bgr = bgr
         self.n_cls_tasks = n_cls_tasks
 
@@ -2645,48 +2819,71 @@ class Format:
         """
         img = labels.pop("img")
         h, w = img.shape[:2]
+
         cls = labels.pop("cls")
         instances = labels.pop("instances")
+        tags = labels.pop("tags", None)
+
         instances.convert_bbox(format=self.bbox_format)
         instances.denormalize(w, h)
         nl = len(instances)
 
+        if cls.ndim == 1:
+            cls = cls[:, None]
+
         if self.return_mask:
             if nl:
-                masks, instances, cls = self._format_segments(instances, cls, w, h)
-                masks = torch.from_numpy(masks)
+                masks, instances, cls, sorted_idx = self._format_segments(instances, cls, w, h)
+                if tags is not None and sorted_idx is not None:
+                    tags = tags[sorted_idx]
+                labels["masks"] = torch.from_numpy(masks)
             else:
-                masks = torch.zeros(
-                    1 if self.mask_overlap else nl, img.shape[0] // self.mask_ratio, img.shape[1] // self.mask_ratio
+                labels["masks"] = torch.zeros(
+                    1 if self.mask_overlap else nl,
+                    img.shape[0] // self.mask_ratio,
+                    img.shape[1] // self.mask_ratio,
                 )
-            labels["masks"] = masks
+
         labels["img"] = self._format_img(img)
-        
+
         if nl:
-            labels["bboxes"] = torch.from_numpy(instances.bboxes.reshape(-1, 4) if instances.bboxes.ndim == 1 else instances.bboxes)
-            labels["cls"] = torch.from_numpy((cls.reshape(-1, 1) if cls.ndim == 1 else cls))
-        else: 
-            labels["bboxes"] = torch.zeros((0, 4))
-            labels["cls"] = torch.zeros((0, self.n_cls_tasks))
-            
+            b = instances.bboxes
+            labels["bboxes"] = torch.from_numpy(
+                (b.reshape(-1, 4) if b.ndim == 1 else b).astype(np.float32, copy=False)
+            )
+            labels["cls"] = torch.from_numpy(cls.astype(np.float32, copy=False))
+        else:
+            labels["bboxes"] = torch.zeros((0, 4), dtype=torch.float32)
+            labels["cls"] = torch.zeros((0, self.n_cls_tasks), dtype=torch.float32)
+
+        if tags is not None:
+            if tags.ndim == 1:
+                tags = tags[:, None]
+            labels["tags"] = torch.from_numpy(tags.astype(np.int64, copy=False)).long()
+
         if self.return_keypoint:
-            labels["keypoints"] = torch.from_numpy(instances.keypoints)
+            kpt = torch.from_numpy(instances.keypoints)
             if self.normalize:
-                labels["keypoints"][..., 0] /= w
-                labels["keypoints"][..., 1] /= h
+                kpt[..., 0] /= w
+                kpt[..., 1] /= h
+            labels["keypoints"] = kpt
+
         if self.return_obb:
             labels["bboxes"] = (
-                xyxyxyxy2xywhr(torch.from_numpy(instances.segments)) if len(instances.segments) else torch.zeros((0, 5))
+                xyxyxyxy2xywhr(torch.from_numpy(instances.segments))
+                if len(instances.segments)
+                else torch.zeros((0, 5), dtype=torch.float32)
             )
-        # NOTE: need to normalize obb in xywhr format for width-height consistency
-        if self.normalize:
+
+        if self.normalize and labels["bboxes"].numel():
             labels["bboxes"][:, [0, 2]] /= w
             labels["bboxes"][:, [1, 3]] /= h
-        # Then we can use collate_fn
+
         if self.batch_idx:
-            labels["batch_idx"] = torch.zeros(nl) 
+            labels["batch_idx"] = torch.zeros((nl,), dtype=torch.long)
+
         return labels
-    
+
     def _format_img(self, img):
         """
         Formats an image for YOLO from a Numpy array to a PyTorch tensor.
@@ -2715,8 +2912,7 @@ class Format:
             img = np.expand_dims(img, -1)
         img = img.transpose(2, 0, 1)
         img = np.ascontiguousarray(img[::-1] if random.uniform(0, 1) > self.bgr else img)
-        img = torch.from_numpy(img)
-        return img
+        return torch.from_numpy(img)
 
     def _format_segments(self, instances, cls, w, h):
         """
@@ -2742,13 +2938,10 @@ class Format:
         segments = instances.segments
         if self.mask_overlap:
             masks, sorted_idx = polygons2masks_overlap((h, w), segments, downsample_ratio=self.mask_ratio)
-            masks = masks[None]  # (640, 640) -> (1, 640, 640)
-            instances = instances[sorted_idx]
-            cls = cls[sorted_idx]
-        else:
-            masks = polygons2masks((h, w), segments, color=1, downsample_ratio=self.mask_ratio)
-
-        return masks, instances, cls
+            masks = masks[None]
+            return masks, instances[sorted_idx], cls[sorted_idx], sorted_idx
+        masks = polygons2masks((h, w), segments, color=1, downsample_ratio=self.mask_ratio)
+        return masks, instances, cls, None
 
     def __repr__(self):
         return f"Format(bbox_format={self.bbox_format}, normalize={self.normalize})"
@@ -2893,7 +3086,8 @@ class RandomLoadText:
             new_cls.append([label2ids[label]])
         labels["instances"] = labels["instances"][valid_idx]
         labels["cls"] = np.array(new_cls)
-
+        if "tags" in labels:
+            labels["tags"] = np.asarray(labels["tags"])[valid_idx]
         # Randomly select one prompt when there's more than one prompts
         texts = []
         for label in sampled_labels:
@@ -3076,7 +3270,7 @@ def crop_transforms(dataset, imgsz: int, hyp, stretch=False):
     )
 
     mosaic = Mosaic(dataset, imgsz=imgsz, p=hyp.mosaic, pre_transform=crop_or_resize)
-    pre_transform = Compose([crop_or_resize, mosaic, affine]) # , crop_albu ,affine
+    pre_transform = Compose([crop_or_resize, mosaic, affine])
     
     misc = Compose(
         [
