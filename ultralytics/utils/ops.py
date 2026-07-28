@@ -507,7 +507,7 @@ def process_mask_native(protos, masks_in, bboxes, shape):
     return masks.gt_(0.0)
 
 
-def scale_masks(masks, shape, padding=True):
+def scale_masks(masks, shape, padding=True, mode="bilinear"):
     """
     Rescale segment masks to shape.
 
@@ -527,7 +527,8 @@ def scale_masks(masks, shape, padding=True):
     bottom, right = (int(mh - pad[1]), int(mw - pad[0]))
     masks = masks[..., top:bottom, left:right]
 
-    masks = F.interpolate(masks, shape, mode="bilinear", align_corners=False)  # NCHW
+    kw = {"align_corners": False} if mode in {"bilinear", "bicubic", "linear", "trilinear"} else {}
+    masks = F.interpolate(masks, shape, mode=mode, **kw)  # NCHW
     return masks
 
 

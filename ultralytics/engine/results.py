@@ -184,6 +184,14 @@ class BaseTensor(SimpleClass):
         return self.__class__(self.data[idx], self.orig_shape)
 
 
+class SemanticMask(BaseTensor):
+    """Semantic segmentation class map for one image."""
+
+    def __len__(self) -> int:
+        """Return one semantic segmentation result per image."""
+        return 1
+
+
 class Results(SimpleClass):
     """
     A class for storing and manipulating inference results.
@@ -239,6 +247,7 @@ class Results(SimpleClass):
         obb=None,
         speed=None,
         is_track=False,
+        semantic_mask=None,
     ) -> None:
         """
         Initialize the Results class for storing and manipulating inference results.
@@ -275,11 +284,12 @@ class Results(SimpleClass):
         self.probs = Probs(probs) if probs is not None else None
         self.keypoints = Keypoints(keypoints, self.orig_shape) if keypoints is not None else None
         self.obb = OBB(obb, self.orig_shape) if obb is not None else None
+        self.semantic_mask = SemanticMask(semantic_mask, self.orig_shape) if semantic_mask is not None else None
         self.speed = speed if speed is not None else {"preprocess": None, "inference": None, "postprocess": None}
         self.names = names
         self.path = path
         self.save_dir = None
-        self._keys = "boxes", "masks", "probs", "keypoints", "obb"
+        self._keys = "boxes", "masks", "probs", "keypoints", "obb", "semantic_mask"
 
     def __getitem__(self, idx):
         """
@@ -316,7 +326,7 @@ class Results(SimpleClass):
             if v is not None:
                 return len(v)
 
-    def update(self, boxes=None, masks=None, probs=None, obb=None, is_track=False):
+    def update(self, boxes=None, masks=None, probs=None, obb=None, is_track=False, semantic_mask=None):
         """
         Updates the Results object with new detection data.
 
@@ -343,6 +353,8 @@ class Results(SimpleClass):
             self.probs = probs
         if obb is not None:
             self.obb = OBB(obb, self.orig_shape)
+        if semantic_mask is not None:
+            self.semantic_mask = SemanticMask(semantic_mask, self.orig_shape)
 
     def _apply(self, fn, *args, **kwargs):
         """
@@ -457,7 +469,7 @@ class Results(SimpleClass):
             path=self.path,
             names=self.names,
             speed=self.speed,
-            is_track=self.boxes.is_track,
+            is_track=getattr(self.boxes, "is_track", False),  # boxes is None for semantic
         )
 
     def plot(
