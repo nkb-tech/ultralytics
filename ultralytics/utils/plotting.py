@@ -585,6 +585,25 @@ class Annotator:
                 txt_color = (255, 255, 255)
             cv2.putText(self.im, text, xy, 0, self.sf, txt_color, thickness=self.tf, lineType=cv2.LINE_AA)
 
+    def semantic_mask(self, mask, alpha: float = 0.5, ignore_index: int = 255):
+        """Plot a semantic segmentation mask on the image.
+
+        Args:
+            mask (np.ndarray): Semantic mask [h, w] with integer class indices.
+            alpha (float): Mask transparency: 0.0 transparent, 1.0 opaque.
+            ignore_index (int): Class index to skip (255 = void/ignore).
+        """
+        if self.pil:
+            self.im = np.asarray(self.im).copy()
+        overlay = np.zeros_like(self.im)
+        for cls_id in np.unique(mask):
+            if cls_id == ignore_index:
+                continue
+            overlay[mask == cls_id] = colors(int(cls_id), True)
+        self.im = cv2.addWeighted(self.im, 1 - alpha, overlay, alpha, 0)
+        if self.pil:
+            self.fromarray(self.im)
+
     def fromarray(self, im):
         """Update self.im from a numpy array."""
         self.im = im if isinstance(im, Image.Image) else Image.fromarray(im)

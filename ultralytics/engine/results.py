@@ -542,6 +542,10 @@ class Results(SimpleClass):
         )
 
         # Plot Segment results
+        if self.semantic_mask is not None and show_masks:
+            sem = self.semantic_mask.data
+            annotator.semantic_mask(sem.cpu().numpy() if hasattr(sem, "cpu") else sem, alpha=0.5)
+
         if pred_masks and show_masks:
             if im_gpu is None:
                 img = LetterBox(pred_masks.shape[1:])(image=annotator.result())

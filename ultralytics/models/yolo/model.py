@@ -43,6 +43,7 @@ class YOLO(Model):
                 "model": SemanticSegmentationModel,
                 "trainer": yolo.semantic.SemanticSegmentationTrainer,
                 "validator": yolo.semantic.SemanticSegmentationValidator,
+                "predictor": yolo.semantic.SemanticSegmentationPredictor,
             },
             "segment": {
                 "model": SegmentationModel,
