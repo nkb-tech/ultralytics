@@ -1497,7 +1497,8 @@ class SemanticSegment(nn.Module):
             ch (tuple): Tuple of channel sizes from neck feature maps (P3, P4).
         """
         super().__init__()
-        self.nc = nc
+        # fork: nc may arrive as a list (multihead parse_model / yaml_model_load)
+        self.nc = nc = int(nc[0]) if isinstance(nc, (list, tuple)) else int(nc)
         self.nl = len(ch)
         self.stride = torch.zeros(self.nl)
 
