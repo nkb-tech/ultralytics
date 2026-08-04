@@ -230,6 +230,9 @@ def seed_worker(worker_id: int) -> None:
     random.seed(worker_seed)
     worker_info = torch.utils.data.get_worker_info()
     dataset_obj = worker_info.dataset
+    # ClassificationDataset builds transforms in __init__ and has no lazy path
+    if not hasattr(dataset_obj, "_hyp_for_transforms"):
+        return
     if dataset_obj.transforms is None:
         dataset_obj.transforms = dataset_obj.build_transforms(hyp=dataset_obj._hyp_for_transforms)
     if worker_id == 0:

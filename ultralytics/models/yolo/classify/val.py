@@ -53,6 +53,10 @@ class ClassificationValidator(BaseValidator):
         batch["cls"] = batch["cls"].to(self.device)
         return batch
 
+    def postprocess(self, preds):
+        """Eval-mode forward returns (out, raw); downstream code expects a tensor."""
+        return preds[0] if isinstance(preds, (list, tuple)) else preds
+
     def update_metrics(self, preds, batch):
         """Updates running metrics with model predictions and batch targets."""
         n5 = min(len(self.names[0]), 5)

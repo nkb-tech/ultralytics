@@ -1004,7 +1004,7 @@ class BaseTrainer:
                 f"ignoring 'lr0={self.args.lr0}' and 'momentum={self.args.momentum}' and "
                 f"determining best 'optimizer', 'lr0' and 'momentum' automatically... "
             )
-            nc_attr = getattr(model, "nc")
+            nc_attr = getattr(model, "nc", 10)  # ClassificationModel has no .nc
             nc = nc_attr if isinstance(nc_attr, int) else sum(nc_attr)  # number of classes
             lr_fit = round(0.002 * 5 / (4 + nc), 6)  # lr0 fit equation to 6 decimal places
             # Use MuSGD for large-scale training (YOLO26 style)

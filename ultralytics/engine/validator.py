@@ -118,7 +118,9 @@ class BaseValidator:
             model = model.half() if self.args.half else model.float()
             # self.model = model
             if isinstance(trainer.loss_items, torch.Tensor):
-                self.loss = torch.zeros_like(trainer.loss_items, device=trainer.device)
+                # single-loss tasks (classify) give a 0-d tensor; len() and slicing need 1-d
+                items = trainer.loss_items if trainer.loss_items.shape else trainer.loss_items.unsqueeze(0)
+                self.loss = torch.zeros_like(items, device=trainer.device)
             else:
                 self.loss = torch.zeros(
                     len(trainer.loss_items) - 1
@@ -214,6 +216,8 @@ class BaseValidator:
                 if self.training:
                     _, loss_items = model.loss(batch, preds)  
                     #self.loss += model.loss(batch, preds)[1]
+                    if not loss_items.shape:
+                        loss_items = loss_items.unsqueeze(0)
                     n_losses = min(len(self.loss), len(loss_items))
                     self.loss[:n_losses] += loss_items[:n_losses]
 

@@ -627,7 +627,7 @@ class ClassificationModel(BaseModel):
                 if m[i].out_channels != nc:
                     m[i] = nn.Conv2d(m[i].in_channels, nc, m[i].kernel_size, m[i].stride, bias=m[i].bias is not None)
 
-    def init_criterion(self, clf_loss_weights=None):
+    def init_criterion(self, clf_loss_weights=None, **kwargs):  # trainer passes detection kwargs
         """Initialize the loss criterion for the ClassificationModel."""
         return v8ClassificationLoss(clf_loss_weights)
 
@@ -1292,7 +1292,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 args[0] = d[args[0]]
             
             c1, c2 = ch[f], args[0]
-            if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
+            if m is Classify:
+                # parse_model wraps nc in a list for multihead; Classify needs a scalar
+                # and its output is a class count, never width-scaled
+                c2 = args[0] = c2[0] if isinstance(c2, list) else c2
+            elif c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
             if m is C2fAttn:
                 args[1] = make_divisible(min(args[1], max_channels // 2) * width, 8)  # embed channels

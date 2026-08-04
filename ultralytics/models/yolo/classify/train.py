@@ -122,6 +122,8 @@ class ClassificationTrainer(BaseTrainer):
         keys = [f"{prefix}/{x}" for x in self.loss_names]
         if loss_items is None:
             return keys
+        if not loss_items.shape:  # single loss comes as a 0-d tensor
+            loss_items = loss_items.unsqueeze(0)
         loss_items = [round(float(l_i), 5) for l_i in loss_items]
         return dict(zip(keys, loss_items))
 
