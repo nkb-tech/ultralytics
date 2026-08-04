@@ -829,7 +829,15 @@ class PolygonSemanticDataset(SemanticDataset, YOLODataset):
 
     def cache_labels(self, path: Path = Path("./labels.cache")) -> dict[str, Any]:
         """Cache polygon labels via YOLODataset to keep the 5-tuple `results` format expected by get_labels."""
-        return YOLODataset.cache_labels(self, path)
+        # fork's verify_image_label requires nc as a list (multihead); SemanticDataset.__init__
+        # unwraps it to a scalar and re-wraps only after super().__init__ returns, i.e. too late.
+        nc = self.nc
+        if not isinstance(nc, (list, tuple)):
+            self.nc = [nc]
+        try:
+            return YOLODataset.cache_labels(self, path)
+        finally:
+            self.nc = nc
 
     def load_mask(self, index: int, image_shape: tuple[int, int] | None = None) -> np.ndarray:
         """Rasterize this image's polygons into a (H, W) uint8 semantic mask, bg = self.bg_class_idx."""
