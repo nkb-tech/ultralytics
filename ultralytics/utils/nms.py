@@ -72,13 +72,15 @@ def non_max_suppression(
     if not 0 <= main_head < num_tasks:
         raise ValueError(f"main_head={main_head} is outside task head range 0-{num_tasks - 1}")
 
-    # Post-processed format: (batch, N, 4+2*num_tasks) with [x1, y1, x2, y2, conf0, cls0, ...]
-    # Already xyxy — must NOT go through BCN path (xywh2xyxy would corrupt coordinates).
-    # Disambiguate from BCN (batch, channels, anchors). Postprocessed rows have an exact
-    # compact width of 4+2*num_tasks; N may be smaller than that on sparse SAHI crops.
-    # Note: multitask end2end heads in this fork intentionally return BCN for standard multitask NMS.
+    # YOLO26-seg e2e: N rows × (6+nm) cols, not BCN.
     n_cols = prediction.shape[-1]
-    is_postprocessed = n_cols == 4 + 2 * num_tasks
+    compact = 4 + 2 * num_tasks
+    is_postprocessed = (
+        prediction.ndim == 3
+        and n_cols >= compact
+        and prediction.shape[1] <= max_det
+        and n_cols < prediction.shape[1]
+    )
 
     if is_postprocessed:
         output = []

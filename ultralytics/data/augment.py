@@ -2425,7 +2425,7 @@ class Albumentations:
         self.hyp = hyp
         self.transform = None
         self.crop_bg = crop_bg
-        assert task in ("detect", "classify", "segment", "pose"), f"Got {task}, expected yolo-like tasks."
+        assert task in ("detect", "classify", "segment", "pose", "semantic"), f"Got {task}, expected yolo-like tasks."
         self.task = task
 
         if ALBU_AVAILABLE:
@@ -2545,10 +2545,10 @@ class Albumentations:
                                 "brightness_range" if ALBU_2_2 else "brightness_limit": self.hyp.bright_limit,
                                 "contrast_range" if ALBU_2_2 else "contrast_limit": self.hyp.contrast_limit,
                             },
-                            p=0,
+                            p=self.hyp.p_bright_contrast,
                         ),
                         A.Sharpen(p=0),
-                        A.ToGray(p=0),
+                        A.ToGray(p=self.hyp.p_gray),
                         A.RGBShift(
                             **{
                                 "r_shift_range" if ALBU_2_2 else "r_shift_limit": [-10, 10],
@@ -2568,7 +2568,7 @@ class Albumentations:
                         ),
                         A.ShotNoise(
                             scale_range=(0.01, 0.06),
-                            p=0,
+                            p=self.hyp.p_shot_noise,
                         ),
                         A.UnsharpMask(
                             **{
@@ -2633,7 +2633,7 @@ class Albumentations:
             return labels
 
         if labels.get("semantic_mask") is not None:
-            # Боксов в semantic нет, а все трансформы здесь попиксельные — маску не трогаем.
+            # Pixel-only augs; do not warp the mask here.
             labels["img"] = self.transform(image=labels["img"], bboxes=[], class_labels=[])["image"]
             return labels
 
@@ -2832,17 +2832,34 @@ class Format:
             cls = cls[:, None]
 
         if self.return_mask:
+            mh, mw = img.shape[0] // self.mask_ratio, img.shape[1] // self.mask_ratio
             if nl:
                 masks, instances, cls, sorted_idx = self._format_segments(instances, cls, w, h)
                 if tags is not None and sorted_idx is not None:
                     tags = tags[sorted_idx]
                 labels["masks"] = torch.from_numpy(masks)
+                cls_tensor = torch.from_numpy(np.asarray(cls).reshape(-1))
+                if not labels["masks"].shape[0] or not cls_tensor.numel():
+                    sem_masks = torch.zeros(mh, mw)
+                elif self.mask_overlap:
+                    sem_masks = cls_tensor[labels["masks"][0].long() - 1]  # id map 1..N, bg=0
+                else:
+                    sem_masks = (labels["masks"] * cls_tensor[:, None, None]).max(0).values
+                    overlap = labels["masks"].sum(dim=0) > 1
+                    if overlap.any():
+                        weights = labels["masks"].sum(axis=(1, 2))
+                        weighted_masks = labels["masks"] * weights[:, None, None]
+                        weighted_masks[labels["masks"] == 0] = weights.max() + 1
+                        smallest_idx = weighted_masks.argmin(dim=0)
+                        sem_masks[overlap] = cls_tensor[smallest_idx[overlap]]
             else:
                 labels["masks"] = torch.zeros(
                     1 if self.mask_overlap else nl,
-                    img.shape[0] // self.mask_ratio,
-                    img.shape[1] // self.mask_ratio,
+                    mh,
+                    mw,
                 )
+                sem_masks = torch.zeros(mh, mw)
+            labels["sem_masks"] = sem_masks.float()
 
         labels["img"] = self._format_img(img)
 
@@ -3380,6 +3397,8 @@ def classify_augmentations(
     hsv_v=0.4,  # image HSV-Value augmentation (fraction)
     force_color_jitter=False,
     erasing=0.0,
+    erasing_value=0,
+    p_gray=0.5,
     interpolation="BILINEAR",
     albu_dropout_prob = 0.1,
     albu_quality_lower = 75,
@@ -3410,6 +3429,9 @@ def classify_augmentations(
         hsv_v (float): Image HSV-Value augmentation factor.
         force_color_jitter (bool): Whether to apply color jitter even if auto augment is enabled.
         erasing (float): Probability of random erasing.
+        erasing_value (int | tuple | str): Fill value for RandomErasing; pass 'random' for per-pixel noise instead
+            of a flat block, so the erased patch doesn't become its own stable "shape" cue.
+        p_gray (float): Probability of converting the sample to grayscale (3-channel).
         interpolation (str): Interpolation method of either 'NEAREST', 'BILINEAR' or 'BICUBIC'.
 
         albu_dropout_prob: PixelDropout probability
@@ -3430,6 +3452,26 @@ def classify_augmentations(
     """
     # Transforms to apply if Albumentations not installed
     import torchvision.transforms as T  # scope for faster 'import ultralytics'
+    import torchvision.transforms.functional as TF
+
+    class RandomErasingUniform(T.RandomErasing):
+        """RandomErasing that fills the erased patch with *bounded* per-pixel noise.
+
+        torchvision's ``RandomErasing(value="random")`` fills with
+        ``torch.empty(...).normal_()`` (unbounded standard-normal noise), which can
+        land far outside the image's actual value range (e.g. [-4, 4] vs [0, 1]).
+        That breaks the naive de-normalize heuristic used by ``plot_images``
+        (``if images[0].max() <= 1: images *= 255``) and feeds the network patches
+        with an out-of-distribution value range. This variant draws uniform noise
+        in [0, 1] instead, so it stays "noisy" without the unbounded outliers.
+        """
+
+        def forward(self, img):
+            if torch.rand(1).item() >= self.p:
+                return img
+            i, j, h, w, _ = self.get_params(img, scale=self.scale, ratio=self.ratio, value=[0])
+            v = torch.rand(img.shape[-3], h, w, dtype=img.dtype, device=img.device)
+            return TF.erase(img, i, j, h, w, v, self.inplace)
 
     if not isinstance(size, int):
         raise TypeError(f"classify_transforms() size {size} must be integer, not (list, tuple)")
@@ -3495,10 +3537,12 @@ def classify_augmentations(
     final_tfl = [
         # T.RandomChoice([RandomGlitche(p=1), Albumentations(p=1., task='classify', args=albu_args)], p=[1,1]),
         #T.RandomApply([RandomGlitche(p=1)], p=0.5),
-        T.RandomApply([T.Grayscale(num_output_channels=3)], p=0.5),
+        T.RandomApply([T.Grayscale(num_output_channels=3)], p=p_gray),
         T.ToTensor(),
         T.Normalize(mean=torch.tensor(mean), std=torch.tensor(std)),
-        T.RandomErasing(p=erasing, inplace=True),
+        RandomErasingUniform(p=erasing, inplace=True)
+        if erasing_value == "random"
+        else T.RandomErasing(p=erasing, value=erasing_value, inplace=True),
     ]
 
     return T.Compose(primary_tfl + secondary_tfl + final_tfl)

@@ -1,37 +1,0 @@
-Ultralytics 8.3.6 🚀 Python-3.12.3 torch-2.13.0+cu130 CUDA:0 (NVIDIA GeForce RTX 4090 D, 48508MiB)
-YOLO26n-sem summary (fused): 174 layers, 1,627,822 parameters, 0 gradients, 4.3 GFLOPs
-
-Dataset 'cityscapes8.yaml' images not found ⚠️, missing path '/home/dimaal/work/sem/datasets/cityscapes8/images/val'
-Downloading https://ultralytics.com/assets/cityscapes8.zip to '/home/dimaal/work/sem/datasets/cityscapes8.zip'...
-  0%|          | 0.00/16.7M [00:00<?, ?B/s]  1%|          | 128k/16.7M [00:00<00:15, 1.15MB/s]  4%|▎         | 640k/16.7M [00:00<00:05, 3.35MB/s] 15%|█▍        | 2.50M/16.7M [00:00<00:01, 10.3MB/s] 52%|█████▏    | 8.62M/16.7M [00:00<00:00, 30.0MB/s] 72%|███████▏  | 12.0M/16.7M [00:00<00:00, 27.7MB/s] 93%|█████████▎| 15.6M/16.7M [00:00<00:00, 30.1MB/s]100%|██████████| 16.7M/16.7M [00:00<00:00, 25.6MB/s]
-Unzipping /home/dimaal/work/sem/datasets/cityscapes8.zip to /home/dimaal/work/sem/datasets/cityscapes8...:   0%|          | 0/23 [00:00<?, ?file/s]Unzipping /home/dimaal/work/sem/datasets/cityscapes8.zip to /home/dimaal/work/sem/datasets/cityscapes8...: 100%|██████████| 23/23 [00:00<00:00, 385.87file/s]
-Dataset download success ✅ (1.8s), saved to [1m/home/dimaal/work/sem/datasets[0m
-
-[34m[1mval: [0mScanning /home/dimaal/work/sem/datasets/cityscapes8/masks/val...:   0%|          | 0/4 [00:00<?, ?it/s][34m[1mval: [0mScanning /home/dimaal/work/sem/datasets/cityscapes8/masks/val... 4 images, 0 missing masks, 0 corrupt: 100%|██████████| 4/4 [00:00<00:00, 85.32it/s]
-[34m[1mval: [0mNew cache created: /home/dimaal/work/sem/datasets/cityscapes8/masks/val.cache
-[34m[1mTransforms: [0mCompose(LetterBox(new_shape=(512, 512), auto=False, scaleFill=False, scaleup=False, center=True, stride=32), Format(bbox_format=xywh, normalize=True))
-                 Class     Images     Pixels       mIoU     PixAcc:   0%|          | 0/1 [00:00<?, ?it/s]                 Class     Images     Pixels       mIoU     PixAcc: 100%|██████████| 1/1 [00:00<00:00,  1.72it/s]                 Class     Images     Pixels       mIoU     PixAcc: 100%|██████████| 1/1 [00:00<00:00,  1.72it/s]
-                   all          4     488963      0.521      0.933
-                  road          4     200379      0.984      0.995
-              sidewalk          4      27509      0.806      0.901
-              building          4     104470      0.847      0.916
-                  wall          2        437      0.685      0.716
-                 fence          4       6075      0.206      0.252
-                  pole          4       5955      0.286      0.413
-         traffic light          3        774       0.52      0.629
-          traffic sign          4       6183      0.725      0.825
-            vegetation          4      95522       0.87      0.925
-               terrain          2       2676      0.352      0.795
-                   sky          4      19603      0.919      0.952
-                person          3       1848      0.331      0.392
-                 rider          1         51          0          0
-                   car          4      17266      0.796      0.944
-                 truck          0          0          0          0
-                   bus          0          0          0          0
-                 train          0          0          0          0
-            motorcycle          2        117          0          0
-               bicycle          1         98          0          0
-Speed: 2.9ms preprocess, 32.3ms inference, 0.0ms loss, 2.6ms postprocess per image
-Results saved to [1m/home/dimaal/work/sem/fork/runs/semantic/val4[0m
-💡 Learn more at https://docs.ultralytics.com/modes/val
-[34m[1mVS Code:[0m view Ultralytics VS Code Extension ⚡ at https://docs.ultralytics.com/integrations/vscode

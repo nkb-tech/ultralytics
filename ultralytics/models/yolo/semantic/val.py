@@ -1,14 +1,5 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
-"""Semantic segmentation validator, backported from upstream 8.4.104.
-
-Fork adaptations (see docs/backport/api-drift.md):
-  - BaseValidator.__init__ takes `pbar` as the third positional arg.
-  - DetectionValidator.preprocess() indexes batch["cls"]/["bboxes"], absent here -> own impl.
-  - DetectionValidator.print_results() is multihead (self.metrics[i]) -> own impl.
-  - BaseValidator has no get_dataset(); add_polygon_background is applied in build_dataset().
-  - ConfusionMatrix has an incompatible signature in the fork -> disabled for semantic.
-  - plot_images() uses the old positional signature -> plotting disabled for now.
-"""
+"""Semantic segmentation validator, backported from upstream 8.4.104."""
 
 from pathlib import Path
 
@@ -47,7 +38,7 @@ class SemanticSegmentationValidator(DetectionValidator):
     def init_metrics(self, model):
         """Initialize metrics with model class names."""
         names = getattr(model, "names", None) or self.data.get("names", {})
-        if isinstance(names, (list, tuple)):  # fork stores multihead names as a list of dicts
+        if isinstance(names, (list, tuple)):
             names = names[0]
         self.names = names
         self.nc = len(self.names)
@@ -62,7 +53,7 @@ class SemanticSegmentationValidator(DetectionValidator):
             self.results_dir.mkdir(parents=True, exist_ok=True)
 
     def preprocess(self, batch):
-        """Move images and masks to device (no bbox/cls keys in semantic batches)."""
+        """Move images and masks to device."""
         batch["img"] = batch["img"].to(self.device, non_blocking=True)
         batch["img"] = (batch["img"].half() if self.args.half else batch["img"].float()) / 255
         batch["semantic_mask"] = batch["semantic_mask"].to(self.device, dtype=torch.int32)
@@ -70,10 +61,10 @@ class SemanticSegmentationValidator(DetectionValidator):
         return batch
 
     def postprocess(self, preds):
-        """Convert logits or baked class maps to per-pixel class predictions."""
+        """Logits [B,C,H,W] or class map [B,H,W] → per-pixel class ids."""
         if isinstance(preds, (tuple, list)):
             preds = preds[0]
-        if preds.ndim == 3:  # [B, H, W] class map, argmax already baked in
+        if preds.ndim == 3:
             if tuple(preds.shape[-2:]) != self._semantic_target_shape:
                 preds = F.interpolate(preds[:, None].float(), size=self._semantic_target_shape, mode="nearest")[:, 0]
             return preds.to(torch.int32)
@@ -116,7 +107,6 @@ class SemanticSegmentationValidator(DetectionValidator):
         self.metrics.speed = self.speed
 
     def check_stats(self, stats):
-        """No-op: semantic stats need no validation."""
         return stats
 
     def get_desc(self):
@@ -138,7 +128,7 @@ class SemanticSegmentationValidator(DetectionValidator):
             LOGGER.info(f"Semantic prediction masks saved to {self.results_dir}")
 
     def plot_val_samples(self, batch, ni):
-        """Disabled: fork's plot_images() has an incompatible signature for semantic masks."""
+        pass
 
     def plot_predictions(self, batch, preds, ni):
-        """Disabled: fork's plot_images() has an incompatible signature for semantic masks."""
+        pass

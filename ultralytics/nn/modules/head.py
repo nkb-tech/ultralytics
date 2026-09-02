@@ -118,6 +118,8 @@ class Detect(nn.Module):
         self.no = self.reg_max * 4 + sum(nc) + self.embed_dim
         self.stride = torch.zeros(self.nl)  # strides computed during build
         self._end2end = end2end
+        if end2end:
+            self.head_mode = "efficient"  # YOLO26 DWConv cls; required for yolo26s-seg.pt transfer
         self._hierarchical = hierarchical and len(nc) > 1
         if hierarchy_parent_heads is None:
             hierarchy_parent_heads = [-1] + list(range(len(nc) - 1))
@@ -129,8 +131,7 @@ class Detect(nn.Module):
         c2 = max((16, ch[0] // 4, self.reg_max * 4))
         c3 = [max(ch[0], min(nc_i, 100)) for nc_i in nc]
 
-        # Build box regression head (cv2)
-        self.cv2 = nn.ModuleList(self._make_head(self.head_mode, x, c2, 4 * self.reg_max) for x in ch)
+        self.cv2 = nn.ModuleList(self._make_head("legacy", x, c2, 4 * self.reg_max) for x in ch)  # box head stays Conv
 
         # Build classification heads (cv3) - nested: outer=tasks, inner=scales
         self.cv3 = nn.ModuleList(

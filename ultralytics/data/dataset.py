@@ -324,7 +324,7 @@ class YOLODataset(BaseDataset):
         for k in keys:
             vals = [b.get(k) for b in batch]
 
-            if k == "img":
+            if k in {"img", "sem_masks", "semantic_mask"}:
                 new_batch[k] = torch.stack(vals, 0)
             elif k in {"masks", "keypoints", "bboxes", "cls", "segments", "obb", "tags"}:
                 # some entries may be missing tags -> treat as empty
@@ -574,23 +574,19 @@ class SemanticDataset(YOLODataset):
             data (dict): Dataset configuration dictionary.
             **kwargs (Any): Additional keyword arguments for the parent class.
         """
-        # fork wraps data["nc"] in a list for multihead detection; semantic needs a scalar.
-        # Shallow copy keeps the shared dict (used by trainer/validator) untouched.
         if data is not None and isinstance(data.get("nc"), (list, tuple)):
-            data = {**data, "nc": data["nc"][0]}
+            data = {**data, "nc": data["nc"][0]}  # fork multihead list → scalar
         self.data = data or {}
         self.label_mapping = self._parse_label_mapping(self.data.get("label_mapping"))
         self.mask_files = []
         self.include_class = None
         super().__init__(*args, data=data, **kwargs)
-        # fork's YOLODataset.build_transforms() does len(self.nc) for multihead; keep it a list
-        # while self.data["nc"] stays scalar for the semantic code paths.
         if not isinstance(self.nc, (list, tuple)):
-            self.nc = [self.nc]
+            self.nc = [self.nc]  # YOLODataset.build_transforms uses len(nc)
 
     @staticmethod
     def collate_fn(batch):
-        """Collate semantic batches: fork's YOLODataset.collate_fn requires batch_idx/cls, absent here."""
+        """Collate without batch_idx/cls (parent collate needs them)."""
         new_batch = {}
         for k in batch[0]:
             values = [b[k] for b in batch]
@@ -747,10 +743,15 @@ class SemanticDataset(YOLODataset):
 
     def build_transforms(self, hyp=None):
         """Build transforms for semantic segmentation."""
-        # Форковые Mosaic/RandomPerspective/Albumentations не знают про semantic_mask и падают
-        # на пустом cls (Albumentations: cls.shape[1]). До переноса mask-aware версий собираем
-        # val-ветку (LetterBox + SemanticFormat) и для train.
-        # TODO: mask-aware аугментации — вернуть augment-ветку после переноса.
+        if hyp is not None:
+            for key, forced in (("mosaic", 0.0), ("mixup", 0.0), ("copy_paste", 0.0), ("cutmix", 0.0)):
+                cur = float(getattr(hyp, key, 0) or 0)
+                if cur > 0:
+                    LOGGER.warning(
+                        f"SemanticDataset: forcing {key}=0 (was {cur}); "
+                        f"this mix aug does not update semantic_mask."
+                    )
+                    setattr(hyp, key, forced)
         transforms = super().build_transforms(hyp)
         transforms[-1] = SemanticFormat()
         return transforms
@@ -815,8 +816,6 @@ class PolygonSemanticDataset(SemanticDataset, YOLODataset):
             data (dict): Dataset configuration dictionary.
             **kwargs (Any): Additional keyword arguments for the parent class.
         """
-        # fork wraps data["nc"] in a list for multihead detection; semantic needs a scalar.
-        # Shallow copy keeps the shared dict (used by trainer/validator) untouched.
         if data is not None and isinstance(data.get("nc"), (list, tuple)):
             data = {**data, "nc": data["nc"][0]}
         nc = (data or {}).get("nc") or len((data or {}).get("names", {}))
@@ -828,10 +827,8 @@ class PolygonSemanticDataset(SemanticDataset, YOLODataset):
         return YOLODataset.get_labels(self)
 
     def cache_labels(self, path: Path = Path("./labels.cache")) -> dict[str, Any]:
-        """Cache polygon labels via YOLODataset to keep the 5-tuple `results` format expected by get_labels."""
-        # fork's verify_image_label requires nc as a list (multihead); SemanticDataset.__init__
-        # unwraps it to a scalar and re-wraps only after super().__init__ returns, i.e. too late.
-        nc = self.nc
+        """Cache polygon labels (YOLODataset 5-tuple `results`)."""
+        nc = self.nc  # verify_image_label needs list nc; unwrap happens in SemanticDataset.__init__
         if not isinstance(nc, (list, tuple)):
             self.nc = [nc]
         try:
@@ -848,10 +845,8 @@ class PolygonSemanticDataset(SemanticDataset, YOLODataset):
         if cls is None or len(cls) == 0 or len(segments) == 0:
             return np.full((h, w), self.bg_class_idx, dtype=np.uint8)
 
-        # Denormalize polygons (stored as normalized xy) to pixel coordinates at (h, w).
         scale = np.array([w, h], dtype=np.float32)
         polys = [np.asarray(s, dtype=np.float32).reshape(-1, 2) * scale for s in segments]
-        # Returns (H, W) instance index map: 0 = no polygon, 1..N = sorted instance index.
         inst, sorted_idx = polygons2masks_overlap((h, w), polys, downsample_ratio=1)
         out = np.full((h, w), self.bg_class_idx, dtype=np.uint8)
         fg = inst > 0
@@ -954,7 +949,10 @@ class ClassificationDataset:
                 hflip=args.fliplr,
                 vflip=args.flipud,
                 erasing=args.erasing,
+                erasing_value=getattr(args, "erasing_value", 0),
+                p_gray=getattr(args, "p_gray_classify", 0.5),
                 auto_augment=args.auto_augment,
+                force_color_jitter=getattr(args, "force_color_jitter", False),
                 hsv_h=args.hsv_h,
                 hsv_s=args.hsv_s,
                 hsv_v=args.hsv_v,

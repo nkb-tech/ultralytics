@@ -7,6 +7,7 @@
 # Parameters
 nc: [80] # number of classes (list format for multihead support)
 end2end: True # whether to use end-to-end mode
+legacy: false # YOLO26 cls = DWConv
 reg_max: 1 # DFL bins
 scales: # model compound scaling constants, i.e. 'model=yolo26n-seg.yaml' will call yolo26-seg.yaml with scale 'n'
   # [depth, width, max_channels]

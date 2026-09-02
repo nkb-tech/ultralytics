@@ -719,8 +719,20 @@ class BaseTrainer:
     def read_results_csv(self):
         """Read results.csv into a dict using pandas."""
         import pandas as pd  # scope for faster 'import ultralytics'
+        from io import StringIO
 
-        return {k.strip(): v for k, v in pd.read_csv(self.csv).to_dict(orient="list").items()}
+        path = Path(self.csv)
+        if not path.exists():
+            return {}
+        raw = path.read_bytes().replace(b"\x00", b"")  # truncated csv after crash
+        lines = [ln for ln in raw.decode("utf-8", errors="replace").splitlines() if ln.strip()]
+        if not lines:
+            return {}
+        nfields = len(lines[0].split(","))
+        keep = [lines[0]] + [ln for ln in lines[1:] if len(ln.split(",")) == nfields]
+        if len(keep) != len(lines):
+            path.write_text("\n".join(keep) + "\n")
+        return {k.strip(): v for k, v in pd.read_csv(StringIO("\n".join(keep))).to_dict(orient="list").items()}
 
     def save_model(self):
         """Save model training checkpoints with additional metadata."""

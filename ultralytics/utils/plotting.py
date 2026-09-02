@@ -953,14 +953,10 @@ class Annotator:
         cv2.line(self.im, center_point, center_bbox, color, self.tf)
 
 class ValidatorPlotter:
-    """
-    Класс для отрисовки результатов валидации.
-    Управляет созданием и сохранением изображений с GT и preds,
-    включая агрегированную обработку для SAHI (Sliced Aided Hyper Inference).
-    """
+    """Val GT/pred plots, including SAHI cache aggregation."""
 
     def __init__(self, save_dir, names, nc, on_plot=None, sahi_enabled=False, dataloader=None, max_det=300):
-        """Инициализация плоттера."""
+        """Initialize plotter."""
         self.save_dir = Path(save_dir)
         self.names = names
         self.nc = nc
@@ -973,7 +969,7 @@ class ValidatorPlotter:
         self._pred_samples_cache = {}
 
     def plot_val_samples(self, batch, ni):
-        """Отрисовка сэмплов с Ground Truth метками."""
+        """Plot GT samples."""
         if self.sahi_enabled:
             original_img_idx = batch.get('original_img_idx', [])
             if original_img_idx and self.dataloader:
@@ -998,7 +994,7 @@ class ValidatorPlotter:
         )
 
     def plot_predictions(self, batch, preds, ni):
-        """Отрисовка предсказаний модели."""
+        """Plot predictions."""
         if self.sahi_enabled:
             original_img_idx = batch.get('original_img_idx', [])
             if original_img_idx and self.dataloader:
@@ -1024,10 +1020,7 @@ class ValidatorPlotter:
         )
 
     def plot_sahi_results(self):
-        """
-        Отрисовка полных изображений для SAHI, используя закэшированные данные
-        о предсказаниях и метках.
-        """
+        """Plot full SAHI images from cache."""
         if not self.sahi_enabled or not self._sahi_plot_cache:
             return
 
@@ -1036,7 +1029,7 @@ class ValidatorPlotter:
         self._plot_sahi_from_cache(plot_preds=True)
 
     def _plot_sahi_from_cache(self, plot_preds=True):
-        """Вспомогательная функция для отрисовки GT или предсказаний из кэша SAHI."""
+        """Plot GT or preds from SAHI cache."""
         import torch
         import torch.nn.functional as F
         
@@ -1045,7 +1038,7 @@ class ValidatorPlotter:
             return
 
         images_list, paths_list, all_targets, all_masks = [], [], [], []
-        batch_indices_for_masks = []  # Трекинг batch индексов для масок
+        batch_indices_for_masks = []
         target_size = None
         has_masks = False
 
@@ -1088,7 +1081,7 @@ class ValidatorPlotter:
                         size=(target_size[1], target_size[0]),
                         mode='nearest'
                     )[0]
-                    # Добавляем каждую маску отдельно с её batch индексом
+                    # one mask per batch index
                     for m in masks_resized:
                         all_masks.append(m.cpu().numpy())
                         batch_indices_for_masks.append(idx)
@@ -1130,7 +1123,7 @@ class ValidatorPlotter:
         masks_for_plot = None
         if has_masks and all_masks:
             try:
-                # Stack masks - все должны быть одинакового размера (target_size)
+                # Stack masks (same target_size)
                 masks_for_plot = np.stack(all_masks, axis=0)
             except ValueError as e:
                 LOGGER.warning(f"Could not stack masks for plotting: {e}. Skipping mask visualization.")
@@ -1357,7 +1350,7 @@ def plot_images(
     max_subplots: int = 16,
     save: bool = True,
     conf_thres: float = 0.25,
-    show_all_tasks: bool = False,  # НОВЫЙ ПАРАМЕТР: показывать все задачи или только лучшую
+    show_all_tasks: bool = False,
 ) -> Optional[np.ndarray]:
     """
     Plot image grid with labels, bounding boxes, masks, and keypoints.
@@ -1397,8 +1390,8 @@ def plot_images(
     bs, _, h, w = images.shape  # batch size, _, height, width
     bs = min(bs, max_subplots)  # limit plot images
     ns = np.ceil(bs**0.5)  # number of subplots (square)
-    if np.max(images[0]) <= 1:
-        images *= 255  # de-normalise (optional)
+    if np.percentile(images[0], 99) <= 1:
+        images *= 255  # p99 so one noisy pixel cannot skip denorm
 
     # Build Image
     mosaic = np.full((int(ns * h), int(ns * w), 3), 255, dtype=np.uint8)  # init

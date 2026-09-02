@@ -1313,6 +1313,7 @@ class v8SegmentationLoss(v8DetectionLoss):
         )
         self.overlap = model.args.overlap_mask
         self.bcedice_loss = BCEDiceLoss(weight_bce=0.5, weight_dice=0.5)
+        self.mask_edge = float(getattr(model.args, "mask_edge", 0.0))  # 0 = BCE only
 
     def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate and return the combined loss for detection and segmentation."""
@@ -1346,6 +1347,7 @@ class v8SegmentationLoss(v8DetectionLoss):
                 proto,
                 pred_masks,
                 imgsz,
+                batch["cls"],
             )
             if pred_semseg is not None:
                 sem_masks = batch["sem_masks"].to(self.device)
@@ -1373,13 +1375,38 @@ class v8SegmentationLoss(v8DetectionLoss):
         return loss.sum() * batch_size, loss.detach()
 
     @staticmethod
+    def sobel_y(x: torch.Tensor) -> torch.Tensor:
+        """Sobel-y on (n, h, w) masks."""
+        x = x.unsqueeze(1)
+        ky = x.new_tensor(
+            [
+                [-1.0, -2.0, -1.0],
+                [0.0, 0.0, 0.0],
+                [1.0, 2.0, 1.0],
+            ]
+        ).view(1, 1, 3, 3)
+        return F.conv2d(x, ky, padding=1).abs().squeeze(1)
+
     def single_mask_loss(
-        gt_mask: torch.Tensor, pred: torch.Tensor, proto: torch.Tensor, xyxy: torch.Tensor, area: torch.Tensor
+        self,
+        gt_mask: torch.Tensor,
+        pred: torch.Tensor,
+        proto: torch.Tensor,
+        xyxy: torch.Tensor,
+        area: torch.Tensor,
+        inst_cls: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute the instance segmentation loss for a single image."""
+        """BCE mask loss; optional Sobel-y on Sky (cls==0)."""
         pred_mask = torch.einsum("in,nhw->ihw", pred, proto)
-        loss = F.binary_cross_entropy_with_logits(pred_mask, gt_mask, reduction="none")
-        return (crop_mask(loss, xyxy).mean(dim=(1, 2)) / area).sum()
+        bce = F.binary_cross_entropy_with_logits(pred_mask, gt_mask, reduction="none")
+        bce = (crop_mask(bce, xyxy).mean(dim=(1, 2)) / area).sum()
+        if self.mask_edge <= 0:
+            return bce
+        edge = (self.sobel_y(pred_mask.sigmoid()) - self.sobel_y(gt_mask)).abs()
+        edge = crop_mask(edge, xyxy).mean(dim=(1, 2))
+        if inst_cls is not None:
+            edge = edge * (inst_cls.view(-1) == 0).to(edge.dtype)
+        return bce + self.mask_edge * edge.sum()
 
     def calculate_segmentation_loss(
         self,
@@ -1391,6 +1418,7 @@ class v8SegmentationLoss(v8DetectionLoss):
         proto: torch.Tensor,
         pred_masks: torch.Tensor,
         imgsz: torch.Tensor,
+        gt_cls: torch.Tensor,
     ) -> torch.Tensor:
         """Calculate the loss for instance segmentation."""
         _, _, mask_h, mask_w = proto.shape
@@ -1400,6 +1428,8 @@ class v8SegmentationLoss(v8DetectionLoss):
         marea = xyxy2xywh(target_bboxes_normalized)[..., 2:].prod(2).clamp_(min=1e-6)
         mxyxy = target_bboxes_normalized * torch.tensor([mask_w, mask_h, mask_w, mask_h], device=proto.device)
         n_max_boxes = self.assigner.n_max_boxes
+        cls_flat = gt_cls.view(-1).to(self.device)
+        bidx = batch_idx.view(-1).to(self.device)
 
         for i, single_i in enumerate(zip(fg_mask, target_gt_idx, pred_masks, proto, mxyxy, marea, masks)):
             fg_mask_i, target_gt_idx_i, pred_masks_i, proto_i, mxyxy_i, marea_i, masks_i = single_i
@@ -1411,10 +1441,16 @@ class v8SegmentationLoss(v8DetectionLoss):
                     gt_mask = masks_i == (mask_idx + 1).view(-1, 1, 1)
                     gt_mask = gt_mask.float()
                 else:
-                    gt_mask = masks[batch_idx.view(-1) == i][mask_idx]
+                    gt_mask = masks[bidx == i][mask_idx]
+                inst_cls = cls_flat[bidx == i][mask_idx]
 
                 loss += self.single_mask_loss(
-                    gt_mask, pred_masks_i[fg_mask_i], proto_i, mxyxy_i[fg_mask_i], marea_i[fg_mask_i]
+                    gt_mask,
+                    pred_masks_i[fg_mask_i],
+                    proto_i,
+                    mxyxy_i[fg_mask_i],
+                    marea_i[fg_mask_i],
+                    inst_cls,
                 )
             else:
                 loss += (proto * 0).sum() + (pred_masks * 0).sum()
@@ -1907,8 +1943,9 @@ class SemanticSegmentationLoss(nn.Module):
         else:
             self.ce = nn.CrossEntropyLoss(ignore_index=255, reduction="sum").to(device=self.device, dtype=self.dtype)
             if weight is not None:
-                # Non-persistent: weight is a deterministic constant, no need to serialize into ckpt state_dict.
                 self.ce.register_buffer("weight", weight, persistent=False)
+        self.dice_gain = float(getattr(model, "dice_gain", 1.0))
+        self.focal_gamma = float(getattr(model, "focal_gamma", 0.0))  # 0 = plain CE
 
     def _resize_masks(self, masks, target_shape):
         """Resize masks to match prediction spatial dimensions."""
@@ -1919,17 +1956,33 @@ class SemanticSegmentationLoss(nn.Module):
         return masks
 
     def _ce_loss(self, preds, masks, valid):
-        """Compute cross-entropy on flattened pixels to avoid the CUDA nll_loss2d path."""
+        """Compute CE or Focal-CE on flattened pixels to avoid the CUDA nll_loss2d path."""
         flat = masks.reshape(-1)
         if self.nc == 1:
             logits = preds.reshape(-1)[valid]
             target = flat[valid].float()
             denominator = valid.sum()
+            return self.ce(logits, target) / denominator.clamp_min(1)
+
+        logits = preds.permute(0, 2, 3, 1).reshape(-1, self.nc)[valid]
+        target = flat.long()[valid]
+        weight = getattr(self.ce, "weight", None)
+
+        if self.focal_gamma <= 0:
+            denominator = target.new_tensor(target.numel(), dtype=torch.float32) if weight is None else weight[target].sum()
+            return self.ce(logits, target) / denominator.clamp_min(1)
+
+        log_p = F.log_softmax(logits.float(), dim=1)
+        log_pt = log_p.gather(1, target[:, None]).squeeze(1)
+        pt = log_pt.exp()
+        ce = -log_pt
+        if weight is not None:
+            ce = ce * weight[target]
+            denominator = weight[target].sum()
         else:
-            logits = preds.permute(0, 2, 3, 1).reshape(-1, self.nc)
-            target = flat.long()
-            denominator = valid.sum() if self.ce.weight is None else self.ce.weight[target[valid]].sum()
-        return self.ce(logits, target) / denominator.clamp_min(1)
+            denominator = ce.new_tensor(float(target.numel()))
+        loss = ((1.0 - pt).clamp_min(0.0) ** self.focal_gamma) * ce
+        return (loss.sum() / denominator.clamp_min(1)).to(preds.dtype)
 
     def _dice_loss(self, preds, masks, valid):
         """Compute Dice loss excluding ignore pixels."""
@@ -1969,7 +2022,6 @@ class SemanticSegmentationLoss(nn.Module):
             (tuple[torch.Tensor, dict[str, torch.Tensor]]): Total loss * batch_size and a dict of detached loss items
                 (ce_loss, dice_loss, aux_loss).
         """
-        # Unpack auxiliary logits when present.
         aux_logits = None
         if isinstance(preds, tuple):
             preds, aux_logits = preds
@@ -1982,9 +2034,9 @@ class SemanticSegmentationLoss(nn.Module):
         # Main cross-entropy and Dice loss.
         ce_loss = self._ce_loss(preds, masks, valid)
         dice_loss = self._dice_loss(preds, masks, valid)
-        total = ce_loss + dice_loss
+        total = ce_loss + self.dice_gain * dice_loss
 
-        # Auxiliary cross-entropy loss. Match ce_loss dtype so adding to total succeeds under AMP.
+        # Auxiliary CE. Match ce_loss dtype for AMP.
         aux_loss = torch.tensor(0.0, device=preds.device, dtype=ce_loss.dtype)
         if aux_logits is not None:
             if aux_logits.shape[2:] != masks.shape[1:]:
@@ -1992,9 +2044,7 @@ class SemanticSegmentationLoss(nn.Module):
             aux_loss = self._ce_loss(aux_logits, masks, valid) * 0.4
             total += aux_loss
 
-        # Форк 8.3.6: BaseTrainer/BaseValidator ждут ТЕНЗОР loss_items, не dict (upstream 8.4.x умеет dict).
-        # Порядок должен совпадать с SemanticSegmentationTrainer.loss_names.
-        loss_items = torch.stack([ce_loss.detach(), dice_loss.detach(), aux_loss.detach()])
+        loss_items = torch.stack([ce_loss.detach(), dice_loss.detach(), aux_loss.detach()])  # tensor, order = loss_names
         return total * preds.shape[0], loss_items
 class E2ELoss:
     """Criterion class for computing training losses for end-to-end detection with decay schedule."""
